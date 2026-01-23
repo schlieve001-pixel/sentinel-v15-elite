@@ -1,0 +1,18 @@
+# --- WHITELIST MODE ---
+# 1. Ignore EVERYTHING by default
+*
+
+# 2. Allow only these folders
+!sentinel_federation/
+!sentinel_federation/**
+
+# 3. Allow only these specific scripts
+!sentinel_squad_monitor.py
+!sentinel_dashboard.py
+!install_v15.py
+!.gitignore
+
+# 4. BUT still hide the secrets inside the allowed folder
+sentinel_federation/data/journal.json
+sentinel_federation/data/ledger.csv
+__pycache__/
