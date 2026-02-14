@@ -1,0 +1,15 @@
+# VeriFuse TITAN — Reverse Proxy Configuration
+# Caddy auto-provisions HTTPS via Let's Encrypt for each subdomain.
+# ISOLATION: Only these three subdomains are served. No catch-all.
+
+app.verifuse.tech {
+    reverse_proxy localhost:8000
+}
+
+judge.verifuse.tech {
+    reverse_proxy localhost:8001
+}
+
+vault.verifuse.tech {
+    reverse_proxy localhost:8002
+}

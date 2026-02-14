@@ -1,18 +1,66 @@
-# --- WHITELIST MODE ---
-# 1. Ignore EVERYTHING by default
-*
-
-# 2. Allow only these folders
-!sentinel_federation/
-!sentinel_federation/**
-
-# 3. Allow only these specific scripts
-!sentinel_squad_monitor.py
-!sentinel_dashboard.py
-!install_v15.py
-!.gitignore
-
-# 4. BUT still hide the secrets inside the allowed folder
-sentinel_federation/data/journal.json
-sentinel_federation/data/ledger.csv
+# Python
 __pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Data files (not tracked)
+*.db
+*.db-wal
+*.db-shm
+*.pdf
+*.jsonl
+verifuse_v2/data/
+verifuse/data/
+
+# Environment / secrets
+.env
+*.env.local
+.env.production
+
+# Logs
+*.log
+api.log
+server.log
+
+# Binary / tools
+sqlite3
+
+# Archives
+_ARCHIVE_FEB_2026/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Build artifacts
+*.bak
+
+# Generated documents
+verifuse/output/
+*.docx
+
+# V1 legacy / files with embedded secrets
+verifuse/.env
+verifuse/verifuse_bridge.py
+verifuse/fix_empire.py
+verifuse/flash_motherboard.py
+verifuse/deploy_maps.py
+verifuse/deploy_gate.py
+fix_adams_final.py
+force_import.py
+patch_ua.py
+renaissance_lab/

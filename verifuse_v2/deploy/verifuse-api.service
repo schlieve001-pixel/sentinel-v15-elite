@@ -1,0 +1,28 @@
+# VERIFUSE API — systemd service
+# Install: sudo cp verifuse-api.service /etc/systemd/system/
+#          sudo systemctl enable verifuse-api
+#          sudo systemctl start verifuse-api
+
+[Unit]
+Description=VeriFuse V2 API Server
+After=network.target
+
+[Service]
+Type=simple
+User=schlieve001
+WorkingDirectory=/home/schlieve001/origin/continuity_lab
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/uvicorn verifuse_v2.server.api:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+# Environment — set these before production launch
+Environment=VERIFUSE_JWT_SECRET=CHANGE_ME_IN_PRODUCTION
+Environment=STRIPE_SECRET_KEY=
+Environment=STRIPE_WEBHOOK_SECRET=
+Environment=STRIPE_PRICE_RECON=
+Environment=STRIPE_PRICE_OPERATOR=
+Environment=STRIPE_PRICE_SOVEREIGN=
+Environment=VERIFUSE_BASE_URL=https://verifuse.tech
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1 @@
+"""Signal scrapers — discovery engines."""

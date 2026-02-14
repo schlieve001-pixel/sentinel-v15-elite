@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="theme-color" content="#00ff41">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="manifest" href="/manifest.json">
+<title>VeriFuse Field Unit</title>
+<style>
+    body { background: #000; margin: 0; overflow: hidden; height: 100dvh; font-family: 'Courier New', monospace; }
+
+    /* FULLSCREEN VIDEO */
+    #viewport { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+    video { width: 100%; height: 100%; object-fit: cover; }
+
+    /* GREEN GRID OVERLAY */
+    .grid { position: absolute; top:0; left:0; width:100%; height:100%; z-index: 2;
+        background: linear-gradient(rgba(0,255,65,0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,65,0.05) 1px, transparent 1px);
+        background-size: 60px 60px; pointer-events: none; }
+
+    /* DATA HUD (Top) */
+    #hud { position: absolute; top: 0; left: 0; width: 100%; padding: 15px; z-index: 3;
+           display: flex; justify-content: space-between; color: #00ff41; font-weight: bold;
+           background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent); text-shadow: 1px 1px #000; }
+
+    /* STATUS LOG (Middle-Left) */
+    #log { position: absolute; top: 60px; left: 15px; color: #00ff41; z-index: 3; font-size: 11px;
+           white-space: pre-wrap; text-shadow: 1px 1px #000; opacity: 0.8; max-width: 90%; }
+
+    /* OFFLINE BADGE */
+    #offline-badge { display: none; position: absolute; top: 15px; left: 50%; transform: translateX(-50%);
+        z-index: 5; background: #ff4444; color: #fff; padding: 4px 12px; border-radius: 12px;
+        font-size: 11px; font-weight: bold; }
+
+    /* QUEUE BADGE */
+    #queue-badge { display: none; position: absolute; top: 40px; left: 50%; transform: translateX(-50%);
+        z-index: 5; background: #ff8800; color: #000; padding: 4px 12px; border-radius: 12px;
+        font-size: 11px; font-weight: bold; }
+
+    /* BIG BUTTON (Floating Bottom) */
+    #controls { position: absolute; bottom: 30px; left: 0; width: 100%; z-index: 4; display: flex; justify-content: center; }
+
+    #btn-capture {
+        background: rgba(0, 0, 0, 0.6);
+        border: 2px solid #00ff41;
+        color: #00ff41;
+        padding: 20px 40px;
+        font-size: 18px;
+        font-weight: bold;
+        text-transform: uppercase;
+        border-radius: 50px;
+        backdrop-filter: blur(5px);
+        box-shadow: 0 0 15px rgba(0, 255, 65, 0.3);
+        cursor: pointer;
+    }
+    #btn-capture:active { background: #00ff41; color: #000; }
+    #btn-capture:disabled { opacity: 0.4; }
+</style>
+</head>
+<body>
+    <div id="viewport">
+        <video id="preview" autoplay playsinline muted></video>
+        <div class="grid"></div>
+    </div>
+
+    <div id="hud">
+        <span id="mag-val">MAG: --</span>
+        <span id="acc-val">ACC: --</span>
+    </div>
+
+    <div id="offline-badge">OFFLINE</div>
+    <div id="queue-badge"></div>
+
+    <div id="log">SYSTEM READY.</div>
+
+    <div id="controls">
+        <button id="btn-capture">ACTIVATE SENSORS</button>
+    </div>
+
+    <script src="/rti_client.js"></script>
+    <script>
+    // ─── PWA Registration ───
+    if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/sw.js").then((reg) => {
+            console.log("[SW] Registered:", reg.scope);
+        }).catch((err) => {
+            console.warn("[SW] Registration failed:", err);
+        });
+
+        // Listen for sync messages from SW
+        navigator.serviceWorker.addEventListener("message", (e) => {
+            if (e.data.type === "SYNCED") {
+                appendLog("SYNCED queued evidence #" + e.data.id);
+                updateQueueBadge();
+            }
+            if (e.data.type === "FLUSH_COMPLETE") {
+                appendLog("OFFLINE QUEUE FLUSHED.");
+                updateQueueBadge();
+            }
+        });
+    }
+
+    // ─── Online/Offline indicators ───
+    function updateOnlineStatus() {
+        document.getElementById("offline-badge").style.display = navigator.onLine ? "none" : "block";
+        if (navigator.onLine) {
+            triggerSync();
+        }
+    }
+    window.addEventListener("online", updateOnlineStatus);
+    window.addEventListener("offline", updateOnlineStatus);
+    updateOnlineStatus();
+
+    function triggerSync() {
+        if ("serviceWorker" in navigator && "SyncManager" in window) {
+            navigator.serviceWorker.ready.then((reg) => {
+                reg.sync.register("flush-evidence-queue");
+            });
+        } else if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.ready.then((reg) => {
+                reg.active.postMessage({ type: "FLUSH_QUEUE" });
+            });
+        }
+    }
+    </script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+# VERIFUSE — Caddy Reverse Proxy
+# Serves React frontend + proxies API requests to FastAPI
+#
+# Usage:
+#   sudo caddy run --config /path/to/Caddyfile
+#
+# Prerequisites:
+#   - DNS A record: verifuse.tech → server IP
+#   - Port 80 + 443 open
+#   - FastAPI running on :8000
+
+verifuse.tech {
+	# API routes → FastAPI backend
+	handle /api/* {
+		reverse_proxy localhost:8000
+	}
+
+	# Health check
+	handle /health {
+		reverse_proxy localhost:8000
+	}
+
+	# Stripe webhooks
+	handle /api/webhooks/* {
+		reverse_proxy localhost:8000
+	}
+
+	# React SPA — serve static files, fallback to index.html
+	handle {
+		root * /home/schlieve001/origin/continuity_lab/verifuse/site/app/dist
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Security headers
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Gzip
+	encode gzip
+}

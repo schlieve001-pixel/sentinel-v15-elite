@@ -1,0 +1,25 @@
+[Unit]
+Description=VeriFuse TITAN — RTI Protocol v3.0 (Witness + Judge + Vault)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=schlieve001
+WorkingDirectory=/home/schlieve001/origin/continuity_lab/verifuse/titan
+ExecStart=/bin/bash -c '\
+    python3 vault/store.py  >> logs/vault.log  2>&1 & echo $! > /run/user/1000/titan-vault.pid;  \
+    python3 judge/api.py    >> logs/judge.log   2>&1 & echo $! > /run/user/1000/titan-judge.pid;  \
+    python3 witness/server.py >> logs/witness.log 2>&1 & echo $! > /run/user/1000/titan-witness.pid; \
+    sleep 1'
+ExecStop=/bin/bash -c '\
+    kill $(cat /run/user/1000/titan-vault.pid)   2>/dev/null; \
+    kill $(cat /run/user/1000/titan-judge.pid)    2>/dev/null; \
+    kill $(cat /run/user/1000/titan-witness.pid)  2>/dev/null; \
+    rm -f /run/user/1000/titan-*.pid'
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

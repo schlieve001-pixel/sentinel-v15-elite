@@ -1,0 +1,14 @@
+# VeriFuse Legal Intelligence — Dependencies
+# Install: pip install -r verifuse/requirements.txt
+
+# Core pipeline (no external deps beyond stdlib + sqlite3)
+
+# Hunter Engine (Phase 3 — scraping)
+requests>=2.31.0
+fake-useragent>=1.4.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+pdfplumber>=0.10.0
+
+# Dossier Generator (Phase 4 — Word doc output)
+python-docx>=1.1.0

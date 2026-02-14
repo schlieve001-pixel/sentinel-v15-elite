@@ -1,0 +1,20 @@
+{
+  "name": "VeriFuse Field Unit",
+  "short_name": "VeriFuse",
+  "description": "RTI Protocol v3.0 — Forensic Evidence Capture",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#00ff41",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' fill='%23000'/><text x='96' y='130' font-size='120' text-anchor='middle' fill='%2300ff41'>V</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["utilities", "business"],
+  "lang": "en-US"
+}
