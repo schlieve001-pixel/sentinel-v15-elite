@@ -61,6 +61,24 @@ SCRAPER_REGISTRY: dict[str, dict] = {
         "base_url": "https://www.denvergov.org/property/realproperty/search",
         "enabled": True,
     },
+    "elpaso_postsale": {
+        "rpm": 2,
+        "daily_quota": 300,
+        "backpressure": True,
+        "success_threshold": 0.8,
+        "captcha_cooldown_hours": 24,
+        "base_url": "https://elpasopublictrustee.com/foreclosure-reports/",
+        "enabled": True,
+    },
+    "adams_postsale": {
+        "rpm": 2,
+        "daily_quota": 300,
+        "backpressure": True,
+        "success_threshold": 0.8,
+        "captcha_cooldown_hours": 24,
+        "base_url": "https://apps.adcogov.org/PTForeclosureSearch/reports",
+        "enabled": True,
+    },
 }
 
 WINDOW_SIZE = 50  # Rolling window for success-rate calculation
@@ -286,6 +304,32 @@ class Governor:
         except Exception as exc:
             summary["errors"].append(f"Engine 4 (Vertex): {exc}")
             log.error("Engine 4 failed: %s", exc)
+
+        # Engine 5: El Paso County post-sale PDF scraper
+        try:
+            from verifuse_v2.scrapers.elpaso_postsale_scraper import run as elpaso_run
+
+            elpaso_result = elpaso_run()
+            summary["elpaso_inserted"] = elpaso_result.get("inserted", 0)
+            summary["elpaso_total"] = elpaso_result.get("total", 0)
+            log.info("Engine 5 (El Paso): %d new from %d records",
+                     elpaso_result.get("inserted", 0), elpaso_result.get("total", 0))
+        except Exception as exc:
+            summary["errors"].append(f"Engine 5 (El Paso): {exc}")
+            log.error("Engine 5 failed: %s", exc)
+
+        # Engine 6: Adams County post-sale PDF scraper
+        try:
+            from verifuse_v2.scrapers.adams_postsale_scraper import run as adams_run
+
+            adams_result = adams_run()
+            summary["adams_inserted"] = adams_result.get("inserted", 0)
+            summary["adams_total"] = adams_result.get("total", 0)
+            log.info("Engine 6 (Adams): %d new from %d records",
+                     adams_result.get("inserted", 0), adams_result.get("total", 0))
+        except Exception as exc:
+            summary["errors"].append(f"Engine 6 (Adams): {exc}")
+            log.error("Engine 6 failed: %s", exc)
 
         self._save_state()
         return summary
