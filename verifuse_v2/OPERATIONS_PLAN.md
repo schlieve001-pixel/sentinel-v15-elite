@@ -1,316 +1,366 @@
 # VERIFUSE V2 — OPERATIONS PLAN
-## Last Updated: February 14, 2026
+## Last Updated: February 14, 2026 (Sprint 2)
 
 ---
 
-## SYSTEM STATUS: OPERATIONAL (11 Counties, 10 Engines)
+## SYSTEM STATUS: OPERATIONAL (11 Counties, 10 Engines, 734 Assets)
 
 ### Database Summary
 | Metric | Value |
 |--------|-------|
-| Total Assets | 46+ (growing with new county scrapers) |
-| Total Pipeline Value | $5,195,751.75+ |
+| Total Assets | 734 |
+| Total Pipeline Value | $5,195,573.68 |
 | GOLD-Grade Verified Leads | 6 |
-| SILVER-Grade Leads | 7+ |
-| Attorney-Ready (GOLD+SILVER, surplus >= $1K) | 13+ |
-| Counties Active | 11 (Denver, Arapahoe, Jefferson, Adams, El Paso, Larimer, Weld, Boulder, Pueblo, Mesa, Teller, Douglas) |
-| Deduplication | 21 duplicates removed |
-| Staging Pipeline | 691 PDFs awaiting Vertex AI processing |
+| SILVER-Grade Leads | 7 |
+| BRONZE-Grade Leads | 692 |
+| Attorney-Ready (GOLD+SILVER) | 13 |
+| Counties Active | 11 |
+| Staging Records | 691 (688 promoted, 3 already existed) |
+| GCP Project | canvas-sum-481614-f6 |
+| API Server | FastAPI on :8000 |
+| Frontend | React 19 + Vite 7 (production build at `dist/`) |
+| Domain | verifuse.tech (Caddy reverse proxy) |
 
 ### County Breakdown
-| County | Assets | Total Surplus | Avg Confidence | Data Source | Engine |
-|--------|--------|--------------|----------------|-------------|--------|
-| Denver | 17 | $1,421,630 | 0.88 | Monthly excess funds PDF (no indebtedness) | #1-3 |
-| Arapahoe | 12 | $1,426,297 | 0.92 | Overbid list (no indebtedness) | Manual |
-| Jefferson | 5 | $2,026,675 | 0.64 | CSV import with written_bid (has indebtedness) | Manual |
-| Adams | 4 | $258,106 | 0.95 | Weekly Post Sale List PDF (100% verified) | #6 |
-| El Paso | 5 | $0 (pre-sale) | 0.95 | Weekly Pre Sale List PDF (has indebtedness) | #5 |
-| Larimer | NEW | Pre-sale data | 0.95 | Weekly Pre Sale List PDF via GTS | #7 |
-| Weld | NEW | Pre-sale data | 0.95 | Weekly Pre Sale List PDF (weld.gov) | #8 |
-| Boulder | NEW | Pre-sale data | 0.95 | Weekly Pre Sale List PDF via GTS | #9 |
-| Pueblo | NEW | Schedule only | 0.50 | Sale schedule page (limited data) | #10 |
-| Mesa | 1 | $40,000 | 1.00 | Manual import | Manual |
-| Douglas | 1 | $4,798 | 0.70 | Manual import | Manual |
-| Teller | 1 | $18,246 | 0.70 | Manual import | Manual |
-
-### Data Quality Grades
-| Grade | Count | Meaning |
-|-------|-------|---------|
-| GOLD | 6 | Fully verified: surplus + indebtedness + sale_date + confidence >= 0.7 |
-| SILVER | 7+ | Good data but missing indebtedness or other field for GOLD |
-| BRONZE | 4+ | Has surplus but incomplete data |
-| REJECT | 29 | Expired deadlines, no surplus, or insufficient data |
-
----
-
-## WHAT'S DONE (Completed Workstreams)
-
-### WS1: Data Integrity
-- Deduplication engine: finds/removes duplicate case_numbers, keeps most complete record
-- Confidence scoring: penalizes missing indebtedness (max 0.5) and missing sale_date (max 0.6)
-- Grade gating: GOLD requires indebtedness > 0, sale_date, confidence >= 0.7, completeness >= 1.0
-- Daily regrade via healthcheck cron
-
-### WS2: Admin Account System
-- `schlieve001@gmail.com` auto-upgraded to sovereign + admin + 9999 credits on startup
-- Admin endpoints: `/api/admin/stats`, `/api/admin/leads`, `/api/admin/regrade`, `/api/admin/dedup`, `/api/admin/users`, `/api/admin/upgrade-user`
-- Admin bypasses rate limits and credit checks
-
-### WS3: Card UI Readability
-- WCAG AA contrast compliance (--text-muted: #8b9fc2)
-- Larger font sizes for case numbers, badges, confidence text
-- Pill-shaped badges for grade, confidence, days remaining
-- Stacked card actions (UNLOCK INTEL + FREE DOSSIER)
-
-### WS4+5: Dossier Generator
-- 4-section professional layout: Asset Profile, Forensic Financial Analysis, Entity Intelligence, Recovery Strategy
-- UNVERIFIED watermark when indebtedness missing
-- Math proof: "Winning Bid ($X) - Total Indebtedness ($Y) = Surplus ($Z)"
-- Legal disclaimer page for restricted leads
-
-### WS6: Restricted Lead Sales
-- `/api/unlock-restricted/{asset_id}` endpoint with attorney verification
-- Requires bar_number + disclaimer acceptance (C.R.S. § 38-13-1302(5))
-
-### WS7: Engine #4 (Vertex AI) — Production Rewrite
-- **Old**: `vertex_engine.py` — broken draft referencing non-existent `leads` table
-- **New**: `vertex_engine_production.py` — Gold Master production engine
-  - Pre-flight checks: validates credentials JSON, schema columns, staged record count
-  - OCR-aware `parse_money()` (handles O→0, spaces, parentheses)
-  - Forced JSON schema extraction via Gemini
-  - Exponential backoff (2^n + jitter, max 5 retries) on 429/503/500
-  - JSONL audit log at `verifuse_v2/logs/engine4_audit.jsonl`
-  - Computes confidence/grade using `daily_healthcheck` functions
-
-### WS8: Frontend Migration
-- Removed Airtable API keys from client-side .env
-- Rewrote Hero.tsx to use V2 API Stats
-- All API client functions updated for V2 endpoints
-
-### WS9: Git + GitHub
-- Full codebase committed (118+ files)
-- Pushed to github.com/schlieve001-pixel/sentinel-v15-elite.git
-
-### WS10: System Unification
-- **`migrate_master.py`**: Idempotent migration utility
-  - Checks all tables exist via `sqlite_master`
-  - Adds missing columns: `assets_staging.{pdf_path, status, processed_at, engine_version}`, `assets.{winning_bid, vertex_processed}`
-  - Verifies all required indexes
-  - Logs migration event to `pipeline_events`
-  - Run: `python -m verifuse_v2.db.migrate_master`
-- **`verify_system.py`**: Green Light diagnostic
-  - 8 check categories: DB, Schema, Data Integrity, Credentials, Vertex AI, Staging, API Server, File System
-  - Formatted pass/fail output with totals
-  - Run: `python -m verifuse_v2.verify_system`
-
-### WS11: County Expansion (4 New Counties)
-- **Larimer County** (Engine #7): Pre Sale List PDF scraper via apps.larimer.org GTS Search
-- **Weld County** (Engine #8): Pre Sale List PDF scraper from weld.gov (predictable URL patterns)
-- **Boulder County** (Engine #9): Pre Sale List PDF scraper via bouldercountypt.org GTS Search
-- **Pueblo County** (Engine #10): Sale schedule page scraper (limited data, BRONZE grade)
+| County | Assets | Total Surplus | Data Source | Engine |
+|--------|--------|--------------|-------------|--------|
+| Eagle | 312 | $0 (needs enrichment) | Portal scraper | Staging |
+| San Miguel | 250 | $0 (needs enrichment) | Portal scraper | Staging |
+| Jefferson | 66 | $2,026,675 | CSV + portal | Manual + Staging |
+| Adams | 39 | $258,106 | Weekly Post Sale PDF | #6 |
+| Teller | 26 | $18,246 | GovEase portal | Staging |
+| Denver | 17 | $1,421,452 | Monthly excess funds PDF | #1-3 |
+| Arapahoe | 12 | $1,426,297 | Overbid list | Manual |
+| El Paso | 5 | $0 (pre-sale) | Weekly Pre Sale PDF | #5 |
+| Summit | 5 | $0 (needs enrichment) | GovEase portal | Staging |
+| Douglas | 1 | $4,798 | Manual | Manual |
+| Mesa | 1 | $40,000 | Manual | Manual |
 
 ---
 
 ## HOW TO RUN EACH COMPONENT
 
-### Step-by-Step: Daily Operations
-
-**1. Run the migration (first time or after schema changes):**
+### 1. Database Migration (Idempotent — Safe to Run Anytime)
 ```bash
-cd /home/schlieve001/origin/continuity_lab
+cd ~/origin/continuity_lab
 python -m verifuse_v2.db.migrate_master
 ```
-Expected output: "ALL CHECKS PASSED" with list of tables/columns/indexes.
+**What it does:** Checks all 11 tables, adds missing columns, creates indexes. Run this after any schema changes.
 
-**2. Run system verification:**
+### 2. System Diagnostic
 ```bash
 python -m verifuse_v2.verify_system
 ```
-Expected output: GREEN LIGHT with pass/fail for each subsystem.
+**What it does:** Tests 8 layers — database, schema, data integrity, credentials, Vertex AI, staging, API server, filesystem. Outputs GREEN LIGHT / YELLOW / RED status.
 
-**3. Run all scrapers (via Governor pipeline):**
+**Expected output:** 27/29 PASS (2 WARN = API server not running + duplicate cases)
+
+### 3. Staging Promoter (Promote Portal Records to Assets)
 ```bash
-python -c "from verifuse_v2.pipeline_manager import Governor; g = Governor(); print(g.run_pipeline())"
+# Dry run first:
+python -m verifuse_v2.staging_promoter --dry-run
+
+# Full promotion with PDF linking:
+python -m verifuse_v2.staging_promoter --link-pdfs
 ```
-This runs Engines 1-10 in sequence. Each engine downloads PDFs, parses data, and ingests into the database.
+**What it does:** Promotes 691 staging records from portal scrapers (Eagle, San Miguel, etc.) into the main assets table. These records already have structured data but no PDFs — they get BRONZE grade and need enrichment.
 
-**4. Run individual county scrapers:**
+### 4. Engine #4 — Vertex AI PDF Extraction
 ```bash
-# Adams County (post-sale, 100% verified data)
+# Pre-flight check only (no processing):
+export GOOGLE_APPLICATION_CREDENTIALS="$HOME/google_credentials.json"
+python -m verifuse_v2.scrapers.vertex_engine --preflight-only
+
+# Process 5 PDFs (test):
+python -m verifuse_v2.scrapers.vertex_engine --limit 5
+
+# Full batch (50 PDFs):
+python -m verifuse_v2.scrapers.vertex_engine --limit 50
+
+# Specify GCP project explicitly:
+python -m verifuse_v2.scrapers.vertex_engine --project canvas-sum-481614-f6 --limit 50
+```
+**What it does:** Reads PDFs from `assets_staging` where `pdf_path IS NOT NULL AND status='STAGED'`, sends to Vertex AI (Gemini), extracts winning_bid/total_debt/sale_date, computes surplus and grade, inserts into `assets`.
+
+**Requirements:**
+- Valid `~/google_credentials.json` (service account with Vertex AI API enabled)
+- `GOOGLE_APPLICATION_CREDENTIALS` env var set
+- Staged records with `pdf_path` linked
+
+### 5. County Scrapers
+```bash
+# Adams County (Post-Sale PDFs — BEST DATA):
 python -m verifuse_v2.scrapers.adams_postsale_scraper
 
-# El Paso County (pre-sale, indebtedness data)
+# El Paso County (Post-Sale PDFs):
 python -m verifuse_v2.scrapers.elpaso_postsale_scraper
 
-# Larimer County (pre-sale)
+# Larimer County (Pre-Sale PDFs via GTS):
 python -m verifuse_v2.scrapers.larimer_scraper
 
-# Weld County (pre-sale)
+# Weld County (Pre-Sale PDFs):
 python -m verifuse_v2.scrapers.weld_scraper
 
-# Boulder County (pre-sale)
+# Boulder County (Pre-Sale PDFs via GTS):
 python -m verifuse_v2.scrapers.boulder_scraper
 
-# Pueblo County (sale schedule)
+# Pueblo County (HTML schedule page):
 python -m verifuse_v2.scrapers.pueblo_scraper
 
-# Denver (excess funds PDF)
-python -m verifuse_v2.scrapers.denver_pdf_parser
+# Run ALL scrapers via pipeline:
+python -c "from verifuse_v2.pipeline_manager import Governor; g = Governor(); print(g.run_pipeline())"
 ```
 
-**5. Process staged PDFs with Vertex AI (Engine #4):**
-```bash
-# Step A: Set up Google credentials
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/google_credentials.json"
-
-# Step B: Run pre-flight checks only
-python -m verifuse_v2.scrapers.vertex_engine_production --preflight-only
-
-# Step C: Process 50 staged PDFs
-python -m verifuse_v2.scrapers.vertex_engine_production --limit 50
-
-# Step D: Process all staged PDFs
-python -m verifuse_v2.scrapers.vertex_engine_production --limit 691
-```
-
-**6. Run daily healthcheck (regrade all assets):**
+### 6. Daily Healthcheck
 ```bash
 python -m verifuse_v2.daily_healthcheck
 ```
-This re-evaluates all assets, updates grades/classes, closes expired deadlines, and generates a JSON report.
+**What it does:** Re-evaluates every asset — computes confidence, completeness, grade, days_remaining. Promotes/demotes records between GOLD/SILVER/BRONZE/REJECT based on data quality.
 
-**7. Start the API server:**
+### 7. API Server
 ```bash
-cd /home/schlieve001/origin/continuity_lab
-uvicorn verifuse_v2.api.server:app --host 0.0.0.0 --port 8000
+# Start API server:
+python -m uvicorn verifuse_v2.server.api:app --host 0.0.0.0 --port 8000
+
+# Or via systemd (production):
+sudo cp verifuse_v2/deploy/verifuse-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable verifuse-api
+sudo systemctl start verifuse-api
+
+# Check health:
+curl http://localhost:8000/health
+curl http://localhost:8000/api/stats
+curl http://localhost:8000/api/counties
 ```
 
-### Automation: Cron Schedule
+### 8. React Frontend (Production Build)
 ```bash
-# Edit crontab
-crontab -e
+cd verifuse/site/app
+npm install
+npm run build    # Output: dist/
 
-# Add these lines:
-# Daily healthcheck at 6:00 AM MT (12:00 UTC)
-0 12 * * * cd /home/schlieve001/origin/continuity_lab && python -m verifuse_v2.daily_healthcheck >> /var/log/verifuse_healthcheck.log 2>&1
+# Dev server:
+npm run dev      # http://localhost:5173
+```
 
-# Weekly scraper run on Wednesdays at 2:00 PM MT (20:00 UTC) — after all county sales complete
-0 20 * * 3 cd /home/schlieve001/origin/continuity_lab && python -c "from verifuse_v2.pipeline_manager import Governor; Governor().run_pipeline()" >> /var/log/verifuse_scrapers.log 2>&1
+### 9. Caddy Reverse Proxy (Production)
+```bash
+sudo caddy run --config verifuse_v2/deploy/Caddyfile
+```
+**Routing:**
+- `/api/*` → FastAPI on :8000
+- `/health` → FastAPI on :8000
+- `/*` → Static files from `verifuse/site/app/dist/`
 
-# Weekly Vertex AI processing on Thursdays at 6:00 AM MT
-0 12 * * 4 cd /home/schlieve001/origin/continuity_lab && python -m verifuse_v2.scrapers.vertex_engine_production --limit 100 >> /var/log/verifuse_vertex.log 2>&1
+---
+
+## STRIPE BILLING SETUP
+
+### Step 1: Create Products in Stripe Dashboard
+Go to https://dashboard.stripe.com/products and create 3 products:
+
+| Product Name | Price | Credits/Month |
+|-------------|-------|--------------|
+| VeriFuse Recon | $199/month | 5 credits |
+| VeriFuse Operator | $399/month | 25 credits |
+| VeriFuse Sovereign | $699/month | 100 credits |
+
+### Step 2: Get Price IDs
+After creating each product, copy the `price_xxx` ID from the Price section.
+
+### Step 3: Set Environment Variables
+Add to your systemd service file or `~/.bashrc`:
+```bash
+export STRIPE_SECRET_KEY="sk_live_..."          # or sk_test_... for testing
+export STRIPE_WEBHOOK_SECRET="whsec_..."
+export STRIPE_PRICE_RECON="price_..."
+export STRIPE_PRICE_OPERATOR="price_..."
+export STRIPE_PRICE_SOVEREIGN="price_..."
+export VERIFUSE_BASE_URL="https://verifuse.tech"
+export VERIFUSE_JWT_SECRET="$(openssl rand -hex 32)"
+```
+
+### Step 4: Set Up Stripe Webhook
+In Stripe Dashboard → Developers → Webhooks → Add endpoint:
+- **URL:** `https://verifuse.tech/api/webhooks/stripe`
+- **Events to listen for:**
+  - `checkout.session.completed`
+  - `customer.subscription.updated`
+  - `customer.subscription.deleted`
+  - `invoice.paid`
+
+### Step 5: Test with Stripe Test Cards
+| Card Number | Scenario |
+|------------|----------|
+| `4242 4242 4242 4242` | Success |
+| `4000 0000 0000 9995` | Insufficient funds |
+| `4000 0000 0000 0341` | Attach fails |
+| `4000 0025 0000 3155` | Requires 3D Secure |
+
+Use any future expiry date and any 3-digit CVC.
+
+---
+
+## CRON / SYSTEMD AUTOMATION
+
+### Timer Units (in `verifuse_v2/deploy/`)
+
+| Timer | Service | Schedule | Purpose |
+|-------|---------|----------|---------|
+| `verifuse-healthcheck.timer` | `verifuse-healthcheck.service` | Daily 6:00 AM UTC | Regrade all assets |
+| `verifuse-scrapers.timer` | `verifuse-scrapers.service` | Thursdays 8:00 AM UTC | Run all 6 county scrapers + healthcheck |
+| `verifuse-vertex.timer` | `verifuse-vertex.service` | Fridays 10:00 AM UTC | Process 100 staged PDFs via Vertex AI |
+
+### Installing Timers
+```bash
+# Copy all service and timer files:
+sudo cp verifuse_v2/deploy/verifuse-healthcheck.{service,timer} /etc/systemd/system/
+sudo cp verifuse_v2/deploy/verifuse-scrapers.{service,timer} /etc/systemd/system/
+sudo cp verifuse_v2/deploy/verifuse-vertex.{service,timer} /etc/systemd/system/
+sudo cp verifuse_v2/deploy/verifuse-api.service /etc/systemd/system/
+
+# Reload and enable:
+sudo systemctl daemon-reload
+sudo systemctl enable verifuse-api verifuse-healthcheck.timer verifuse-scrapers.timer verifuse-vertex.timer
+sudo systemctl start verifuse-api verifuse-healthcheck.timer verifuse-scrapers.timer verifuse-vertex.timer
+
+# Check status:
+sudo systemctl list-timers verifuse-*
+sudo systemctl status verifuse-api
+```
+
+### Logs
+```bash
+# API server:
+journalctl -u verifuse-api -f
+
+# Healthcheck:
+cat verifuse_v2/logs/healthcheck.log
+
+# Scrapers:
+cat verifuse_v2/logs/scrapers.log
+
+# Vertex AI:
+cat verifuse_v2/logs/vertex.log
+cat verifuse_v2/logs/engine4_audit.jsonl
 ```
 
 ---
 
-## WHAT NEEDS TO BE DONE (Remaining Work)
+## ENGINE REGISTRY
 
-### Priority 1: CRITICAL (This Week)
-| # | Task | Status | How To Do It |
-|---|------|--------|-------------|
-| 1 | Deploy API server to verifuse.tech | NOT STARTED | Create `/etc/systemd/system/verifuse.service` with `ExecStart=uvicorn verifuse_v2.api.server:app --host 127.0.0.1 --port 8000`. Run `sudo systemctl enable --now verifuse`. |
-| 2 | Build React frontend | NOT STARTED | `cd verifuse/site/app && npm install && npm run build`. Output goes to `dist/`. |
-| 3 | Configure Caddy reverse proxy | NOT STARTED | Install Caddy: `sudo apt install caddy`. Create `/etc/caddy/Caddyfile`: `verifuse.tech { root * /path/to/dist file_server reverse_proxy /api/* localhost:8000 }`. Run `sudo systemctl restart caddy`. |
-| 4 | Test Stripe billing end-to-end | NOT STARTED | Set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` env vars. Use Stripe CLI: `stripe listen --forward-to localhost:8000/api/stripe/webhook`. Create test checkout. |
-| 5 | Set up Google credentials for Vertex AI | NOT STARTED | Place `google_credentials.json` in a secure location. Set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/google_credentials.json`. Run `python -m verifuse_v2.scrapers.vertex_engine_production --preflight-only` to verify. |
-| 6 | Process 691 staged PDFs via Vertex AI | NOT STARTED | After credentials setup: `python -m verifuse_v2.scrapers.vertex_engine_production --limit 691`. Monitor logs at `verifuse_v2/logs/engine4_audit.jsonl`. |
-
-### Priority 2: HIGH (Next Sprint)
-| # | Task | Status | How To Do It |
-|---|------|--------|-------------|
-| 7 | Automate daily healthcheck via cron | NOT STARTED | See cron schedule above. Verify: `crontab -l`. |
-| 8 | Set up error monitoring (Sentry) | NOT STARTED | `pip install sentry-sdk`. Add `sentry_sdk.init(dsn="...")` to `api/server.py` startup. |
-| 9 | Download more Adams County PDFs | EASY | Run `python -m verifuse_v2.scrapers.adams_postsale_scraper` — it auto-discovers new PDFs. |
-| 10 | Monitor new county scrapers for data | ONGOING | Check logs after Wednesday sales. Adjust PDF URL patterns if needed. |
-
-### Priority 3: MEDIUM (Post-Launch)
-| # | Task | Status | How To Do It |
-|---|------|--------|-------------|
-| 11 | Migrate SQLite → Supabase PostgreSQL | NOT STARTED | Create Supabase project. Run `schema.sql` against it. Update `database.py` `get_connection()` to use `psycopg2`. |
-| 12 | Email notifications for high-value leads | NOT STARTED | Use SendGrid or SES. Add hook in `ingest_records()` when GOLD lead created. |
-| 13 | Admin dashboard UI | NOT STARTED | React admin panel calling `/api/admin/*` endpoints. |
-| 14 | Monthly credit reset | NOT STARTED | Stripe webhook `invoice.paid` → reset user credits. |
+| # | Engine | Module | Data Source |
+|---|--------|--------|-------------|
+| 0 | Governor | `pipeline_manager.py` | Rate limiter & orchestrator |
+| 1 | Signal Discovery | `scrapers/signal_denver.py` | Denver Public Trustee |
+| 2 | Outcome Resolution | `scrapers/outcome_denver.py` | Denver Foreclosure Detail |
+| 3 | Entity Enrichment | `enrichment/entity_resolver.py` | Denver Assessor |
+| 4 | Vertex AI PDF Reader | `scrapers/vertex_engine.py` | Staged PDFs via Gemini |
+| 5 | El Paso Post-Sale | `scrapers/elpaso_postsale_scraper.py` | El Paso Public Trustee |
+| 6 | Adams Post-Sale | `scrapers/adams_postsale_scraper.py` | Adams Public Trustee |
+| 7 | Larimer Pre-Sale | `scrapers/larimer_scraper.py` | Larimer Public Trustee |
+| 8 | Weld Pre-Sale | `scrapers/weld_scraper.py` | Weld Public Trustee |
+| 9 | Boulder Pre-Sale | `scrapers/boulder_scraper.py` | Boulder Public Trustee |
+| 10 | Pueblo Schedule | `scrapers/pueblo_scraper.py` | Pueblo Public Trustee |
 
 ---
 
-## PIPELINE ARCHITECTURE
+## API ENDPOINTS
 
-```
-Engine 0: Governor (pipeline_manager.py)
-  ├── Engine 1: Denver Signal Scraper (signal_denver.py)
-  ├── Engine 2: Denver Outcome Scraper (outcome_denver.py)
-  ├── Engine 3: Entity Resolver (entity_resolver.py)
-  ├── Engine 4: Vertex AI PDF Extraction (vertex_engine_production.py)  ← PRODUCTION REWRITE
-  ├── Engine 5: El Paso Pre-Sale Scraper (elpaso_postsale_scraper.py)
-  ├── Engine 6: Adams Post-Sale Scraper (adams_postsale_scraper.py)
-  ├── Engine 7: Larimer Pre-Sale Scraper (larimer_scraper.py)           ← NEW
-  ├── Engine 8: Weld Pre-Sale Scraper (weld_scraper.py)                 ← NEW
-  ├── Engine 9: Boulder Pre-Sale Scraper (boulder_scraper.py)           ← NEW
-  └── Engine 10: Pueblo Schedule Scraper (pueblo_scraper.py)            ← NEW
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | No | Server health + asset counts |
+| GET | `/api/stats` | No | Dashboard summary |
+| GET | `/api/counties` | No | County-level breakdown |
+| GET | `/api/leads` | No | List leads (with obfuscation) |
+| GET | `/api/lead/{id}` | No | Single lead detail |
+| POST | `/api/auth/register` | No | Register attorney account |
+| POST | `/api/auth/login` | No | Login, get JWT |
+| GET | `/api/auth/me` | JWT | Current user profile |
+| GET | `/api/user/unlocks` | JWT | Unlock history |
+| POST | `/api/unlock/{id}` | JWT | Unlock lead (1 credit) |
+| POST | `/api/unlock-restricted/{id}` | JWT | Unlock restricted lead |
+| GET | `/api/dossier/{id}` | JWT | Download dossier PDF |
+| GET | `/api/motion/{id}` | JWT | Download motion PDF |
+| POST | `/api/billing/checkout` | JWT | Create Stripe checkout |
+| POST | `/api/webhooks/stripe` | Stripe | Webhook handler |
+| GET | `/api/admin/stats` | Admin | Full system stats |
+| GET | `/api/admin/leads` | Admin | All leads unobfuscated |
+| POST | `/api/admin/regrade` | Admin | Manual regrade |
+| POST | `/api/admin/dedup` | Admin | Deduplicate DB |
+| GET | `/api/admin/users` | Admin | List users |
+| POST | `/api/admin/upgrade-user` | Admin | Upgrade user tier |
 
-Standalone Scrapers:
-  ├── Denver PDF Parser (denver_pdf_parser.py)
-  ├── Jefferson CSV Import (jefferson_scraper.py)
-  └── Tax Lien Scraper (tax_lien_scraper.py)
-
-System Utilities:
-  ├── migrate_master.py    — Idempotent DB migration                    ← NEW
-  └── verify_system.py     — Green Light diagnostic                     ← NEW
-```
-
-## COUNTY DATA SOURCES
-
-| County | Platform | URL | Data Type | PDF Format |
-|--------|----------|-----|-----------|------------|
-| Denver | Custom | denvergov.org | Excess funds | Monthly PDF |
-| Arapahoe | Custom | arapahoeco.gov | Overbid list | Manual |
-| Jefferson | GTS | gts.co.jefferson.co.us | CSV export | Manual |
-| Adams | GTS | apps.adcogov.org/PTForeclosureSearch | Post Sale List | Weekly PDF (Wed) |
-| El Paso | GTS | elpasopublictrustee.com/GTSSearch | Pre Sale List | Weekly PDF (Wed) |
-| Larimer | Custom | apps.larimer.org/publictrustee/search | Pre Sale List | Weekly PDF (Wed) |
-| Weld | GTS | wcpto.com | Pre Sale List | Weekly PDF (Wed) |
-| Boulder | GTS | bouldercountypt.org/GTSSearch | Pre Sale List | Weekly PDF (Wed) |
-| Pueblo | Custom | county.pueblo.org | Sale schedule | HTML table |
-
-## TECH STACK
-- **Backend**: FastAPI + uvicorn (Python 3.11)
-- **Database**: SQLite WAL mode (verifuse_v2.db)
-- **Frontend**: React 19 + TypeScript + Vite
-- **PDF Generation**: fpdf2 (dossiers, motions)
-- **PDF Parsing**: pdfplumber (scrapers)
-- **Auth**: JWT (HS256, 72-hour tokens) + bcrypt
-- **Billing**: Stripe (3 tiers: recon $199, operator $399, sovereign $699)
-- **AI**: Google Vertex AI / Gemini (Engine #4 PDF extraction)
-- **Deployment Target**: verifuse.tech via Caddy + systemd
-
-## LEGAL COMPLIANCE
-- C.R.S. § 38-38-111: 180-day claim window enforced in all scrapers
-- C.R.S. § 38-38-111(2.5)(c): Restriction period (6 months from sale) tracked per asset
-- C.R.S. § 38-13-1304: 2-year blackout after transfer to State Treasurer
-- C.R.S. § 38-13-1302(5): Attorney-client exemption for restricted lead access
-- PII obfuscation: Owner names rendered as PNG images (not searchable text)
-- No skip-tracing, no phone numbers, no direct homeowner contact
+---
 
 ## TROUBLESHOOTING
 
 | Problem | Solution |
 |---------|----------|
-| `Table 'leads' missing columns` | You're running the OLD vertex_engine.py. Use `vertex_engine_production.py` instead. |
-| `Missing columns in assets_staging` | Run `python -m verifuse_v2.db.migrate_master` to add missing columns. |
-| `GOOGLE_APPLICATION_CREDENTIALS not set` | Export the env var: `export GOOGLE_APPLICATION_CREDENTIALS=/path/to/creds.json` |
-| Vertex AI 429 errors | The engine has automatic exponential backoff. If persistent, wait 1 hour. |
-| No PDFs downloaded for county X | Check URL patterns in the scraper. County websites change PDF paths periodically. |
-| `verify_system.py` shows FAIL | Read the detail column — it tells you exactly what's missing and how to fix it. |
-| API server not responding | Check `uvicorn` is running: `ps aux | grep uvicorn`. Restart: `sudo systemctl restart verifuse`. |
-| Database locked | SQLite WAL mode handles this. If persistent: `sqlite3 verifuse_v2.db "PRAGMA wal_checkpoint(FULL)"` |
+| `vertex_engine: GOOGLE_APPLICATION_CREDENTIALS not set` | `export GOOGLE_APPLICATION_CREDENTIALS="$HOME/google_credentials.json"` |
+| `vertex_engine: 0 ready` | Run `python -m verifuse_v2.staging_promoter --link-pdfs` to link PDFs |
+| `verify_system: API Server WARN` | Start API: `python -m uvicorn verifuse_v2.server.api:app --host 0.0.0.0 --port 8000` |
+| `daily_healthcheck: no module` | `cd ~/origin/continuity_lab && pip install -r verifuse_v2/requirements.txt` |
+| `Stripe checkout 400 error` | Check `STRIPE_PRICE_*` env vars are set with valid price IDs |
+| `React build fails` | `cd verifuse/site/app && npm install && npm run build` |
+| `Caddy TLS error` | Ensure DNS A record points to server IP, ports 80+443 open |
+| `sqlite3 locked` | Stop all writers, check for stale connections |
+| `Scraper 403/captcha` | Governor auto-applies 24h cooldown. Wait or check IP reputation |
+| `PDF parse returns 0 records` | Check PDF format matches expected regex patterns in scraper |
 
-## FINANCIAL SUMMARY
-| Metric | Value |
-|--------|-------|
-| Total Pipeline Value | $5,195,751.75+ |
-| GOLD Verified Surplus | $338,106 |
-| SILVER Actionable Surplus | $2,519,464+ |
-| Staged for Vertex Processing | 691 PDFs |
-| Active Counties | 11 |
-| Active Engines | 10 |
-| Subscription Tiers | 3 ($199 / $399 / $699 per month) |
+---
+
+## WHAT NEEDS TO HAPPEN NEXT (Priority Order)
+
+### HIGH PRIORITY
+1. **Enrich Eagle County (312 records)** — These are BRONZE with $0 surplus. Need to obtain actual foreclosure PDFs from Eagle County Public Trustee and process through Vertex AI.
+2. **Enrich San Miguel County (250 records)** — Same situation as Eagle. Contact PT office for PDFs.
+3. **Deploy API to production** — Install systemd services, start Caddy, verify Stripe webhook URL.
+4. **Set Stripe price IDs** — Create products in Stripe Dashboard, get price_xxx IDs, update env vars.
+
+### MEDIUM PRIORITY
+5. **Run all scrapers** — `python -m verifuse_v2.scrapers.adams_postsale_scraper` etc. to pull latest data.
+6. **Process PDFs through Vertex AI** — Any staging records with linked PDFs.
+7. **Enable systemd timers** — Automate healthcheck (daily), scrapers (weekly), vertex (weekly).
+8. **Set up DNS** — Point `verifuse.tech` A record to this server's IP.
+
+### LOWER PRIORITY
+9. **Add Arapahoe County scraper** — 12 existing manual records, could automate.
+10. **Add Jefferson County scraper** — 66 records, mix of manual + portal.
+11. **Marketing site updates** — Landing page stats auto-update from API.
+12. **Attorney onboarding flow** — Test registration → Stripe → unlock → dossier flow end-to-end.
+
+---
+
+## FILE MAP
+
+| File | Purpose |
+|------|---------|
+| `verifuse_v2/db/database.py` | Core DB abstraction (get_db, init_db, get_lead_by_id) |
+| `verifuse_v2/db/schema.sql` | 9-table schema definition |
+| `verifuse_v2/db/migrate_master.py` | Idempotent migration utility |
+| `verifuse_v2/daily_healthcheck.py` | Asset regrading + confidence scoring |
+| `verifuse_v2/verify_system.py` | 8-layer system diagnostic |
+| `verifuse_v2/staging_promoter.py` | Promote staging → assets |
+| `verifuse_v2/pipeline_manager.py` | Engine 0 (Governor) + pipeline orchestrator |
+| `verifuse_v2/scrapers/vertex_engine.py` | Engine 4 (Vertex AI PDF extraction) |
+| `verifuse_v2/scrapers/signal_denver.py` | Engine 1 (Denver signal discovery) |
+| `verifuse_v2/scrapers/outcome_denver.py` | Engine 2 (Denver outcome resolution) |
+| `verifuse_v2/scrapers/elpaso_postsale_scraper.py` | Engine 5 (El Paso) |
+| `verifuse_v2/scrapers/adams_postsale_scraper.py` | Engine 6 (Adams) |
+| `verifuse_v2/scrapers/larimer_scraper.py` | Engine 7 (Larimer) |
+| `verifuse_v2/scrapers/weld_scraper.py` | Engine 8 (Weld) |
+| `verifuse_v2/scrapers/boulder_scraper.py` | Engine 9 (Boulder) |
+| `verifuse_v2/scrapers/pueblo_scraper.py` | Engine 10 (Pueblo) |
+| `verifuse_v2/server/api.py` | FastAPI server (all endpoints) |
+| `verifuse_v2/server/billing.py` | Stripe billing integration |
+| `verifuse_v2/server/auth.py` | JWT authentication |
+| `verifuse_v2/deploy/Caddyfile` | Reverse proxy config |
+| `verifuse_v2/deploy/verifuse-api.service` | API systemd service |
+| `verifuse_v2/deploy/verifuse-healthcheck.*` | Daily healthcheck timer |
+| `verifuse_v2/deploy/verifuse-scrapers.*` | Weekly scrapers timer |
+| `verifuse_v2/deploy/verifuse-vertex.*` | Weekly Vertex AI timer |
+| `verifuse/site/app/` | React frontend (Vite + TypeScript) |
+| `verifuse/site/app/.env` | Dev API URL (localhost:8000) |
+| `verifuse/site/app/.env.production` | Production API URL (verifuse.tech) |

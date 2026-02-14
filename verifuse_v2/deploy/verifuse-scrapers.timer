@@ -1,0 +1,9 @@
+[Unit]
+Description=Run VeriFuse V2 scrapers weekly on Thursdays (day after sales)
+
+[Timer]
+OnCalendar=Thu *-*-* 08:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

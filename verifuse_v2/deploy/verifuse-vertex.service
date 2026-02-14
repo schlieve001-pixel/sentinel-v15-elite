@@ -1,0 +1,12 @@
+[Unit]
+Description=VeriFuse V2 Vertex AI PDF Processing
+After=network.target
+
+[Service]
+Type=oneshot
+User=schlieve001
+WorkingDirectory=/home/schlieve001/origin/continuity_lab
+Environment=GOOGLE_APPLICATION_CREDENTIALS=/home/schlieve001/google_credentials.json
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.vertex_engine --limit 100
+StandardOutput=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/vertex.log
+StandardError=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/vertex.log

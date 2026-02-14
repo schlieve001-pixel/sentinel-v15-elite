@@ -1,0 +1,11 @@
+[Unit]
+Description=VeriFuse V2 Daily Healthcheck
+After=network.target
+
+[Service]
+Type=oneshot
+User=schlieve001
+WorkingDirectory=/home/schlieve001/origin/continuity_lab
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.daily_healthcheck
+StandardOutput=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/healthcheck.log
+StandardError=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/healthcheck.log

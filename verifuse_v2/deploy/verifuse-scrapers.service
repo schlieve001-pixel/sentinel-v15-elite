@@ -1,0 +1,18 @@
+[Unit]
+Description=VeriFuse V2 Weekly Scraper Run
+After=network.target
+
+[Service]
+Type=oneshot
+User=schlieve001
+WorkingDirectory=/home/schlieve001/origin/continuity_lab
+Environment=GOOGLE_APPLICATION_CREDENTIALS=/home/schlieve001/google_credentials.json
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.adams_postsale_scraper
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.elpaso_postsale_scraper
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.larimer_scraper
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.weld_scraper
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.boulder_scraper
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.pueblo_scraper
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.daily_healthcheck
+StandardOutput=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/scrapers.log
+StandardError=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/scrapers.log
