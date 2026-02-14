@@ -1,0 +1,35 @@
+# VeriFuse V2 — Python Dependencies
+# Install: pip install -r verifuse_v2/requirements.txt
+
+# API Server
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
+# Auth & Security
+bcrypt>=4.0.0
+PyJWT>=2.8.0
+
+# Database
+# sqlite3 is stdlib — no extra dep needed
+
+# PDF Generation (dossiers + motions)
+fpdf2>=2.8.0
+
+# PDF Parsing (scrapers)
+pdfplumber>=0.10.0
+
+# HTTP Client (scrapers)
+requests>=2.31.0
+
+# HTML Parsing (scrapers)
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Billing
+stripe>=10.0.0
+
+# Vertex AI / Google Cloud (Engine #4)
+google-cloud-aiplatform>=1.50.0
+
+# Image generation (PII obfuscation)
+Pillow>=10.0.0

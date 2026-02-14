@@ -169,104 +169,145 @@ def download_postsale_pdfs(weeks_back: int = 12) -> list[Path]:
     return downloaded
 
 
+def _extract_sale_date_from_file(pdf_path: Path, text: str) -> Optional[str]:
+    """Extract sale date from PDF header text or filename."""
+    # Try header: "Foreclosure Sale List for Sale Date: February 11, 2026"
+    header_match = re.search(
+        r"Sale\s+Date:\s+(\w+\s+\d{1,2},?\s+\d{4})", text, re.IGNORECASE
+    )
+    if header_match:
+        raw = header_match.group(1).replace(",", "")
+        for fmt in ("%B %d %Y", "%b %d %Y"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+
+    # Try filename: POST_SALE_LIST_2-11-26.pdf
+    fname_match = re.search(r"(\d{1,2})-(\d{1,2})-(\d{2,4})", pdf_path.name)
+    if fname_match:
+        m, d, y = fname_match.groups()
+        if len(y) == 2:
+            y = "20" + y
+        try:
+            return f"{y}-{int(m):02d}-{int(d):02d}"
+        except ValueError:
+            pass
+    return None
+
+
 def parse_postsale_pdf(pdf_path: str | Path) -> list[dict]:
     """Parse an Adams County Post Sale List PDF.
 
-    Expected columns (confirmed from August 2025 PDF):
-        Foreclosure # | Property Address | Certificate of Purchase To |
-        Purchaser Address | Bid Amount | Deficiency Amount |
-        Overbid Amount | Total Indebtedness
+    Adams PDFs use a TEXT-BASED key-value format (NOT tables):
+        Foreclosure #: A202580924
+        Property Address: 2469 Devonshire Court, 34, Denver, CO, 80229
+        Certificate of Purchase to: Guild Mortgage Company LLC
+        Purchaser Address: 5887 Copley Drive, ...
+        Bid Amount: $203,600.00
+        Deficiency Amount: $43,004.82
+        Overbid Amount: $0.00 Total Indebtedness: $246,604.82
 
-    Returns list of dicts with all financial fields.
+    Note: "Overbid Amount" and "Total Indebtedness" are on the SAME line.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         log.error("PDF not found: %s", pdf_path)
         return []
 
-    records = []
+    # Extract all text from all pages
+    full_text = ""
     with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            tables = page.extract_tables()
-            if not tables:
-                log.debug("No tables on page %d", page_num + 1)
-                continue
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                full_text += text + "\n"
 
-            for table in tables:
-                for row in table:
-                    if not row or len(row) < 5:
-                        continue
+    if not full_text.strip():
+        log.warning("No text extracted from %s", pdf_path.name)
+        return []
 
-                    first_cell = (row[0] or "").strip()
+    # Extract the sale date from the header
+    sale_date = _extract_sale_date_from_file(pdf_path, full_text)
 
-                    # Skip headers, footers, blank rows
-                    if not first_cell:
-                        continue
-                    if any(h in first_cell.lower() for h in [
-                        "foreclosure", "property", "certificate", "page",
-                        "post sale", "public trustee", "report", "date",
-                        "adams county", "sale list",
-                    ]):
-                        continue
+    # Parse records using regex on labeled fields
+    # Split into blocks by "Foreclosure #:" delimiter
+    blocks = re.split(r"(?=Foreclosure\s*#\s*:)", full_text)
 
-                    foreclosure_num = first_cell
-                    property_address = (row[1] or "").strip() if len(row) > 1 else ""
-                    buyer = (row[2] or "").strip() if len(row) > 2 else ""
-                    buyer_address = (row[3] or "").strip() if len(row) > 3 else ""
+    records = []
+    money_re = re.compile(r"\$[\d,]+\.?\d*")
 
-                    # Financial columns
-                    money_values = []
-                    for cell in row[4:] if len(row) > 4 else []:
-                        cell_str = (cell or "").strip()
-                        if cell_str:
-                            money_values.append(_clean_money(cell_str))
+    for block in blocks:
+        block = block.strip()
+        if not block.startswith("Foreclosure"):
+            continue
 
-                    bid_amount = money_values[0] if len(money_values) > 0 else 0.0
-                    deficiency = money_values[1] if len(money_values) > 1 else 0.0
-                    overbid = money_values[2] if len(money_values) > 2 else 0.0
-                    total_indebtedness = money_values[3] if len(money_values) > 3 else 0.0
+        # Foreclosure number
+        fc_match = re.search(r"Foreclosure\s*#\s*:\s*([A-Z0-9]+)", block)
+        if not fc_match:
+            continue
+        foreclosure_num = fc_match.group(1)
+        # Skip if it doesn't look like a real foreclosure number
+        if not re.match(r"^[A-Z]\d{6,}", foreclosure_num):
+            continue
 
-                    # Compute overbid from bid - indebtedness if not provided
-                    if overbid == 0.0 and bid_amount > 0 and total_indebtedness > 0:
-                        computed = bid_amount - total_indebtedness
-                        if computed > 0:
-                            overbid = computed
+        # Property Address (may span multiple lines before next label)
+        addr_match = re.search(
+            r"Property\s+Address\s*:\s*(.+?)(?=Certificate\s+of\s+Purchase|$)",
+            block, re.DOTALL
+        )
+        property_address = ""
+        if addr_match:
+            # Join multi-line address, clean up
+            raw_addr = addr_match.group(1).strip()
+            property_address = re.sub(r"\s+", " ", raw_addr).strip()
 
-                    # Extract sale date from the PDF filename or foreclosure number
-                    sale_date = None
-                    # Try extracting from row
-                    for cell in row:
-                        cell_str = (cell or "").strip()
-                        if re.match(r"\d{2}/\d{2}/\d{2,4}", cell_str):
-                            sale_date = _parse_date(cell_str)
-                            if sale_date:
-                                break
+        # Buyer (Certificate of Purchase to)
+        buyer_match = re.search(
+            r"Certificate\s+of\s+Purchase\s+to\s*:\s*(.+?)(?=Purchaser\s+Address|$)",
+            block, re.DOTALL
+        )
+        buyer = ""
+        if buyer_match:
+            buyer = re.sub(r"\s+", " ", buyer_match.group(1).strip())
 
-                    # Try from filename
-                    if not sale_date:
-                        fname_match = re.search(r"(\d{1,2})-(\d{1,2})-(\d{2,4})", pdf_path.name)
-                        if fname_match:
-                            m, d, y = fname_match.groups()
-                            if len(y) == 2:
-                                y = "20" + y
-                            try:
-                                sale_date = f"{y}-{int(m):02d}-{int(d):02d}"
-                            except ValueError:
-                                pass
+        # Bid Amount
+        bid_match = re.search(r"Bid\s+Amount\s*:\s*(\$[\d,]+\.?\d*)", block)
+        bid_amount = _clean_money(bid_match.group(1)) if bid_match else 0.0
 
-                    record = {
-                        "foreclosure_number": foreclosure_num,
-                        "property_address": property_address,
-                        "buyer": buyer,
-                        "buyer_address": buyer_address,
-                        "bid_amount": bid_amount,
-                        "deficiency": deficiency,
-                        "overbid": overbid,
-                        "total_indebtedness": total_indebtedness,
-                        "sale_date": sale_date,
-                        "surplus": overbid,
-                    }
-                    records.append(record)
+        # Deficiency Amount
+        def_match = re.search(r"Deficiency\s+Amount\s*:\s*(\$[\d,]+\.?\d*)", block)
+        deficiency = _clean_money(def_match.group(1)) if def_match else 0.0
+
+        # Overbid Amount (may be on same line as Total Indebtedness)
+        over_match = re.search(r"Overbid\s+Amount\s*:\s*(\$[\d,]+\.?\d*)", block)
+        overbid = _clean_money(over_match.group(1)) if over_match else 0.0
+
+        # Total Indebtedness
+        indebt_match = re.search(r"Total\s+Indebtedness\s*:\s*(\$[\d,]+\.?\d*)", block)
+        total_indebtedness = _clean_money(indebt_match.group(1)) if indebt_match else 0.0
+
+        # Compute surplus: overbid = bid - indebtedness (if overbid not explicit)
+        surplus = overbid
+        if surplus == 0.0 and bid_amount > 0 and total_indebtedness > 0:
+            computed = bid_amount - total_indebtedness
+            if computed > 0:
+                surplus = computed
+
+        record = {
+            "foreclosure_number": foreclosure_num,
+            "property_address": property_address,
+            "buyer": buyer,
+            "buyer_address": "",
+            "bid_amount": bid_amount,
+            "deficiency": deficiency,
+            "overbid": overbid,
+            "total_indebtedness": total_indebtedness,
+            "sale_date": sale_date,
+            "surplus": surplus,
+        }
+        records.append(record)
 
     log.info("Parsed %d records from %s", len(records), pdf_path.name)
     return records
@@ -326,9 +367,9 @@ def ingest_records(records: list[dict], source_file: str = "") -> dict:
                  source_name, statute_window, days_remaining, owner_of_record,
                  property_address, sale_date, estimated_surplus, overbid_amount,
                  total_indebtedness, completeness_score, confidence_score,
-                 data_grade, record_class, record_hash, source_file,
+                 data_grade, record_hash, source_file,
                  created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, [
                 asset_id, "Adams", "CO", "adams_co",
                 rec["foreclosure_number"], "FORECLOSURE_SURPLUS",
@@ -337,7 +378,7 @@ def ingest_records(records: list[dict], source_file: str = "") -> dict:
                 days_remaining, rec.get("buyer", ""),
                 rec["property_address"], rec["sale_date"],
                 surplus, rec["overbid"], indebtedness,
-                completeness, confidence, grade, record_class,
+                completeness, confidence, grade,
                 rhash, source_file, now, now,
             ])
 

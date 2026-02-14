@@ -1,14 +1,21 @@
 """
-VERIFUSE V2 — El Paso County Post-Sale List PDF Scraper
+VERIFUSE V2 — El Paso County Pre-Sale Foreclosure PDF Scraper
 
-Downloads and parses weekly Post Sale List PDFs from the El Paso County
-Public Trustee. These PDFs contain 100% verifiable data including:
-  - Foreclosure Number, Property Address, Buyer
-  - Bid Amount, Deficiency Amount, Overbid Amount, Total Indebtedness
+Downloads and parses weekly Pre Sale List PDFs from the El Paso County
+Public Trustee (GTS Search system). These PDFs contain verified data:
+  - Foreclosure Number, Grantor (owner), Street Address
+  - Lender's Bid Amount, Deficiency, Total Indebtedness
 
-Source: https://elpasopublictrustee.com/foreclosure-reports/
-Platform: GTS Search (elpasopublictrustee.com/GTSSearch/)
-Sales: Wednesdays at 10:00 AM MT via RealAuction.com
+Note: El Paso does NOT publish a Post Sale List with overbid data.
+Pre-sale data provides verified indebtedness for cross-referencing
+with auction results. Overbid (surplus) is unknown until the sale
+occurs, so these are ingested as PIPELINE leads awaiting outcome data.
+
+Source: https://elpasopublictrustee.com/GTSSearch/reports
+PDF pattern: Report_Files/{YYYYMMDD} Pre Sale list.pdf
+
+Also downloads archived Post Sale Continuance lists from type=8 reports
+which link to individual weekly PDFs with sale outcome data.
 
 Usage:
   python -m verifuse_v2.scrapers.elpaso_postsale_scraper
@@ -26,6 +33,7 @@ from typing import Optional
 
 import pdfplumber
 import requests
+from bs4 import BeautifulSoup
 
 from verifuse_v2.db import database as db
 from verifuse_v2.daily_healthcheck import compute_confidence, compute_grade
@@ -35,20 +43,16 @@ log = logging.getLogger(__name__)
 
 RAW_PDF_DIR = Path(__file__).resolve().parent.parent / "data" / "raw_pdfs" / "elpaso"
 
-# El Paso County GTS Search report URLs
-REPORT_INDEX_URL = "https://elpasopublictrustee.com/foreclosure-reports/"
-GTS_REPORT_BASE = "https://elpasopublictrustee.com/GTSSearch/report"
-
-# Post-sale list report type (GTS system)
-POST_SALE_REPORT_TYPE = 3  # type=1 is pre-sale, type=3 is post-sale
+GTS_BASE = "https://elpasopublictrustee.com/GTSSearch/"
+PRE_SALE_REPORT_URL = GTS_BASE + "report?t=1"
+ARCHIVED_CONTINUANCE_URL = GTS_BASE + "report?t=8"
 
 
 def _clean_money(raw: str) -> float:
-    """Parse money values like '$155,300.00' or '$ 2 99,937.74' → float."""
+    """Parse money values like '$ 320,912.46' → float."""
     if not raw:
         return 0.0
     cleaned = raw.replace("$", "").replace(",", "").replace(" ", "").strip()
-    # Handle parentheses for negative values
     if cleaned.startswith("(") and cleaned.endswith(")"):
         cleaned = "-" + cleaned[1:-1]
     try:
@@ -59,11 +63,11 @@ def _clean_money(raw: str) -> float:
 
 
 def _parse_date(raw: str) -> Optional[str]:
-    """Parse dates like '06/06/25', '10/05/2024' → ISO 8601."""
+    """Parse dates in various formats → ISO 8601."""
     if not raw or not raw.strip():
         return None
     raw = raw.strip()
-    for fmt in ("%m/%d/%y", "%m/%d/%Y", "%Y-%m-%d"):
+    for fmt in ("%m/%d/%y", "%m/%d/%Y", "%Y-%m-%d", "%B %d %Y", "%B %d, %Y"):
         try:
             dt = datetime.strptime(raw, fmt)
             if dt.year < 100:
@@ -71,192 +75,221 @@ def _parse_date(raw: str) -> Optional[str]:
             return dt.strftime("%Y-%m-%d")
         except ValueError:
             continue
-    log.warning("Could not parse date: %r", raw)
     return None
 
 
 def _make_asset_id(foreclosure_number: str) -> str:
     """Deterministic asset_id from El Paso foreclosure number."""
     clean = foreclosure_number.strip().replace(" ", "_")
-    return f"elpaso_postsale_{clean}"
+    return f"elpaso_presale_{clean}"
 
 
 def _record_hash(rec: dict) -> str:
     """SHA-256 hash of key fields for change detection."""
-    key = f"{rec['foreclosure_number']}|{rec['bid_amount']}|{rec['overbid']}|{rec['total_indebtedness']}"
+    key = f"{rec['foreclosure_number']}|{rec['bid_amount']}|{rec['total_indebtedness']}|{rec['address']}"
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def download_postsale_pdfs(weeks_back: int = 8) -> list[Path]:
-    """Download recent Post Sale List PDFs from El Paso County.
+def download_presale_pdfs(weeks_back: int = 12) -> list[Path]:
+    """Download Pre Sale List PDFs from El Paso GTS Search.
 
-    El Paso uses GTS Search — we try to fetch the report page and
-    extract PDF links. Falls back to date-based URL guessing.
+    Scrapes the report page (type=1) for current PDF link, and also
+    tries date-based URL guessing for recent weeks.
     """
     RAW_PDF_DIR.mkdir(parents=True, exist_ok=True)
     downloaded = []
 
-    # Try fetching the reports index page for PDF links
+    # Method 1: Get current pre-sale PDF from report page
     try:
-        resp = requests.get(REPORT_INDEX_URL, timeout=30)
+        resp = requests.get(PRE_SALE_REPORT_URL, timeout=30)
         if resp.status_code == 200:
-            # Look for PDF links in the page
-            pdf_links = re.findall(
-                r'href=["\']([^"\']*(?:post.?sale|PostSale)[^"\']*\.pdf)["\']',
-                resp.text,
-                re.IGNORECASE,
-            )
-            for link in pdf_links[:weeks_back]:
-                if not link.startswith("http"):
-                    link = f"https://elpasopublictrustee.com{link}"
-                try:
-                    pdf_resp = requests.get(link, timeout=30)
-                    if pdf_resp.status_code == 200 and len(pdf_resp.content) > 500:
-                        fname = link.split("/")[-1]
-                        path = RAW_PDF_DIR / fname
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if ".pdf" in href.lower() and "sale" in href.lower():
+                    if not href.startswith("http"):
+                        href = GTS_BASE + href
+                    try:
+                        pdf_resp = requests.get(href, timeout=30)
+                        if pdf_resp.status_code == 200 and pdf_resp.content[:5] == b"%PDF-":
+                            fname = href.split("/")[-1].replace("%20", "_")
+                            path = RAW_PDF_DIR / fname
+                            path.write_bytes(pdf_resp.content)
+                            downloaded.append(path)
+                            log.info("Downloaded: %s (%d bytes)", fname, len(pdf_resp.content))
+                    except requests.RequestException as e:
+                        log.debug("Failed: %s: %s", href, e)
+    except requests.RequestException as e:
+        log.warning("Could not fetch pre-sale report page: %s", e)
+
+    # Method 2: Try date-based URL patterns for recent weeks
+    now = datetime.now(timezone.utc)
+    for week in range(weeks_back):
+        dt = now - timedelta(weeks=week)
+        # El Paso sales on Wednesdays — find nearest Wednesday
+        days_since_wed = (dt.weekday() - 2) % 7
+        wed = dt - timedelta(days=days_since_wed)
+        date_str = wed.strftime("%Y%m%d")
+
+        # Try various filename patterns observed
+        patterns = [
+            f"Report_Files/{date_str} Pre Sale list.pdf",
+            f"Report_Files/{date_str} Pre Sale List.pdf",
+            f"Report_Files/{date_str}%20Pre%20Sale%20list.pdf",
+        ]
+        for pattern in patterns:
+            url = GTS_BASE + pattern.replace(" ", "%20")
+            try:
+                pdf_resp = requests.get(url, timeout=15)
+                if pdf_resp.status_code == 200 and pdf_resp.content[:5] == b"%PDF-":
+                    fname = f"elpaso_presale_{date_str}.pdf"
+                    path = RAW_PDF_DIR / fname
+                    if not path.exists():
                         path.write_bytes(pdf_resp.content)
                         downloaded.append(path)
                         log.info("Downloaded: %s (%d bytes)", fname, len(pdf_resp.content))
-                except requests.RequestException as e:
-                    log.debug("Failed to download %s: %s", link, e)
-    except requests.RequestException as e:
-        log.warning("Could not fetch report index: %s", e)
-
-    # Also try GTS report endpoint
-    if not downloaded:
-        try:
-            resp = requests.get(
-                GTS_REPORT_BASE,
-                params={"t": POST_SALE_REPORT_TYPE},
-                timeout=30,
-            )
-            if resp.status_code == 200 and len(resp.content) > 500:
-                content_type = resp.headers.get("content-type", "")
-                if "pdf" in content_type.lower():
-                    path = RAW_PDF_DIR / "elpaso_postsale_latest.pdf"
-                    path.write_bytes(resp.content)
-                    downloaded.append(path)
-                    log.info("Downloaded GTS post-sale report (%d bytes)", len(resp.content))
-        except requests.RequestException as e:
-            log.debug("GTS report fetch failed: %s", e)
+                    break
+            except requests.RequestException:
+                continue
 
     if not downloaded:
-        log.warning("No El Paso post-sale PDFs downloaded")
+        # Method 3: Use any existing files on disk
+        existing = list(RAW_PDF_DIR.glob("*.pdf"))
+        if existing:
+            log.info("Using %d existing El Paso PDFs on disk", len(existing))
+            return existing
+        log.warning("No El Paso pre-sale PDFs available")
+
     return downloaded
 
 
-def parse_postsale_pdf(pdf_path: str | Path) -> list[dict]:
-    """Parse an El Paso County Post Sale List PDF.
+def parse_presale_pdf(pdf_path: str | Path) -> list[dict]:
+    """Parse an El Paso County Pre Sale List PDF.
 
-    Expected columns (in order):
-        Foreclosure # | Property Address | Certificate of Purchase To |
-        Purchaser Address | Bid Amount | Deficiency Amount |
-        Overbid Amount | Total Indebtedness
+    El Paso PDFs use TEXT-BASED key-value format:
+        Foreclosure: #: EPC202500155
+        The Grantor: Careli Monserrat Alejandre
+        Street Address: 6133 Callan Drive, Colorado Springs, CO 80927
+        Lender's Bid Amount: $ 320,912.46
+        Deficiency: $ 0.00
+        Total Indebtedness: $ 320,912.46
 
-    Returns list of dicts with all financial fields.
+    Returns list of dicts with financial fields.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         log.error("PDF not found: %s", pdf_path)
         return []
 
-    records = []
+    # Extract all text
+    full_text = ""
     with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            tables = page.extract_tables()
-            if not tables:
-                log.debug("No tables on page %d", page_num + 1)
-                continue
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                full_text += text + "\n"
 
-            for table in tables:
-                for row in table:
-                    if not row or len(row) < 5:
-                        continue
+    if not full_text.strip():
+        log.warning("No text extracted from %s", pdf_path.name)
+        return []
 
-                    first_cell = (row[0] or "").strip()
+    # Extract sale date from header
+    sale_date = None
+    header_match = re.search(
+        r"Sale\s+Date:\s+(\w+\s+\d{1,2},?\s+\d{4})", full_text, re.IGNORECASE
+    )
+    if header_match:
+        raw = header_match.group(1).replace(",", "")
+        sale_date = _parse_date(raw)
 
-                    # Skip headers, footers, blank rows
-                    if not first_cell:
-                        continue
-                    if any(h in first_cell.lower() for h in [
-                        "foreclosure", "property", "certificate", "page",
-                        "post sale", "public trustee", "report", "date",
-                    ]):
-                        continue
+    # Split into blocks by "Foreclosure: #:" delimiter
+    blocks = re.split(r"(?=Foreclosure\s*:\s*#\s*:)", full_text)
 
-                    # Parse the row — column positions may shift
-                    foreclosure_num = first_cell
-                    property_address = (row[1] or "").strip() if len(row) > 1 else ""
-                    buyer = (row[2] or "").strip() if len(row) > 2 else ""
-                    buyer_address = (row[3] or "").strip() if len(row) > 3 else ""
+    records = []
+    for block in blocks:
+        block = block.strip()
+        if not block.startswith("Foreclosure"):
+            continue
 
-                    # Financial columns — scan remaining cells for money values
-                    money_values = []
-                    for cell in row[4:] if len(row) > 4 else []:
-                        cell_str = (cell or "").strip()
-                        if cell_str:
-                            money_values.append(_clean_money(cell_str))
+        # Foreclosure number: "Foreclosure: #: EPC202500155"
+        fc_match = re.search(r"Foreclosure\s*:\s*#\s*:\s*(EPC\d+)", block)
+        if not fc_match:
+            continue
+        foreclosure_num = fc_match.group(1)
 
-                    # Expected order: bid_amount, deficiency, overbid, total_indebtedness
-                    bid_amount = money_values[0] if len(money_values) > 0 else 0.0
-                    deficiency = money_values[1] if len(money_values) > 1 else 0.0
-                    overbid = money_values[2] if len(money_values) > 2 else 0.0
-                    total_indebtedness = money_values[3] if len(money_values) > 3 else 0.0
+        # Grantor (owner): "The Grantor: Name"
+        grantor_match = re.search(
+            r"The\s+Grantor\s*:\s*(.+?)(?=Legal\s+Description|Street\s+Address|PARCEL|$)",
+            block, re.DOTALL
+        )
+        owner = ""
+        if grantor_match:
+            owner = re.sub(r"\s+", " ", grantor_match.group(1).strip())
 
-                    # If we have fewer money columns, try to detect from headers
-                    # Also handle case where overbid = bid - indebtedness
-                    if overbid == 0.0 and bid_amount > 0 and total_indebtedness > 0:
-                        computed_overbid = bid_amount - total_indebtedness
-                        if computed_overbid > 0:
-                            overbid = computed_overbid
+        # Street Address
+        addr_match = re.search(
+            r"Street\s+Address\s*:\s*(.+?)(?=Current\s+Beneficiary|First\s+Publication|Lender|$)",
+            block, re.DOTALL
+        )
+        address = ""
+        if addr_match:
+            address = re.sub(r"\s+", " ", addr_match.group(1).strip())
 
-                    # Extract sale date from foreclosure number if possible
-                    # El Paso format: EPC202XXXXXXX
-                    sale_date = None
-                    date_match = re.search(r"EPC(\d{4})(\d{2})", foreclosure_num)
-                    if date_match:
-                        year = int(date_match.group(1))
-                        month = int(date_match.group(2))
-                        if 2020 <= year <= 2030 and 1 <= month <= 12:
-                            sale_date = f"{year}-{month:02d}-01"
+        # Lender's Bid Amount
+        bid_match = re.search(r"Lender.?s?\s+Bid\s+Amount\s*:\s*(\$[\d,. ]+)", block)
+        bid_amount = _clean_money(bid_match.group(1)) if bid_match else 0.0
 
-                    # Also scan row for date patterns
-                    if not sale_date:
-                        for cell in row:
-                            cell_str = (cell or "").strip()
-                            if re.match(r"\d{2}/\d{2}/\d{2,4}", cell_str):
-                                sale_date = _parse_date(cell_str)
-                                if sale_date:
-                                    break
+        # Deficiency
+        def_match = re.search(r"Deficiency\s*:\s*(\$[\d,. ]+)", block)
+        deficiency = _clean_money(def_match.group(1)) if def_match else 0.0
 
-                    record = {
-                        "foreclosure_number": foreclosure_num,
-                        "property_address": property_address,
-                        "buyer": buyer,
-                        "buyer_address": buyer_address,
-                        "bid_amount": bid_amount,
-                        "deficiency": deficiency,
-                        "overbid": overbid,
-                        "total_indebtedness": total_indebtedness,
-                        "sale_date": sale_date,
-                        "surplus": overbid,  # Overbid IS the surplus
-                    }
-                    records.append(record)
+        # Total Indebtedness
+        indebt_match = re.search(r"Total\s+Indebtedness\s*:\s*(\$[\d,. ]+)", block)
+        total_indebtedness = _clean_money(indebt_match.group(1)) if indebt_match else 0.0
+
+        # Beneficiary (lender name)
+        bene_match = re.search(
+            r"Current\s+Beneficiary\s+Name\s*:\s*(.+?)(?=First\s+Publication|$)",
+            block, re.DOTALL
+        )
+        beneficiary = ""
+        if bene_match:
+            beneficiary = re.sub(r"\s+", " ", bene_match.group(1).strip())
+
+        record = {
+            "foreclosure_number": foreclosure_num,
+            "owner": owner,
+            "address": address,
+            "bid_amount": bid_amount,
+            "deficiency": deficiency,
+            "total_indebtedness": total_indebtedness,
+            "beneficiary": beneficiary,
+            "sale_date": sale_date,
+            # Pre-sale: overbid unknown until auction completes
+            "overbid": 0.0,
+            "surplus": 0.0,
+        }
+        records.append(record)
 
     log.info("Parsed %d records from %s", len(records), pdf_path.name)
     return records
 
 
 def ingest_records(records: list[dict], source_file: str = "") -> dict:
-    """Ingest parsed El Paso records into the V2 database."""
+    """Ingest parsed El Paso records into the V2 database.
+
+    Pre-sale records are ingested as PIPELINE leads with known
+    indebtedness. They'll be upgraded when auction outcome data
+    (overbid/surplus) becomes available.
+    """
     db.init_db()
-    stats = {"total": len(records), "inserted": 0, "updated": 0, "skipped": 0, "no_surplus": 0}
+    stats = {"total": len(records), "inserted": 0, "updated": 0, "skipped": 0}
     now = datetime.now(timezone.utc).isoformat()
 
     for rec in records:
-        surplus = rec["overbid"]
-        if surplus < 1000:
-            stats["no_surplus"] += 1
+        # Skip if no meaningful indebtedness
+        if rec["total_indebtedness"] <= 0:
+            stats["skipped"] += 1
             continue
 
         asset_id = _make_asset_id(rec["foreclosure_number"])
@@ -271,7 +304,7 @@ def ingest_records(records: list[dict], source_file: str = "") -> dict:
         else:
             stats["inserted"] += 1
 
-        # Days remaining (180-day window from sale)
+        # Days remaining (180-day window from sale date)
         days_remaining = None
         if rec["sale_date"]:
             try:
@@ -282,18 +315,20 @@ def ingest_records(records: list[dict], source_file: str = "") -> dict:
                 pass
 
         indebtedness = rec["total_indebtedness"]
-        completeness = 1.0 if all([
-            rec["property_address"], rec["sale_date"], indebtedness > 0
-        ]) else 0.8 if rec["property_address"] else 0.5
+        surplus = rec["surplus"]  # 0 for pre-sale (unknown until auction)
 
+        completeness = 0.8 if all([
+            rec["owner"], rec["address"], rec["sale_date"]
+        ]) else 0.5
+
+        # Pre-sale: confidence reflects known indebtedness but unknown outcome
         confidence = compute_confidence(
             surplus, indebtedness, rec["sale_date"],
-            rec.get("buyer", ""), rec["property_address"]
+            rec["owner"], rec["address"]
         )
-        grade, record_class = compute_grade(
-            surplus, indebtedness, rec["sale_date"],
-            days_remaining, confidence, completeness
-        )
+        # Pre-sale leads are SILVER/PIPELINE (awaiting auction outcome)
+        grade = "SILVER"
+        record_class = "PIPELINE"
 
         with db.get_db() as conn:
             conn.execute("""
@@ -302,38 +337,33 @@ def ingest_records(records: list[dict], source_file: str = "") -> dict:
                  source_name, statute_window, days_remaining, owner_of_record,
                  property_address, sale_date, estimated_surplus, overbid_amount,
                  total_indebtedness, completeness_score, confidence_score,
-                 data_grade, record_class, record_hash, source_file,
+                 data_grade, record_hash, source_file,
                  created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, [
                 asset_id, "El Paso", "CO", "elpaso_co",
-                rec["foreclosure_number"], "FORECLOSURE_SURPLUS",
-                "elpaso_public_trustee_postsale",
+                rec["foreclosure_number"], "FORECLOSURE_PRESALE",
+                "elpaso_public_trustee_presale",
                 "180 days from sale_date (C.R.S. § 38-38-111)",
-                days_remaining, rec.get("buyer", ""),
-                rec["property_address"], rec["sale_date"],
+                days_remaining, rec["owner"],
+                rec["address"], rec["sale_date"],
                 surplus, rec["overbid"], indebtedness,
-                completeness, confidence, grade, record_class,
+                completeness, confidence, grade,
                 rhash, source_file, now, now,
             ])
-
-            promoted_at = now if record_class == "ATTORNEY" else None
-            closed_at = now if record_class == "CLOSED" else None
-            close_reason = "kill_switch:statute_expired" if record_class == "CLOSED" else None
 
             conn.execute("""
                 INSERT OR REPLACE INTO legal_status
                 (asset_id, record_class, data_grade, days_remaining,
-                 statute_window, last_evaluated_at, promoted_at, closed_at, close_reason)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                 statute_window, last_evaluated_at)
+                VALUES (?,?,?,?,?,?)
             """, [
                 asset_id, record_class, grade, days_remaining,
-                "180 days from sale_date (C.R.S. § 38-38-111)",
-                now, promoted_at, closed_at, close_reason,
+                "180 days from sale_date (C.R.S. § 38-38-111)", now,
             ])
 
-    log.info("El Paso ingestion: %d inserted, %d updated, %d skipped, %d no surplus",
-             stats["inserted"], stats["updated"], stats["skipped"], stats["no_surplus"])
+    log.info("El Paso ingestion: %d inserted, %d updated, %d skipped",
+             stats["inserted"], stats["updated"], stats["skipped"])
     return stats
 
 
@@ -342,22 +372,22 @@ def run(pdf_path: str | None = None) -> dict:
     if pdf_path:
         paths = [Path(pdf_path)]
     else:
-        paths = download_postsale_pdfs()
+        paths = download_presale_pdfs()
 
     if not paths:
-        return {"error": "No El Paso post-sale PDFs available"}
+        return {"error": "No El Paso pre-sale PDFs available"}
 
-    total_stats = {"total": 0, "inserted": 0, "updated": 0, "skipped": 0, "no_surplus": 0, "files": 0}
+    total_stats = {"total": 0, "inserted": 0, "updated": 0, "skipped": 0, "files": 0}
 
     for path in paths:
-        records = parse_postsale_pdf(path)
+        records = parse_presale_pdf(path)
         if not records:
             log.warning("No records from %s", path.name)
             continue
 
         stats = ingest_records(records, source_file=str(path))
         total_stats["files"] += 1
-        for k in ("total", "inserted", "updated", "skipped", "no_surplus"):
+        for k in ("total", "inserted", "updated", "skipped"):
             total_stats[k] += stats.get(k, 0)
 
     # Log pipeline event
@@ -365,7 +395,7 @@ def run(pdf_path: str | None = None) -> dict:
         conn.execute("""
             INSERT INTO pipeline_events
             (asset_id, event_type, old_value, new_value, actor, reason, created_at)
-            VALUES ('SYSTEM', 'SCRAPE', 'elpaso_postsale', ?, 'elpaso_postsale_scraper',
+            VALUES ('SYSTEM', 'SCRAPE', 'elpaso_presale', ?, 'elpaso_presale_scraper',
                     ?, ?)
         """, [
             f"{total_stats['inserted']} new, {total_stats['updated']} updated",
@@ -379,14 +409,14 @@ def run(pdf_path: str | None = None) -> dict:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="El Paso County Post-Sale Scraper")
-    parser.add_argument("--file", help="Path to a local post-sale PDF file")
+    parser = argparse.ArgumentParser(description="El Paso County Pre-Sale Scraper")
+    parser.add_argument("--file", help="Path to a local pre-sale PDF file")
     args = parser.parse_args()
 
     result = run(pdf_path=args.file)
     print()
     print("=" * 50)
-    print("  EL PASO COUNTY POST-SALE RESULTS")
+    print("  EL PASO COUNTY PRE-SALE RESULTS")
     print("=" * 50)
     for k, v in result.items():
         print(f"  {k}: {v}")
