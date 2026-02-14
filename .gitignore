@@ -19,6 +19,8 @@ verifuse/data/
 .env
 *.env.local
 .env.production
+**/google_credentials.json
+*_credentials.json
 
 # Logs
 *.log

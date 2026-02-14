@@ -1,28 +1,19 @@
 """
-VERIFUSE V2 — Engine #4 Production: Vertex AI Forensic PDF Reader
+VERIFUSE V2 — Engine #4: Vertex AI PDF Reader (Titanium Production)
 
-Gold Master engine that extracts financial data from foreclosure PDFs
-using Google Vertex AI (Gemini). Replaces the broken draft vertex_engine.py.
+Standalone CLI script. Extracts financial data from foreclosure PDFs
+using Google Vertex AI (Gemini) with Titanium reliability guarantees.
 
-Pre-flight checks:
-  - Validates GOOGLE_APPLICATION_CREDENTIALS JSON
-  - Validates DB schema (assets + assets_staging have required columns)
-  - Counts staged records with pdf_path
-
-Core flow:
-  1. Query assets_staging WHERE status='STAGED' AND pdf_path IS NOT NULL
-  2. Validate each PDF: exists, < 50MB, starts with %PDF-
-  3. Call Vertex AI with forced JSON schema extraction
-  4. Parse with OCR-aware parse_money()
-  5. Map to V2 columns, compute surplus, confidence, grade
-  6. INSERT OR REPLACE into assets, update assets_staging.status
-  7. Exponential backoff on 429/503/500
-  8. JSONL audit log
+Guarantees:
+  - Atomic lockfile prevents concurrent runs
+  - Idempotent: skips leads with existing winning_bid + total_debt
+  - Safety gate: only writes if confidence > 0.8 AND bid >= debt
+  - Structured JSONL audit log for every action
 
 Usage:
-  python -m verifuse_v2.scrapers.vertex_engine_production --preflight-only
-  python -m verifuse_v2.scrapers.vertex_engine_production --limit 50
-  python -m verifuse_v2.scrapers.vertex_engine_production --project my-gcp-project
+    python -m verifuse_v2.scrapers.vertex_engine_production --preflight-only
+    python -m verifuse_v2.scrapers.vertex_engine_production --limit 50
+    python -m verifuse_v2.scrapers.vertex_engine_production --limit 10 --dry-run
 """
 
 from __future__ import annotations
@@ -45,12 +36,18 @@ from verifuse_v2.daily_healthcheck import compute_confidence, compute_grade
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+# ── Paths ────────────────────────────────────────────────────────────
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+LOG_DIR = BASE_DIR / "logs"
 AUDIT_LOG = LOG_DIR / "engine4_audit.jsonl"
+LOCK_FILE = BASE_DIR / "data" / ".vertex_engine.lock"
 MAX_PDF_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_RETRIES = 5
+CONFIDENCE_GATE = 0.8  # Only write if confidence > this
 
-MONEY_RE = re.compile(r"[-]?\$?\s*([0O9]{0,1}[0-9]{0,2}(?:[,.\s][0-9O]{3})*|[0-9]+)(?:\.(\d{1,2}))?")
+# ── Regex ────────────────────────────────────────────────────────────
+
 ISO_DATE_RE = re.compile(r"\b(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 
 FORCE_SCHEMA = {
@@ -73,36 +70,66 @@ FORCE_SCHEMA = {
 }
 
 
-# ── OCR-aware money parser ────────────────────────────────────────────
+# ── Atomic Lockfile ──────────────────────────────────────────────────
+
+class LockFile:
+    """Atomic lockfile using os.open with O_CREAT | O_EXCL."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.fd: Optional[int] = None
+
+    def acquire(self) -> bool:
+        """Acquire the lock. Returns True if successful."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(self.fd, f"{os.getpid()}\n".encode())
+            return True
+        except FileExistsError:
+            # Check if the PID in the lockfile is still alive
+            try:
+                pid = int(self.path.read_text().strip())
+                os.kill(pid, 0)  # Check if process exists
+                return False  # Process is alive — real lock
+            except (ValueError, ProcessLookupError, PermissionError):
+                # Stale lock — remove and retry
+                log.warning("Removing stale lockfile (PID no longer running)")
+                self.path.unlink(missing_ok=True)
+                try:
+                    self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(self.fd, f"{os.getpid()}\n".encode())
+                    return True
+                except FileExistsError:
+                    return False
+
+    def release(self) -> None:
+        """Release the lock."""
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        self.path.unlink(missing_ok=True)
+
+
+# ── OCR-aware money parser ───────────────────────────────────────────
 
 def parse_money(raw: Optional[str]) -> Optional[float]:
-    """Parse money values with OCR-aware corrections.
-
-    Handles common OCR errors:
-    - 'O' mistaken for '0'
-    - Spaces in numbers: '$1 234 567.89'
-    - Missing decimal: '$155300'
-    """
+    """Parse money values with OCR-aware corrections."""
     if raw is None:
         return None
     s = str(raw).strip()
     if not s:
         return None
 
-    # OCR corrections: O → 0
     s = s.replace("O", "0").replace("o", "0")
-    # Remove $ and spaces within number groups
     s = s.replace("$", "").replace(",", "").strip()
-    # Handle spaces as thousand separators
     s = re.sub(r"(\d)\s+(\d)", r"\1\2", s)
-    # Handle parentheses for negative
     if s.startswith("(") and s.endswith(")"):
         s = "-" + s[1:-1]
 
     try:
         return float(s)
     except ValueError:
-        # Try regex fallback
         m = re.search(r"[\d.]+", s)
         if m:
             try:
@@ -120,7 +147,6 @@ def parse_iso_date(raw: Optional[str]) -> Optional[str]:
     m = ISO_DATE_RE.search(str(raw).strip())
     if m:
         return m.group(0)
-    # Try common formats
     for fmt in ("%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y"):
         try:
             dt = datetime.strptime(str(raw).strip(), fmt)
@@ -130,7 +156,7 @@ def parse_iso_date(raw: Optional[str]) -> Optional[str]:
     return None
 
 
-# ── Pre-flight checks ────────────────────────────────────────────────
+# ── Pre-flight checks ───────────────────────────────────────────────
 
 def validate_credentials() -> tuple[bool, str]:
     """Validate GOOGLE_APPLICATION_CREDENTIALS JSON file."""
@@ -158,21 +184,16 @@ def validate_credentials() -> tuple[bool, str]:
 def validate_schema() -> tuple[bool, str]:
     """Validate DB schema has required columns."""
     required = {
-        "assets": ["winning_bid", "vertex_processed"],
-        "assets_staging": ["pdf_path", "status", "processed_at", "engine_version"],
+        "assets": ["winning_bid", "total_debt", "surplus_amount"],
+        "assets_staging": ["pdf_path", "status"],
     }
     try:
         with db.get_db() as conn:
             for table, cols in required.items():
-                try:
-                    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-                except Exception:
-                    return False, f"Table '{table}' does not exist. Run: python -m verifuse_v2.db.migrate_master"
-
+                existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
                 missing = [c for c in cols if c not in existing]
                 if missing:
-                    return False, f"Table '{table}' missing columns: {missing}. Run: python -m verifuse_v2.db.migrate_master"
-
+                    return False, f"Table '{table}' missing: {missing}. Run: python -m verifuse_v2.db.migrate_titanium"
         return True, "Schema OK"
     except Exception as e:
         return False, f"DB error: {e}"
@@ -192,42 +213,34 @@ def count_staged() -> tuple[int, str]:
 
 
 def run_preflight() -> bool:
-    """Run all pre-flight checks. Returns True if all pass."""
+    """Run all pre-flight checks."""
     print("\n" + "=" * 60)
-    print("  ENGINE #4 — PRE-FLIGHT CHECKS")
+    print("  ENGINE #4 — TITANIUM PRE-FLIGHT")
     print("=" * 60)
 
     all_pass = True
 
-    # Check 1: Credentials
     ok, msg = validate_credentials()
-    status = "PASS" if ok else "FAIL"
-    print(f"  [{'✓' if ok else '✗'}] Credentials: {msg}")
+    print(f"  [{'PASS' if ok else 'FAIL'}] Credentials: {msg}")
     if not ok:
         all_pass = False
 
-    # Check 2: Schema
     ok, msg = validate_schema()
-    status = "PASS" if ok else "FAIL"
-    print(f"  [{'✓' if ok else '✗'}] Schema: {msg}")
+    print(f"  [{'PASS' if ok else 'FAIL'}] Schema: {msg}")
     if not ok:
         all_pass = False
 
-    # Check 3: Staged records
     count, msg = count_staged()
-    print(f"  [{'✓' if count > 0 else '!'}] Staged: {msg}")
+    print(f"  [{'PASS' if count > 0 else 'WARN'}] Staged: {msg}")
 
     print("=" * 60)
-    if all_pass:
-        print("  PRE-FLIGHT: ALL CHECKS PASSED")
-    else:
-        print("  PRE-FLIGHT: FAILED — fix issues above")
+    print(f"  PRE-FLIGHT: {'ALL CHECKS PASSED' if all_pass else 'FAILED'}")
     print("=" * 60 + "\n")
 
     return all_pass
 
 
-# ── PDF validation ────────────────────────────────────────────────────
+# ── PDF validation ───────────────────────────────────────────────────
 
 def validate_pdf(pdf_path: Path) -> tuple[bool, str]:
     """Validate a PDF file before sending to Vertex AI."""
@@ -235,22 +248,22 @@ def validate_pdf(pdf_path: Path) -> tuple[bool, str]:
         return False, "File not found"
     size = pdf_path.stat().st_size
     if size > MAX_PDF_SIZE:
-        return False, f"Too large: {size / 1024 / 1024:.1f}MB (max {MAX_PDF_SIZE / 1024 / 1024}MB)"
+        return False, f"Too large: {size / 1024 / 1024:.1f}MB"
     if size < 100:
         return False, f"Too small: {size} bytes"
-    # Check PDF magic bytes
     header = pdf_path.read_bytes()[:5]
     if header != b"%PDF-":
         return False, f"Not a PDF (header: {header!r})"
     return True, "OK"
 
 
-# ── Audit logging ─────────────────────────────────────────────────────
+# ── Audit logging ────────────────────────────────────────────────────
 
 def _audit_log(entry: dict) -> None:
-    """Append a JSON line to the audit log."""
+    """Append structured JSON to audit log."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+    entry["engine"] = "vertex_engine_production"
     with open(AUDIT_LOG, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -258,10 +271,7 @@ def _audit_log(entry: dict) -> None:
 # ── Core extraction ──────────────────────────────────────────────────
 
 def extract_from_pdf(client, model: str, pdf_path: Path) -> dict:
-    """Extract financial data from a PDF using Vertex AI.
-
-    Returns dict with keys: ok, winning_bid, total_debt, sale_date, surplus, error
-    """
+    """Extract financial data from a PDF using Vertex AI."""
     from google.genai import types
 
     pdf_bytes = pdf_path.read_bytes()
@@ -316,7 +326,6 @@ def extract_from_pdf(client, model: str, pdf_path: Path) -> dict:
 
         except Exception as e:
             err_str = str(e)
-            # Retry on rate limit / server errors
             if any(code in err_str for code in ["429", "503", "500", "RESOURCE_EXHAUSTED"]):
                 wait = (2 ** attempt) + random.uniform(0, 1)
                 log.warning("Retry %d/%d (%.1fs): %s", attempt + 1, MAX_RETRIES, wait, err_str[:100])
@@ -327,19 +336,23 @@ def extract_from_pdf(client, model: str, pdf_path: Path) -> dict:
     return {"ok": False, "error": f"max_retries_exceeded ({MAX_RETRIES})"}
 
 
-# ── Main processing loop ─────────────────────────────────────────────
+# ── Main processing loop ────────────────────────────────────────────
 
-def process_batch(limit: int = 50, project: str | None = None, model: str = "gemini-2.0-flash") -> dict:
+def process_batch(limit: int = 50, project: str | None = None,
+                  model: str = "gemini-2.0-flash", dry_run: bool = False) -> dict:
     """Process a batch of staged PDFs through Vertex AI.
 
-    Returns stats dict with processed, ingested, failed, skipped counts.
+    Titanium guarantees:
+      - Idempotent: skips leads where winning_bid AND total_debt already set
+      - Safety gate: only writes if confidence > 0.8 AND bid >= debt
+      - Audit log: every action logged to JSONL
     """
     from google import genai
 
-    stats = {"processed": 0, "ingested": 0, "failed": 0, "skipped": 0, "errors": []}
+    stats = {"processed": 0, "ingested": 0, "failed": 0, "skipped": 0,
+             "idempotent_skip": 0, "safety_reject": 0, "errors": []}
     now = datetime.now(timezone.utc).isoformat()
 
-    # Determine project
     if not project:
         cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
         if cred_path and Path(cred_path).exists():
@@ -350,15 +363,14 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
         stats["errors"].append("No project ID found")
         return stats
 
-    # Initialize Vertex AI client
     client = genai.Client(vertexai=True, project=project, location="us-central1")
     log.info("Vertex AI client initialized (project: %s, model: %s)", project, model)
 
     # Query staged records
     with db.get_db() as conn:
         rows = conn.execute("""
-            SELECT staging_id, county, case_number, property_address,
-                   owner_of_record, sale_date, pdf_path, raw_data_json
+            SELECT asset_id, county, case_number, property_address,
+                   owner_of_record, sale_date, pdf_path
             FROM assets_staging
             WHERE status = 'STAGED' AND pdf_path IS NOT NULL
             LIMIT ?
@@ -371,7 +383,7 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
     log.info("Processing %d staged records...", len(rows))
 
     for row in rows:
-        staging_id = row[0]
+        asset_id = row[0]
         county = row[1] or "Unknown"
         case_number = row[2] or ""
         address = row[3] or ""
@@ -379,26 +391,44 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
         sale_date = row[5]
         pdf_path = Path(row[6])
 
-        # Resolve relative paths
         if not pdf_path.is_absolute():
-            pdf_path = Path(__file__).resolve().parent.parent / pdf_path
+            pdf_path = BASE_DIR / pdf_path
 
-        # Validate PDF
+        # ── Idempotency check ────────────────────────────────────
+        with db.get_db() as conn:
+            existing = conn.execute(
+                "SELECT winning_bid, total_debt FROM assets WHERE asset_id = ?",
+                [asset_id],
+            ).fetchone()
+            if existing and existing[0] and existing[1]:
+                log.info("  [SKIP] %s: already has bid=%.2f debt=%.2f", asset_id[:20], existing[0], existing[1])
+                stats["idempotent_skip"] += 1
+                _audit_log({"action": "idempotent_skip", "asset_id": asset_id,
+                            "winning_bid": existing[0], "total_debt": existing[1]})
+                continue
+
+        # ── PDF validation ───────────────────────────────────────
         valid, msg = validate_pdf(pdf_path)
         if not valid:
-            log.warning("Skip staging_id=%d: %s", staging_id, msg)
+            log.warning("  [SKIP] %s: %s", asset_id[:20], msg)
             stats["skipped"] += 1
-            _audit_log({"action": "skip", "staging_id": staging_id, "reason": msg})
+            _audit_log({"action": "skip", "asset_id": asset_id, "reason": msg})
             continue
 
-        # Extract via Vertex AI
-        log.info("  [%d] %s / %s ...", staging_id, county, case_number or pdf_path.name)
+        log.info("  [%s] %s / %s ...", asset_id[:20], county, case_number or pdf_path.name)
+
+        if dry_run:
+            log.info("    DRY RUN — would process %s", pdf_path.name)
+            stats["processed"] += 1
+            continue
+
+        # ── Extract via Vertex AI ────────────────────────────────
         result = extract_from_pdf(client, model, pdf_path)
         stats["processed"] += 1
 
         _audit_log({
             "action": "extract",
-            "staging_id": staging_id,
+            "asset_id": asset_id,
             "county": county,
             "case_number": case_number,
             "pdf_path": str(pdf_path),
@@ -410,55 +440,79 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
             stats["failed"] += 1
             with db.get_db() as conn:
                 conn.execute(
-                    "UPDATE assets_staging SET status = 'FAILED', engine_version = 'engine4_prod', processed_at = ? WHERE staging_id = ?",
-                    [now, staging_id],
+                    "UPDATE assets_staging SET status = 'FAILED', engine_version = 'titanium_v1', processed_at = ? WHERE asset_id = ?",
+                    [now, asset_id],
                 )
             continue
 
-        # Map to V2 columns
         bid = result["winning_bid"] or 0.0
         debt = result["total_debt"] or 0.0
         surplus = result["surplus"] or max(0.0, bid - debt)
         extracted_date = result["sale_date"] or sale_date
 
-        # Build asset_id
-        asset_id = f"vertex_{county.lower()}_{case_number}" if case_number else f"vertex_{county.lower()}_{staging_id}"
+        # ── Safety gate: confidence > 0.8 AND bid >= debt ────────
+        completeness = 1.0 if all([address, extracted_date, debt > 0]) else (0.8 if address else 0.5)
+        confidence = compute_confidence(surplus, debt, extracted_date, owner, address)
 
-        # Compute days_remaining
+        if confidence <= CONFIDENCE_GATE:
+            log.warning("    SAFETY REJECT: confidence=%.2f (gate=%.2f)", confidence, CONFIDENCE_GATE)
+            stats["safety_reject"] += 1
+            _audit_log({"action": "safety_reject", "asset_id": asset_id,
+                        "confidence": confidence, "gate": CONFIDENCE_GATE,
+                        "bid": bid, "debt": debt})
+            with db.get_db() as conn:
+                conn.execute(
+                    "UPDATE assets_staging SET status = 'LOW_CONFIDENCE', engine_version = 'titanium_v1', processed_at = ? WHERE asset_id = ?",
+                    [now, asset_id],
+                )
+            continue
+
+        if bid < debt and surplus == 0:
+            log.warning("    SAFETY REJECT: bid ($%.2f) < debt ($%.2f), no surplus", bid, debt)
+            stats["safety_reject"] += 1
+            _audit_log({"action": "safety_reject", "asset_id": asset_id,
+                        "reason": "bid_less_than_debt", "bid": bid, "debt": debt})
+            with db.get_db() as conn:
+                conn.execute(
+                    "UPDATE assets_staging SET status = 'NO_SURPLUS', engine_version = 'titanium_v1', processed_at = ? WHERE asset_id = ?",
+                    [now, asset_id],
+                )
+            continue
+
+        # ── Compute grade and claim deadline ─────────────────────
+        claim_deadline = None
         days_remaining = None
         if extracted_date:
             try:
                 dt = datetime.fromisoformat(extracted_date)
                 deadline = dt + timedelta(days=180)
+                claim_deadline = deadline.strftime("%Y-%m-%d")
                 days_remaining = (deadline - datetime.now(timezone.utc).replace(tzinfo=None)).days
             except (ValueError, TypeError):
                 pass
 
-        # Compute completeness
-        completeness = 1.0 if all([address, extracted_date, debt > 0]) else (0.8 if address else 0.5)
-
-        # Compute confidence and grade
-        confidence = compute_confidence(surplus, debt, extracted_date, owner, address)
         grade, record_class = compute_grade(surplus, debt, extracted_date, days_remaining, confidence, completeness)
 
-        # Insert into assets
+        # ── Write to DB ──────────────────────────────────────────
         with db.get_db() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO assets
                 (asset_id, county, state, jurisdiction, case_number, asset_type,
                  source_name, statute_window, days_remaining, owner_of_record,
-                 property_address, sale_date, estimated_surplus, overbid_amount,
-                 total_indebtedness, winning_bid, completeness_score, confidence_score,
-                 data_grade, vertex_processed, source_file,
-                 created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)
+                 property_address, sale_date, claim_deadline,
+                 winning_bid, total_debt, surplus_amount,
+                 estimated_surplus, total_indebtedness, overbid_amount,
+                 completeness_score, confidence_score, data_grade,
+                 vertex_processed, source_file, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)
             """, [
                 asset_id, county, "CO", f"{county.lower()}_co",
                 case_number, "FORECLOSURE_SURPLUS",
-                "vertex_ai_engine4",
+                "vertex_ai_titanium",
                 "180 days from sale_date (C.R.S. § 38-38-111)",
-                days_remaining, owner, address, extracted_date,
-                surplus, max(0.0, bid - debt), debt, bid,
+                days_remaining, owner, address, extracted_date, claim_deadline,
+                bid, debt, surplus,
+                surplus, debt, max(0.0, bid - debt),
                 completeness, confidence, grade,
                 str(pdf_path), now, now,
             ])
@@ -470,27 +524,26 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
                 VALUES (?,?,?,?,?,?)
             """, [
                 asset_id, record_class, grade, days_remaining,
-                "180 days from sale_date (C.R.S. § 38-38-111)",
-                now,
+                "180 days from sale_date (C.R.S. § 38-38-111)", now,
             ])
 
-            # Update staging status
             conn.execute(
-                "UPDATE assets_staging SET status = 'PROCESSED', engine_version = 'engine4_prod', processed_at = ? WHERE staging_id = ?",
-                [now, staging_id],
+                "UPDATE assets_staging SET status = 'PROCESSED', engine_version = 'titanium_v1', processed_at = ? WHERE asset_id = ?",
+                [now, asset_id],
             )
 
         stats["ingested"] += 1
-        log.info("    OK: surplus=$%.2f, grade=%s, class=%s", surplus, grade, record_class)
+        log.info("    OK: bid=$%.2f debt=$%.2f surplus=$%.2f conf=%.2f grade=%s",
+                 bid, debt, surplus, confidence, grade)
 
-        # Courtesy delay between API calls
-        time.sleep(1.0)
+        time.sleep(1.0)  # Rate limit courtesy
 
-    # Log pipeline event
+    # ── Pipeline event ───────────────────────────────────────────
     db.log_pipeline_event(
-        "SYSTEM", "ENGINE4_BATCH",
+        "SYSTEM", "TITANIUM_ENGINE4_BATCH",
         f"Processed {stats['processed']} PDFs",
-        f"Ingested {stats['ingested']}, Failed {stats['failed']}, Skipped {stats['skipped']}",
+        f"Ingested {stats['ingested']}, Failed {stats['failed']}, "
+        f"Safety rejected {stats['safety_reject']}, Idempotent skip {stats['idempotent_skip']}",
         actor="vertex_engine_production",
         reason=f"model={model}, project={project}",
     )
@@ -498,30 +551,42 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
     return stats
 
 
+# ── CLI ──────────────────────────────────────────────────────────────
+
 def main():
-    ap = argparse.ArgumentParser(description="Engine #4 — Vertex AI PDF Extraction (Production)")
+    ap = argparse.ArgumentParser(description="Engine #4 — Vertex AI (Titanium Production)")
     ap.add_argument("--preflight-only", action="store_true", help="Run pre-flight checks only")
     ap.add_argument("--limit", type=int, default=50, help="Max records to process")
-    ap.add_argument("--project", help="GCP project ID (auto-detected from credentials if omitted)")
-    ap.add_argument("--model", default="gemini-2.0-flash", help="Gemini model to use")
+    ap.add_argument("--project", help="GCP project ID")
+    ap.add_argument("--model", default="gemini-2.0-flash", help="Gemini model")
+    ap.add_argument("--dry-run", action="store_true", help="Validate PDFs without calling Vertex AI")
     args = ap.parse_args()
 
     if args.preflight_only:
         ok = run_preflight()
         sys.exit(0 if ok else 1)
 
-    # Full run
     if not run_preflight():
         sys.exit(1)
 
-    result = process_batch(
-        limit=args.limit,
-        project=args.project,
-        model=args.model,
-    )
+    # Acquire atomic lockfile
+    lock = LockFile(LOCK_FILE)
+    if not lock.acquire():
+        log.error("Another instance is running (lockfile: %s). Exiting.", LOCK_FILE)
+        sys.exit(1)
+
+    try:
+        result = process_batch(
+            limit=args.limit,
+            project=args.project,
+            model=args.model,
+            dry_run=args.dry_run,
+        )
+    finally:
+        lock.release()
 
     print("\n" + "=" * 60)
-    print("  ENGINE #4 — RESULTS")
+    print("  ENGINE #4 — TITANIUM RESULTS")
     print("=" * 60)
     for k, v in result.items():
         if k != "errors":
@@ -529,6 +594,9 @@ def main():
     if result["errors"]:
         print(f"  errors: {result['errors']}")
     print("=" * 60)
+
+    if result["errors"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

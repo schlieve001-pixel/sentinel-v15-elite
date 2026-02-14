@@ -9,6 +9,12 @@ uvicorn>=0.30.0
 bcrypt>=4.0.0
 PyJWT>=2.8.0
 
+# Rate Limiting (Titanium spec)
+slowapi>=0.1.9
+
+# Data Validation (Titanium spec)
+pydantic>=2.0.0
+
 # Database
 # sqlite3 is stdlib — no extra dep needed
 
