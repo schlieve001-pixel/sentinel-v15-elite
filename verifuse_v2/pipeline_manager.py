@@ -79,6 +79,42 @@ SCRAPER_REGISTRY: dict[str, dict] = {
         "base_url": "https://apps.adcogov.org/PTForeclosureSearch/reports",
         "enabled": True,
     },
+    "larimer_presale": {
+        "rpm": 2,
+        "daily_quota": 300,
+        "backpressure": True,
+        "success_threshold": 0.8,
+        "captcha_cooldown_hours": 24,
+        "base_url": "https://apps.larimer.org/publictrustee/search/AllReports.aspx",
+        "enabled": True,
+    },
+    "weld_presale": {
+        "rpm": 2,
+        "daily_quota": 300,
+        "backpressure": True,
+        "success_threshold": 0.8,
+        "captcha_cooldown_hours": 24,
+        "base_url": "https://www.wcpto.com/AllReports.aspx",
+        "enabled": True,
+    },
+    "boulder_presale": {
+        "rpm": 2,
+        "daily_quota": 300,
+        "backpressure": True,
+        "success_threshold": 0.8,
+        "captcha_cooldown_hours": 24,
+        "base_url": "https://www.bouldercountypt.org/GTSSearch/allreports.aspx",
+        "enabled": True,
+    },
+    "pueblo_schedule": {
+        "rpm": 2,
+        "daily_quota": 100,
+        "backpressure": True,
+        "success_threshold": 0.8,
+        "captcha_cooldown_hours": 24,
+        "base_url": "https://county.pueblo.org/treasurers-department/sale-schedule",
+        "enabled": True,
+    },
 }
 
 WINDOW_SIZE = 50  # Rolling window for success-rate calculation
@@ -330,6 +366,58 @@ class Governor:
         except Exception as exc:
             summary["errors"].append(f"Engine 6 (Adams): {exc}")
             log.error("Engine 6 failed: %s", exc)
+
+        # Engine 7: Larimer County pre-sale PDF scraper
+        try:
+            from verifuse_v2.scrapers.larimer_scraper import run as larimer_run
+
+            larimer_result = larimer_run()
+            summary["larimer_inserted"] = larimer_result.get("inserted", 0)
+            summary["larimer_total"] = larimer_result.get("total", 0)
+            log.info("Engine 7 (Larimer): %d new from %d records",
+                     larimer_result.get("inserted", 0), larimer_result.get("total", 0))
+        except Exception as exc:
+            summary["errors"].append(f"Engine 7 (Larimer): {exc}")
+            log.error("Engine 7 failed: %s", exc)
+
+        # Engine 8: Weld County pre-sale PDF scraper
+        try:
+            from verifuse_v2.scrapers.weld_scraper import run as weld_run
+
+            weld_result = weld_run()
+            summary["weld_inserted"] = weld_result.get("inserted", 0)
+            summary["weld_total"] = weld_result.get("total", 0)
+            log.info("Engine 8 (Weld): %d new from %d records",
+                     weld_result.get("inserted", 0), weld_result.get("total", 0))
+        except Exception as exc:
+            summary["errors"].append(f"Engine 8 (Weld): {exc}")
+            log.error("Engine 8 failed: %s", exc)
+
+        # Engine 9: Boulder County pre-sale PDF scraper
+        try:
+            from verifuse_v2.scrapers.boulder_scraper import run as boulder_run
+
+            boulder_result = boulder_run()
+            summary["boulder_inserted"] = boulder_result.get("inserted", 0)
+            summary["boulder_total"] = boulder_result.get("total", 0)
+            log.info("Engine 9 (Boulder): %d new from %d records",
+                     boulder_result.get("inserted", 0), boulder_result.get("total", 0))
+        except Exception as exc:
+            summary["errors"].append(f"Engine 9 (Boulder): {exc}")
+            log.error("Engine 9 failed: %s", exc)
+
+        # Engine 10: Pueblo County schedule scraper
+        try:
+            from verifuse_v2.scrapers.pueblo_scraper import run as pueblo_run
+
+            pueblo_result = pueblo_run()
+            summary["pueblo_inserted"] = pueblo_result.get("inserted", 0)
+            summary["pueblo_total"] = pueblo_result.get("total", 0)
+            log.info("Engine 10 (Pueblo): %d new from %d records",
+                     pueblo_result.get("inserted", 0), pueblo_result.get("total", 0))
+        except Exception as exc:
+            summary["errors"].append(f"Engine 10 (Pueblo): {exc}")
+            log.error("Engine 10 failed: %s", exc)
 
         self._save_state()
         return summary
