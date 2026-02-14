@@ -1,5 +1,5 @@
 # VERIFUSE V2 — OPERATIONS PLAN
-## Last Updated: February 14, 2026 (Sprint 2)
+## Last Updated: February 14, 2026 (Sprint 3 — Infrastructure Audit)
 
 ---
 
@@ -20,6 +20,11 @@
 | API Server | FastAPI on :8000 |
 | Frontend | React 19 + Vite 7 (production build at `dist/`) |
 | Domain | verifuse.tech (Caddy reverse proxy) |
+| VM IP | 34.69.230.82 (GCP) |
+| Domain Registrar | Porkbun (registered 2026-02-06) |
+| DNS Nameservers | Netlify nsone.net (NEEDS FIX — see below) |
+| Systemd API | verifuse-api.service (enabled, running) |
+| Systemd Timers | 3 active (healthcheck daily, scrapers Thu, vertex Fri) |
 
 ### County Breakdown
 | County | Assets | Total Surplus | Data Source | Engine |
@@ -38,6 +43,62 @@
 
 ---
 
+## CRITICAL: DNS SETUP (MUST DO FIRST)
+
+The domain `verifuse.tech` is registered on **Porkbun** but nameservers currently point to **Netlify's NS** (dns1-4.p05.nsone.net) with **NO A record configured**. This means:
+- The domain does NOT resolve (`NXDOMAIN`)
+- Caddy cannot obtain TLS certificates from Let's Encrypt
+- The site is unreachable from the internet
+
+### Option A: Fix DNS via Porkbun (Recommended)
+1. Log into https://porkbun.com → Domain Management → `verifuse.tech`
+2. Click **"DNS"** or **"Edit DNS Records"**
+3. **Change nameservers back to Porkbun's defaults** (if currently set to Netlify):
+   - Go to "Nameservers" → "Use Porkbun NS" or similar
+   - Porkbun NS: `maceio.ns.porkbun.com`, `salvador.ns.porkbun.com`
+4. Add these DNS records:
+
+| Type | Host | Answer | TTL |
+|------|------|--------|-----|
+| A | *(blank/root)* | `34.69.230.82` | 600 |
+| A | `www` | `34.69.230.82` | 600 |
+
+### Option B: Fix DNS via Netlify
+If you want to keep Netlify nameservers:
+1. Log into https://app.netlify.com → Domains → `verifuse.tech`
+2. Add DNS records:
+
+| Type | Name | Value |
+|------|------|-------|
+| A | @ | `34.69.230.82` |
+| A | www | `34.69.230.82` |
+
+### After DNS is configured:
+```bash
+# Verify DNS resolution (may take 5-60 minutes to propagate):
+dig verifuse.tech A +short
+# Should return: 34.69.230.82
+
+# Restart Caddy to get fresh TLS certs:
+sudo systemctl restart caddy
+
+# Verify TLS:
+curl -I https://verifuse.tech/health
+```
+
+### Firewall Note
+The VM's iptables INPUT policy is ACCEPT (all ports open). GCP firewall rules control external access. Ensure the GCP firewall allows:
+- **TCP 80** (HTTP — needed for Let's Encrypt ACME challenge)
+- **TCP 443** (HTTPS — production traffic)
+- **TCP 22** (SSH)
+
+Check in GCP Console → VPC Network → Firewall Rules, or:
+```bash
+gcloud compute firewall-rules list --filter="network:default"
+```
+
+---
+
 ## HOW TO RUN EACH COMPONENT
 
 ### 1. Database Migration (Idempotent — Safe to Run Anytime)
@@ -53,7 +114,7 @@ python -m verifuse_v2.verify_system
 ```
 **What it does:** Tests 8 layers — database, schema, data integrity, credentials, Vertex AI, staging, API server, filesystem. Outputs GREEN LIGHT / YELLOW / RED status.
 
-**Expected output:** 27/29 PASS (2 WARN = API server not running + duplicate cases)
+**Expected output:** 28/29 PASS, 1 WARN (duplicate cases), 0 FAIL → GREEN LIGHT
 
 ### 3. Staging Promoter (Promote Portal Records to Assets)
 ```bash
@@ -308,28 +369,82 @@ cat verifuse_v2/logs/engine4_audit.jsonl
 | `sqlite3 locked` | Stop all writers, check for stale connections |
 | `Scraper 403/captcha` | Governor auto-applies 24h cooldown. Wait or check IP reputation |
 | `PDF parse returns 0 records` | Check PDF format matches expected regex patterns in scraper |
+| `verifuse-api.service crash-looping` | Check if nohup/manual uvicorn is holding port 8000: `ss -tlnp \| grep 8000` then `kill <PID>` and `sudo systemctl restart verifuse-api` |
+| `Caddy NXDOMAIN errors` | DNS A record not configured. See "CRITICAL: DNS SETUP" section |
+| `Caddy staging certs` | Clear staging cache: `sudo rm -rf /var/lib/caddy/.local/share/caddy/acme/acme-staging-*` then `sudo systemctl restart caddy` |
+| `systemctl list-timers shows no verifuse timers` | Copy units from `verifuse_v2/deploy/` to `/etc/systemd/system/`, run `daemon-reload`, `enable --now` |
 
 ---
 
 ## WHAT NEEDS TO HAPPEN NEXT (Priority Order)
 
+### CRITICAL (Do These First)
+1. **Fix DNS** — See "CRITICAL: DNS SETUP" section above. Without this, the site is unreachable and Caddy can't get TLS certs. This is a 5-minute task in Porkbun or Netlify.
+2. **Set Stripe price IDs** — Create 3 products in Stripe Dashboard, get `price_xxx` IDs, update `/etc/systemd/system/verifuse-api.service` Environment lines, then `sudo systemctl daemon-reload && sudo systemctl restart verifuse-api`.
+3. **Set JWT secret** — Generate with `openssl rand -hex 32`, update `VERIFUSE_JWT_SECRET` in the service file.
+
 ### HIGH PRIORITY
-1. **Enrich Eagle County (312 records)** — These are BRONZE with $0 surplus. Need to obtain actual foreclosure PDFs from Eagle County Public Trustee and process through Vertex AI.
-2. **Enrich San Miguel County (250 records)** — Same situation as Eagle. Contact PT office for PDFs.
-3. **Deploy API to production** — Install systemd services, start Caddy, verify Stripe webhook URL.
-4. **Set Stripe price IDs** — Create products in Stripe Dashboard, get price_xxx IDs, update env vars.
+4. **Enrich Eagle County (312 records)** — These are BRONZE with $0 surplus. Need to obtain actual foreclosure PDFs from Eagle County Public Trustee and process through Vertex AI.
+5. **Enrich San Miguel County (250 records)** — Same situation as Eagle. Contact PT office for PDFs.
+6. **Run all scrapers for fresh data** — `python -c "from verifuse_v2.pipeline_manager import Governor; g = Governor(); print(g.run_pipeline())"` or wait for Thursday's automated run.
+7. **Process PDFs through Vertex AI** — 38 staged records have linked PDFs. Run: `python -m verifuse_v2.scrapers.vertex_engine --limit 38`
 
 ### MEDIUM PRIORITY
-5. **Run all scrapers** — `python -m verifuse_v2.scrapers.adams_postsale_scraper` etc. to pull latest data.
-6. **Process PDFs through Vertex AI** — Any staging records with linked PDFs.
-7. **Enable systemd timers** — Automate healthcheck (daily), scrapers (weekly), vertex (weekly).
-8. **Set up DNS** — Point `verifuse.tech` A record to this server's IP.
-
-### LOWER PRIORITY
+8. **Test end-to-end attorney flow** — Register → Login → Browse leads → Stripe checkout → Unlock → Download dossier. Requires DNS + Stripe to be working first.
 9. **Add Arapahoe County scraper** — 12 existing manual records, could automate.
 10. **Add Jefferson County scraper** — 66 records, mix of manual + portal.
+
+### LOWER PRIORITY
 11. **Marketing site updates** — Landing page stats auto-update from API.
-12. **Attorney onboarding flow** — Test registration → Stripe → unlock → dossier flow end-to-end.
+12. **Set up monitoring/alerting** — Email alerts on scraper failures, low asset counts.
+
+### COMPLETED (Sprint 3)
+- [x] Killed stale nohup process, systemd now manages API (PID-managed, auto-restart)
+- [x] Installed and enabled all 3 systemd timers (healthcheck daily 6AM, scrapers Thu 8AM, vertex Fri 10AM)
+- [x] System diagnostic: 28/29 PASS, 0 FAIL, GREEN LIGHT
+- [x] Infrastructure audit completed — identified DNS as root cause of all deployment issues
+- [x] Cleared stale Caddy staging cert cache
+
+---
+
+## INFRASTRUCTURE MAP
+
+### Server
+- **GCP VM:** `verifuse-dev-box` at `34.69.230.82`
+- **GCP Project:** `canvas-sum-481614-f6`
+- **OS:** Debian 12 (Linux 6.1.0-43-cloud-amd64)
+- **Python:** 3.11+ in `.venv/`
+
+### Services Running
+| Service | Port | Manager | Status |
+|---------|------|---------|--------|
+| FastAPI (uvicorn) | 8000 | systemd `verifuse-api.service` | Running |
+| Caddy | 80, 443 | systemd `caddy.service` | Running (TLS pending DNS) |
+
+### Systemd Timers Active
+| Timer | Schedule | Next Run |
+|-------|----------|----------|
+| verifuse-healthcheck | Daily 6:00 AM UTC | Tomorrow |
+| verifuse-scrapers | Thursdays 8:00 AM UTC | Feb 19 |
+| verifuse-vertex | Fridays 10:00 AM UTC | Feb 20 |
+
+### Credentials
+| Credential | Location | Status |
+|------------|----------|--------|
+| Google Service Account | `~/google_credentials.json` | Valid (canvas-sum-481614-f6) |
+| Stripe Secret Key | systemd env `STRIPE_SECRET_KEY` | PLACEHOLDER — needs real key |
+| Stripe Webhook Secret | systemd env `STRIPE_WEBHOOK_SECRET` | PLACEHOLDER — needs real key |
+| Stripe Price IDs (3) | systemd env `STRIPE_PRICE_*` | PLACEHOLDER — needs real IDs |
+| JWT Secret | systemd env `VERIFUSE_JWT_SECRET` | PLACEHOLDER — needs `openssl rand -hex 32` |
+
+### Key Config Files
+| File | Location | Purpose |
+|------|----------|---------|
+| Caddyfile | `/etc/caddy/Caddyfile` | Reverse proxy + TLS |
+| API Service | `/etc/systemd/system/verifuse-api.service` | API server config + env vars |
+| Timer Units | `/etc/systemd/system/verifuse-*.timer` | Automation schedules |
+| Google Creds | `~/google_credentials.json` | Vertex AI authentication |
+| React Build | `verifuse/site/app/dist/` | Production frontend (255KB JS, 16KB CSS) |
 
 ---
 
