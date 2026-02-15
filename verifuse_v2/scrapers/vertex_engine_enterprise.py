@@ -9,7 +9,7 @@ Canonical source of truth: VERIFUSE_DB_PATH env var.
 Flow:
   1. Recursive walk of verifuse_v2/data/raw_pdfs
   2. Extract case_number from filename or PDF content
-  3. Call gemini-1.5-flash for: winning_bid, total_debt, surplus_amount
+  3. Call gemini-2.0-flash for: winning_bid, total_debt, surplus_amount
   4. UPSERT: UPDATE if case_number exists, INSERT if new
   5. Log success/failure to stdout
 
@@ -373,7 +373,7 @@ def scan_pdfs() -> list[tuple[Path, str]]:
 
 
 def process_all(limit: int = 100, dry_run: bool = False,
-                model: str = "gemini-1.5-flash") -> dict:
+                model: str = "gemini-2.0-flash") -> dict:
     """Main processing loop."""
     stats = {
         "pdfs_found": 0, "processed": 0, "updated": 0,
@@ -520,7 +520,7 @@ def main():
     )
     ap.add_argument("--limit", type=int, default=100, help="Max PDFs to process")
     ap.add_argument("--dry-run", action="store_true", help="Scan PDFs without calling Vertex AI")
-    ap.add_argument("--model", default="gemini-1.5-flash", help="Gemini model to use")
+    ap.add_argument("--model", default="gemini-2.0-flash", help="Gemini model to use")
     args = ap.parse_args()
 
     print("\n" + "=" * 60)

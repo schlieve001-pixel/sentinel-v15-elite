@@ -533,6 +533,9 @@ async def get_stats():
         with_surplus = conn.execute(
             "SELECT COUNT(*) FROM leads WHERE COALESCE(surplus_amount, 0) > 1000"
         ).fetchone()[0]
+        gold_count = conn.execute(
+            "SELECT COUNT(*) FROM leads WHERE data_grade = 'GOLD'"
+        ).fetchone()[0]
         total_surplus = conn.execute(
             "SELECT COALESCE(SUM(surplus_amount), 0) FROM leads WHERE surplus_amount > 0"
         ).fetchone()[0]
@@ -548,7 +551,10 @@ async def get_stats():
 
     return {
         "total_leads": total,
+        "total_assets": total,
+        "attorney_ready": with_surplus,
         "with_surplus": with_surplus,
+        "gold_grade": gold_count,
         "total_claimable_surplus": round(total_surplus, 2),
         "counties": [dict(r) for r in counties],
     }
@@ -607,6 +613,214 @@ async def api_me(request: Request):
         "attorney_status": user.get("attorney_status", "NONE"),
         "is_admin": bool(user.get("is_admin", 0)),
     }
+
+
+# ── GET /api/counties — County breakdown ───────────────────────────
+
+# ── GET /api/lead/{id} — Single lead detail (frontend compat) ─────
+
+@app.get("/api/lead/{lead_id}")
+@limiter.limit("100/minute")
+async def get_lead_detail(lead_id: str, request: Request):
+    """Return a single lead as SafeAsset. Frontend calls GET /api/lead/{id}."""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+
+    d = dict(row)
+    safe = _row_to_safe(d)
+    # Map SafeAsset fields to frontend Lead interface
+    surplus = _safe_float(d.get("surplus_amount")) or _safe_float(d.get("estimated_surplus")) or 0.0
+    status = _compute_status(d)
+
+    days_until = None
+    restriction_end = None
+    sale = d.get("sale_date")
+    if sale:
+        try:
+            sale_dt = date.fromisoformat(str(sale)[:10])
+            restriction_end = (sale_dt + timedelta(days=RESTRICTION_DAYS)).isoformat()
+            days_until = (sale_dt + timedelta(days=RESTRICTION_DAYS) - datetime.now(timezone.utc).date()).days
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        **safe,
+        "asset_id": d.get("id"),
+        "state": "CO",
+        "asset_type": "Foreclosure Surplus",
+        "estimated_surplus": surplus,
+        "record_class": d.get("data_grade", "BRONZE"),
+        "restriction_status": status,
+        "restriction_end_date": restriction_end,
+        "blackout_end_date": restriction_end,
+        "days_until_actionable": max(0, days_until) if days_until else None,
+        "days_to_claim": safe.get("days_remaining"),
+        "deadline_passed": (safe.get("days_remaining") or 0) < 0 if safe.get("days_remaining") is not None else None,
+        "address_hint": safe.get("city_hint", "CO"),
+        "owner_img": None,
+        "completeness_score": safe.get("confidence_score") or 0.0,
+        "data_age_days": None,
+    }
+
+
+# ── POST /api/unlock/{id} — Frontend-compatible unlock ──────────
+
+@app.post("/api/unlock/{lead_id}")
+@limiter.limit("10/minute")
+async def unlock_lead_compat(lead_id: str, request: Request):
+    """Frontend calls POST /api/unlock/{id}. Delegates to unlock logic."""
+    return await unlock_lead(lead_id, request)
+
+
+# ── POST /api/unlock-restricted/{id} — Restricted unlock ────────
+
+@app.post("/api/unlock-restricted/{lead_id}")
+@limiter.limit("10/minute")
+async def unlock_restricted_lead(lead_id: str, request: Request):
+    """Unlock a RESTRICTED lead with disclaimer acceptance.
+
+    Requires verified attorney + OPERATOR/SOVEREIGN tier.
+    Body: { "disclaimer_accepted": true }
+    """
+    user = _require_user(request)
+    body = await request.json()
+    if not body.get("disclaimer_accepted"):
+        raise HTTPException(
+            status_code=400,
+            detail="You must accept the legal disclaimer to unlock restricted leads.",
+        )
+
+    # Verify attorney status
+    if not _is_admin(user) and not _is_verified_attorney(user):
+        raise HTTPException(
+            status_code=403,
+            detail="RESTRICTED leads require verified attorney status.",
+        )
+    if not _is_admin(user) and user.get("tier") not in ("operator", "sovereign"):
+        raise HTTPException(
+            status_code=403,
+            detail="RESTRICTED leads require OPERATOR or SOVEREIGN tier.",
+        )
+
+    # Delegate to the main unlock handler
+    result = await unlock_lead(lead_id, request)
+    result["disclaimer_accepted"] = True
+    result["attorney_exemption"] = "C.R.S. § 38-13-1302(5)"
+    return result
+
+
+# ── GET /api/dossier/{id} — PDF dossier download ────────────────
+
+@app.get("/api/dossier/{lead_id}")
+async def get_dossier(lead_id: str, request: Request):
+    """Generate and serve a PDF dossier for an unlocked lead."""
+    from fastapi.responses import FileResponse
+
+    user = _require_user(request)
+
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+
+    lead = dict(row)
+
+    # Check if user has unlocked this lead (or is admin)
+    if not _is_admin(user):
+        conn = _get_conn()
+        try:
+            unlock = conn.execute(
+                "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
+                [user["user_id"], lead_id],
+            ).fetchone()
+        finally:
+            conn.close()
+        if not unlock:
+            raise HTTPException(
+                status_code=403,
+                detail="You must unlock this lead before downloading the dossier.",
+            )
+
+    # Build dossier data and generate PDF
+    import tempfile
+    from pathlib import Path
+
+    surplus = _safe_float(lead.get("surplus_amount")) or 0.0
+    bid = _safe_float(lead.get("winning_bid")) or 0.0
+    status = _compute_status(lead)
+    is_restricted = status == "RESTRICTED"
+
+    # Generate simple text-based dossier (avoids fpdf dependency issues)
+    dossier_dir = Path(__file__).resolve().parent.parent / "data" / "dossiers"
+    dossier_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"dossier_{lead_id[:12]}.txt"
+    filepath = dossier_dir / filename
+
+    with open(filepath, "w") as f:
+        f.write("=" * 60 + "\n")
+        f.write("  VERIFUSE — INTELLIGENCE DOSSIER\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Case Number:      {lead.get('case_number', 'N/A')}\n")
+        f.write(f"County:           {lead.get('county', 'N/A')}\n")
+        f.write(f"Owner:            {lead.get('owner_name', 'N/A')}\n")
+        f.write(f"Property Address: {lead.get('property_address', 'N/A')}\n")
+        f.write(f"Sale Date:        {lead.get('sale_date', 'N/A')}\n")
+        f.write(f"Claim Deadline:   {lead.get('claim_deadline', 'N/A')}\n\n")
+        f.write(f"Winning Bid:      ${bid:,.2f}\n")
+        f.write(f"Total Debt:       ${_safe_float(lead.get('total_debt')) or 0:,.2f}\n")
+        f.write(f"Surplus Amount:   ${surplus:,.2f}\n")
+        f.write(f"Data Grade:       {lead.get('data_grade', 'N/A')}\n")
+        f.write(f"Confidence:       {_safe_float(lead.get('confidence_score')) or 0:.0%}\n\n")
+        f.write("=" * 60 + "\n")
+        f.write("  DISCLAIMER: For informational purposes only.\n")
+        f.write("  Verify all figures with the County Public Trustee.\n")
+        f.write("=" * 60 + "\n")
+
+    return FileResponse(
+        str(filepath),
+        media_type="text/plain",
+        filename=filename,
+    )
+
+
+# ── POST /api/billing/checkout — Stripe checkout session ─────────
+
+@app.post("/api/billing/checkout")
+async def billing_checkout(request: Request):
+    """Create a Stripe checkout session. Frontend calls POST /api/billing/checkout."""
+    user = _require_user(request)
+    body = await request.json()
+    tier = body.get("tier", "").lower()
+
+    if tier not in ("recon", "operator", "sovereign"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid tier. Choose from: recon, operator, sovereign",
+        )
+
+    try:
+        from verifuse_v2.server.billing import create_checkout_session
+        checkout_url = create_checkout_session(
+            user_id=user["user_id"],
+            email=user["email"],
+            tier=tier,
+        )
+        return {"checkout_url": checkout_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Checkout failed: %s", e)
+        raise HTTPException(status_code=503, detail="Billing service unavailable.")
 
 
 # ── GET /api/counties — County breakdown ───────────────────────────
