@@ -7,9 +7,9 @@
 
 | Metric | Value |
 |--------|-------|
-| Total Leads | 714 |
-| Enriched (with surplus data) | 26 |
-| Total Pipeline | $4,323,324.65 |
+| Total Leads | 734 |
+| Enriched (with surplus data) | 39 |
+| Total Pipeline | $4,995,642.07 |
 | Counties | 10 (Jefferson, Arapahoe, Denver, Adams, Teller, Douglas, Mesa, Eagle, San Miguel, Summit) |
 | Database | SQLite WAL at `VERIFUSE_DB_PATH` |
 | API Version | Titanium v4.0 (leads-native) |
@@ -245,13 +245,25 @@ curl http://localhost:8000/api/leads?limit=5
 - API rewrite with rate limiting, NULL-safe projections
 - Built 4 new county scrapers (Larimer, Weld, Boulder, Pueblo)
 
-### Sprint 5 (Feb 15): Schema Unification + Enterprise Engine
+### Sprint 5 (Feb 15a): Schema Unification + Enterprise Engine
 - Converted `leads` from VIEW → real TABLE (fix_leads_schema.py)
 - Enriched leads with data from assets table (691 debt, 680 confidence, 79 sale dates)
 - Built vertex_engine_enterprise.py (scans PDFs, upserts into leads)
 - Rewrote api.py to query leads table (not assets)
 - All SafeAsset fields are Optional[float] = None (Black Screen fix)
 - Double Gate: RESTRICTED = attorney + (OPERATOR|SOVEREIGN)
+
+### Sprint 6 (Feb 15b): Titanium Registry + Engine V2
+- Built `registry.py`: Abstract Base Class `CountyParser` with `detect()`, `extract()`, `score()` methods
+- Confidence Function C: `0.25·I(bid) + 0.25·I(debt) + 0.15·I(date) + 0.15·I(addr) + 0.10·I(owner) + 0.10·V(Δ)`
+- Variance check V(Δ): `|surplus - (bid - debt)| ≤ $5` = perfect confidence
+- Implemented 5 parsers: `AdamsParser`, `DenverExcessParser`, `ElPasoPreSaleParser`, `ElPasoPostSaleParser`, `GenericExcessFundsParser`
+- Built `engine_v2.py`: Scans all PDFs, routes through parser registry, threshold-based enrichment
+- **Engine V2 Results: 40 records extracted, 40 ENRICHED, 20 updated + 20 inserted**
+- 2 new GOLD leads from Adams ($215K + $37K surplus), 7 GOLD from Denver excess funds
+- Vertex AI confirmed working: `gemini-2.0-flash` on project `canvas-sum-481614-f6`
+- Frontend live at `34.69.230.82:4173`, API live at `34.69.230.82:8000`
+- Eagle (312) + San Miguel (250) leads identified as pre-sale data with debt but no auction results
 
 ---
 
