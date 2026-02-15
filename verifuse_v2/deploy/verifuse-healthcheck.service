@@ -1,11 +1,12 @@
 [Unit]
-Description=VeriFuse V2 Daily Healthcheck
+Description=VeriFuse V2 Daily Healthcheck (Titanium)
 After=network.target
 
 [Service]
 Type=oneshot
 User=schlieve001
-WorkingDirectory=/home/schlieve001/origin/continuity_lab
+WorkingDirectory=/home/schlieve001/verifuse_titanium_prod/current
+EnvironmentFile=/home/schlieve001/verifuse_titanium_prod/secrets.env
 ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.daily_healthcheck
-StandardOutput=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/healthcheck.log
-StandardError=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/healthcheck.log
+StandardOutput=append:/home/schlieve001/verifuse_titanium_prod/logs/healthcheck.log
+StandardError=append:/home/schlieve001/verifuse_titanium_prod/logs/healthcheck.log

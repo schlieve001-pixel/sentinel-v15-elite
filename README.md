@@ -44,7 +44,33 @@ verifuse/site/app/             # Frontend (React 19 + TypeScript + Vite)
 └── .env                       # API URL config
 ```
 
-## Setup
+## Production Deploy (Phase 2 — Atomic Blue/Green)
+
+```
+~/verifuse_titanium_prod/
+├── releases/           # Versioned code copies
+│   └── v8.0.0/         # Each sprint = new release
+├── current -> releases/v8.0.0   # Atomic symlink swap
+├── data/               # PERSISTENT — never touched by deploys
+│   └── verifuse_v2.db  # Production database
+├── logs/               # PERSISTENT — log files
+└── secrets.env         # JWT + API keys (chmod 600)
+```
+
+### First-time deploy
+```bash
+bash verifuse_v2/deploy/deploy.sh 8.0.0
+```
+
+### Subsequent deploys
+```bash
+git pull
+bash verifuse_v2/deploy/deploy.sh 8.1.0
+```
+
+The deploy script: copies code to `releases/v{version}/`, WAL-checkpoints the DB, atomically swaps the `current` symlink, and restarts systemd services.
+
+## Development Setup
 
 ### Backend
 ```bash
@@ -52,8 +78,12 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r verifuse_v2/requirements.txt
 
-# Initialize database
-python -c "from verifuse_v2.db.database import init_db; init_db()"
+# Set environment
+export VERIFUSE_DB_PATH=$PWD/verifuse_v2/data/verifuse_v2.db
+export VERIFUSE_JWT_SECRET=dev-secret
+
+# Run schema migrations
+python -m verifuse_v2.db.fix_leads_schema
 
 # Run API server
 uvicorn verifuse_v2.server.api:app --host 0.0.0.0 --port 8000

@@ -52,6 +52,12 @@ REQUIRED_COLUMNS = [
     ("source_name",       "TEXT"),
     ("vertex_processed",  "INTEGER DEFAULT 0"),
     ("updated_at",        "TEXT"),
+    # Sprint 8: Forensic provenance columns
+    ("source_link",       "TEXT"),
+    ("evidence_file",     "TEXT"),
+    ("pdf_filename",      "TEXT"),
+    ("vertex_processed_at", "TEXT"),
+    ("extraction_notes",  "TEXT"),
 ]
 
 # Columns that can be added via ALTER TABLE (everything except PK)
@@ -81,7 +87,12 @@ CREATE TABLE leads (
     data_grade        TEXT DEFAULT 'BRONZE',
     source_name       TEXT,
     vertex_processed  INTEGER DEFAULT 0,
-    updated_at        TEXT
+    updated_at        TEXT,
+    source_link       TEXT,
+    evidence_file     TEXT,
+    pdf_filename      TEXT,
+    vertex_processed_at TEXT,
+    extraction_notes  TEXT
 )
 """
 

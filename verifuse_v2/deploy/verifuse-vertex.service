@@ -1,14 +1,14 @@
 [Unit]
-Description=VeriFuse V2 Vertex AI PDF Processing
+Description=VeriFuse V2 Vertex AI PDF Processing (Titanium)
 After=network.target
 
 [Service]
 Type=oneshot
 User=schlieve001
-WorkingDirectory=/home/schlieve001/origin/continuity_lab
-Environment=GOOGLE_APPLICATION_CREDENTIALS=/home/schlieve001/google_credentials.json
-Environment=VERIFUSE_DB_PATH=/home/schlieve001/origin/continuity_lab/verifuse_v2/data/verifuse_v2.db
-Environment=VERIFUSE_JWT_SECRET=vf2-prod-change-me
+WorkingDirectory=/home/schlieve001/verifuse_titanium_prod/current
+EnvironmentFile=/home/schlieve001/verifuse_titanium_prod/secrets.env
+MemoryMax=512M
+
 ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.vertex_engine_production --limit 100
-StandardOutput=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/vertex.log
-StandardError=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/vertex.log
+StandardOutput=append:/home/schlieve001/verifuse_titanium_prod/logs/vertex.log
+StandardError=append:/home/schlieve001/verifuse_titanium_prod/logs/vertex.log

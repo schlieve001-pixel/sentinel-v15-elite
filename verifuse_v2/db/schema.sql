@@ -176,6 +176,36 @@ CREATE TABLE IF NOT EXISTS blacklist (
     added_by        TEXT
 );
 
+-- ── Quarantine table (ghost leads + false-GOLDs) ───────────────────
+CREATE TABLE IF NOT EXISTS leads_quarantine (
+    id                TEXT PRIMARY KEY,
+    case_number       TEXT,
+    county            TEXT,
+    owner_name        TEXT,
+    property_address  TEXT,
+    estimated_surplus REAL DEFAULT 0.0,
+    record_hash       TEXT,
+    winning_bid       REAL DEFAULT 0.0,
+    total_debt        REAL DEFAULT 0.0,
+    surplus_amount    REAL DEFAULT 0.0,
+    overbid_amount    REAL DEFAULT 0.0,
+    confidence_score  REAL DEFAULT 0.0,
+    status            TEXT DEFAULT 'STAGED',
+    sale_date         TEXT,
+    claim_deadline    TEXT,
+    data_grade        TEXT DEFAULT 'BRONZE',
+    source_name       TEXT,
+    vertex_processed  INTEGER DEFAULT 0,
+    updated_at        TEXT,
+    source_link       TEXT,
+    evidence_file     TEXT,
+    pdf_filename      TEXT,
+    vertex_processed_at TEXT,
+    extraction_notes  TEXT,
+    quarantine_reason TEXT,
+    quarantined_at    TEXT
+);
+
 -- ── Staging table ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS assets_staging (
     asset_id        TEXT PRIMARY KEY,

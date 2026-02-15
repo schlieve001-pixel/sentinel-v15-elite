@@ -66,6 +66,19 @@ def init_db() -> None:
     log.info("Database initialized at %s", DB_PATH)
 
 
+# ── WAL Checkpoint ───────────────────────────────────────────────────
+
+def wal_checkpoint() -> dict:
+    """Force WAL checkpoint (TRUNCATE mode). Call before DB copy/move."""
+    with get_db() as conn:
+        result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        return {
+            "busy": result[0],
+            "log_pages": result[1],
+            "checkpointed_pages": result[2],
+        }
+
+
 # ── Deduplication ────────────────────────────────────────────────────
 
 def deduplicate_assets() -> dict:

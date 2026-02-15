@@ -37,6 +37,9 @@ if not VERIFUSE_DB_PATH:
         "export VERIFUSE_DB_PATH=/path/to/verifuse_v2.db"
     )
 
+# ── API Key for machine-to-machine auth (admin/scraper endpoints) ────
+VERIFUSE_API_KEY = os.environ.get("VERIFUSE_API_KEY", "")
+
 log = logging.getLogger(__name__)
 
 # ── Database connection (strict VERIFUSE_DB_PATH) ───────────────────
@@ -220,6 +223,15 @@ def _is_admin(user: dict) -> bool:
     return bool(user.get("is_admin", 0))
 
 
+def _require_api_key(request: Request) -> None:
+    """Check x-verifuse-api-key header for admin/scraper endpoints."""
+    if not VERIFUSE_API_KEY:
+        return  # No key configured (dev mode)
+    key = request.headers.get("x-verifuse-api-key", "")
+    if key != VERIFUSE_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key.")
+
+
 # ── Rate Limiter ────────────────────────────────────────────────────
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
@@ -245,7 +257,7 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "x-verifuse-api-key"],
 )
 
 
@@ -269,12 +281,43 @@ async def health():
     conn = _get_conn()
     try:
         total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
-        with_surplus = conn.execute(
-            "SELECT COUNT(*) FROM leads WHERE surplus_amount > 0"
-        ).fetchone()[0]
-        total_surplus = conn.execute(
+
+        # WAL status
+        wal_info = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        wal_pages = wal_info[1] if wal_info else 0
+
+        # Scoreboard by data_grade
+        scoreboard_rows = conn.execute("""
+            SELECT data_grade,
+                   COUNT(*) as lead_count,
+                   COALESCE(SUM(surplus_amount), 0) as verified_surplus
+            FROM leads
+            GROUP BY data_grade
+            ORDER BY verified_surplus DESC
+        """).fetchall()
+        scoreboard = [
+            {
+                "data_grade": r["data_grade"] or "UNGRADED",
+                "lead_count": r["lead_count"],
+                "verified_surplus": round(r["verified_surplus"], 2),
+            }
+            for r in scoreboard_rows
+        ]
+
+        # Quarantine count
+        quarantined = 0
+        try:
+            quarantined = conn.execute(
+                "SELECT COUNT(*) FROM leads_quarantine"
+            ).fetchone()[0]
+        except Exception:
+            pass
+
+        # Verified total
+        verified_total = conn.execute(
             "SELECT COALESCE(SUM(surplus_amount), 0) FROM leads WHERE surplus_amount > 0"
         ).fetchone()[0]
+
     finally:
         conn.close()
 
@@ -282,9 +325,11 @@ async def health():
         "status": "ok",
         "engine": "titanium_api_v4",
         "db": VERIFUSE_DB_PATH,
+        "wal_pages": wal_pages,
         "total_leads": total,
-        "with_surplus": with_surplus,
-        "total_surplus": round(total_surplus, 2),
+        "scoreboard": scoreboard,
+        "quarantined": quarantined,
+        "verified_total": round(verified_total, 2),
     }
 
 
@@ -845,3 +890,53 @@ async def get_counties():
         "count": len(rows),
         "counties": [dict(r) for r in rows],
     }
+
+
+# ── Admin endpoints (require x-verifuse-api-key) ─────────────────────
+
+@app.get("/api/admin/leads")
+async def admin_leads(
+    request: Request,
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Get all leads with raw data (admin only)."""
+    _require_api_key(request)
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM leads ORDER BY surplus_amount DESC LIMIT ?", [limit]
+        ).fetchall()
+    finally:
+        conn.close()
+    return {"count": len(rows), "leads": [dict(r) for r in rows]}
+
+
+@app.get("/api/admin/quarantine")
+async def admin_quarantine(request: Request):
+    """Get all quarantined leads (admin only)."""
+    _require_api_key(request)
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM leads_quarantine ORDER BY quarantined_at DESC"
+        ).fetchall()
+    except Exception:
+        return {"count": 0, "quarantined": []}
+    finally:
+        conn.close()
+    return {"count": len(rows), "quarantined": [dict(r) for r in rows]}
+
+
+@app.get("/api/admin/users")
+async def admin_users(request: Request):
+    """Get all users (admin only)."""
+    _require_api_key(request)
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT user_id, email, full_name, firm_name, tier, credits_remaining, "
+            "is_admin, is_active, created_at, last_login_at FROM users"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {"count": len(rows), "users": [dict(r) for r in rows]}

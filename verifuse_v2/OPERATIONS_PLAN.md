@@ -528,6 +528,17 @@ OnCalendar=*-*-* 06:00:00
 - Fixed `/api/stats` response to include `total_assets`, `attorney_ready`, `gold_grade`
 - Comprehensive operations plan rewrite with frontend-backend contract
 
+### Sprint 8 (Feb 15d): Phase 2 Production Hardening
+- Atomic deploy with blue/green symlink swap (`deploy/deploy.sh`)
+- Data quarantine engine: ghost leads + Jefferson false-GOLDs (`db/quarantine.py`)
+- Forensic provenance columns: `pdf_filename`, `vertex_processed_at`, `extraction_notes`
+- Hardened systemd services: `EnvironmentFile`, `MemoryMax=512M`, `CPUQuota=80%`
+- `x-verifuse-api-key` middleware for admin/scraper endpoints
+- Titanium Scoreboard `/health` endpoint with WAL status + grade breakdown
+- WAL checkpoint utility in `database.py`
+- Admin endpoints: `/api/admin/leads`, `/api/admin/quarantine`, `/api/admin/users`
+- Production directory: `~/verifuse_titanium_prod/` with persistent data + secrets
+
 ---
 
 ## 9. WHAT STILL NEEDS TO BE DONE
