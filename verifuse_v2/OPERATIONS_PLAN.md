@@ -1,443 +1,412 @@
 # VERIFUSE V2 — TITANIUM OPERATIONS PLAN
-## Last Updated: February 14, 2026 (Sprint 4 — Titanium Architecture Lock)
+## Last Updated: February 15, 2026 (Sprint 5 — Schema Unification + Enterprise Engine)
 
 ---
 
-## SYSTEM STATUS: TITANIUM (11 Counties, 10 Engines, 734 Assets, $5.19M Pipeline)
+## SYSTEM STATUS: TITANIUM v4.0
 
-### Architecture Invariants (Non-Negotiable)
-| # | Invariant | Implementation |
-|---|-----------|----------------|
-| 1 | Dynamic Status | `RESTRICTED/ACTIONABLE/EXPIRED` computed at runtime from UTC dates. NEVER stored. |
-| 2 | Hybrid Access Gate | RESTRICTED (0-6mo) → Verified attorneys only. ACTIONABLE (>6mo) → Any paid user. EXPIRED → Locked. |
-| 3 | Projection Redaction | `SafeAsset` (no PII) by default. `FullAsset` only with valid `lead_unlocks` record. |
-| 4 | Atomic Transactions | Credit deduction + unlock in single `BEGIN IMMEDIATE` transaction. |
-| 5 | Strict CORS | Only `verifuse.tech`, `www.verifuse.tech`, `localhost:3000`, `localhost:5173`. |
-
-### Database Summary
 | Metric | Value |
 |--------|-------|
-| Total Assets | 734 |
-| Total Pipeline Value | $5,195,573.68 |
-| GOLD-Grade Leads | 6 |
-| SILVER-Grade Leads | 7 |
-| BRONZE-Grade Leads | 692 |
-| Assets with claim_deadline | 103 |
-| Assets with surplus_amount | 41 |
-| Lead Unlocks (migrated) | 4 |
-| Counties Active | 11 |
-| Staging Records | 691 |
-| GCP Project | canvas-sum-481614-f6 |
-| API Server | FastAPI Titanium v3.0.0 on :8000 |
-| Frontend | React 19 + Vite 7 (255KB JS, 16KB CSS) |
-| Domain | verifuse.tech (DNS PENDING — see below) |
-| VM IP | 34.69.230.82 (GCP) |
-
-### County Breakdown
-| County | Assets | Surplus | Status | Data Source | Engine |
-|--------|--------|---------|--------|-------------|--------|
-| Eagle | 312 | $0 (needs PDFs) | BRONZE | Portal scraper | Staging |
-| San Miguel | 250 | $0 (needs PDFs) | BRONZE | Portal scraper | Staging |
-| Jefferson | 66 | $2,026,675 | SILVER | CSV + portal | Manual + Staging |
-| Adams | 39 | $258,106 | GOLD/SILVER | Weekly Post Sale PDF | #6 |
-| Teller | 26 | $18,246 | BRONZE | GovEase portal | Staging |
-| Denver | 17 | $1,421,452 | GOLD/SILVER | Monthly excess funds PDF | #1-3 |
-| Arapahoe | 12 | $1,426,297 | GOLD | Overbid list | Manual |
-| El Paso | 5 | $0 (pre-sale) | BRONZE | Weekly Pre Sale PDF | #5 |
-| Summit | 5 | $0 (needs enrichment) | BRONZE | GovEase portal | Staging |
-| Douglas | 1 | $4,798 | SILVER | Manual | Manual |
-| Mesa | 1 | $40,000 | SILVER | Manual | Manual |
+| Total Leads | 714 |
+| Enriched (with surplus data) | 26 |
+| Total Pipeline | $4,323,324.65 |
+| Counties | 10 (Jefferson, Arapahoe, Denver, Adams, Teller, Douglas, Mesa, Eagle, San Miguel, Summit) |
+| Database | SQLite WAL at `VERIFUSE_DB_PATH` |
+| API Version | Titanium v4.0 (leads-native) |
+| Tables | 11 (leads, assets, users, lead_unlocks, legal_status, pipeline_events, statute_authority, scraper_registry, blacklist, user_addons, attorney_view) |
 
 ---
 
-## CRITICAL: DNS SETUP (MUST DO FIRST)
+## 1. ARCHITECTURE — HOW THE SYSTEM WORKS
 
-The domain `verifuse.tech` is registered on **Porkbun** but nameservers currently point to **Netlify's NS** (dns1-4.p05.nsone.net) with **NO A record configured**.
+### 1.1 Single Source of Truth
 
-### Fix DNS via Porkbun (Recommended)
-1. Log into https://porkbun.com → Domain Management → `verifuse.tech`
-2. Change nameservers back to Porkbun defaults
-3. Add DNS records:
+Every component reads `VERIFUSE_DB_PATH` from the environment. No hardcoded paths.
 
-| Type | Host | Answer | TTL |
-|------|------|--------|-----|
-| A | *(blank/root)* | `34.69.230.82` | 600 |
-| A | `www` | `34.69.230.82` | 600 |
-
-### After DNS is configured:
-```bash
-dig verifuse.tech A +short    # Should return: 34.69.230.82
-sudo systemctl restart caddy   # Get fresh TLS certs
-curl -I https://verifuse.tech/health
 ```
+export VERIFUSE_DB_PATH=/home/schlieve001/origin/continuity_lab/verifuse_v2/data/verifuse_v2.db
+```
+
+If this env var is missing, every script fails fast with a clear error.
+
+### 1.2 Data Flow
+
+```
+[Public Trustee PDFs] → [Scrapers] → [leads table] → [API] → [Frontend]
+                                         ↓
+                              [Vertex AI Engine] (enrichment)
+                                         ↓
+                              [leads.winning_bid, total_debt, surplus_amount]
+```
+
+### 1.3 The `leads` Table (Canonical Data Model)
+
+| Column | Type | Source |
+|--------|------|--------|
+| id | TEXT PK | Generated hash |
+| case_number | TEXT | Scraped from PDF/website |
+| county | TEXT | From source |
+| owner_name | TEXT | Scraped |
+| property_address | TEXT | Scraped |
+| estimated_surplus | REAL | Scraped (raw, pre-verification) |
+| record_hash | TEXT | Dedup fingerprint |
+| winning_bid | REAL | Vertex AI extraction |
+| total_debt | REAL | Vertex AI extraction |
+| surplus_amount | REAL | Computed: max(0, winning_bid - total_debt) |
+| overbid_amount | REAL | Vertex AI extraction |
+| confidence_score | REAL | 0.0-1.0 completeness metric |
+| status | TEXT | STAGED/ENRICHED/NEW |
+| sale_date | TEXT | ISO date of foreclosure sale |
+| claim_deadline | TEXT | sale_date + 180 days (C.R.S. § 38-38-111) |
+| data_grade | TEXT | GOLD/SILVER/BRONZE/IRON/REJECT |
+| source_name | TEXT | Which engine produced this lead |
+| vertex_processed | INTEGER | 0/1 — has Vertex AI touched this? |
+| updated_at | TEXT | ISO timestamp |
+
+### 1.4 API Access Control (Hybrid Gate)
+
+```
+                        ┌──────────────┐
+                        │  Sale Date   │
+                        └──────┬───────┘
+                               │
+                   ┌───────────┼───────────┐
+                   │           │           │
+              < 180 days   ≥ 180 days   Past deadline
+                   │           │           │
+              RESTRICTED   ACTIONABLE   EXPIRED
+                   │           │           │
+         attorney + tier    any paid     LOCKED
+         (OPERATOR/SOV)      user       (cannot unlock)
+```
+
+- Status is computed at runtime from UTC dates. NEVER stored.
+- SafeAsset (no PII) is the default projection. FullAsset only after unlock.
+- Credit deduction is atomic: `BEGIN IMMEDIATE` transaction.
 
 ---
 
-## TITANIUM SCHEMA (5 Production Files)
+## 2. PRODUCTION FILES — WHAT EACH FILE DOES
 
-### File 1: `verifuse_v2/db/schema.sql`
-- 13 tables with `PRAGMA foreign_keys = ON`
-- `lead_unlocks` table: `UNIQUE(user_id, lead_id)`, FK to users + assets
-- `users.attorney_status` CHECK constraint: `NONE/PENDING/VERIFIED/REJECTED`
-- V2 financial columns: `winning_bid`, `total_debt`, `surplus_amount`, `claim_deadline`
-- Compound indexes on lead_unlocks, sale_date, claim_deadline
+### 2.1 Schema & Migrations
 
-### File 2: `verifuse_v2/db/migrate_titanium.py`
-- Idempotent migration — safe to run multiple times
-- Adds columns WITHOUT mutating existing data
-- Backfills: `claim_deadline` (103 rows), `surplus_amount` (41 rows), `total_debt` (14 rows)
-- Migrates legacy `unlocks` → `lead_unlocks` table
+| File | Purpose |
+|------|---------|
+| `verifuse_v2/db/fix_leads_schema.py` | Auto-patcher: converts `leads` VIEW → TABLE, adds revenue columns, backfills from `assets`. Idempotent. |
+| `verifuse_v2/db/migrate_titanium.py` | Adds Titanium columns to `assets`, creates `lead_unlocks`, backfills deadlines. |
+| `verifuse_v2/db/migrate_master.py` | Original V2 migration (staging table, pipeline events). |
+| `verifuse_v2/db/database.py` | DAL: get_connection(), get_db(), CRUD for users/leads/unlocks. |
+| `verifuse_v2/db/schema.sql` | Full DDL for all 11 tables. |
 
-### File 3: `verifuse_v2/server/models.py`
-- `Lead` model: `@computed_field status` — RESTRICTED/ACTIONABLE/EXPIRED from UTC dates
-- `SafeAsset`: County, city hint, case number, status, rounded surplus. NO owner name, NO street.
-- `FullAsset(SafeAsset)`: Adds owner_name, property_address, winning_bid, total_debt
+**Run order:** `fix_leads_schema.py` → `migrate_titanium.py` (both idempotent)
 
-### File 4: `verifuse_v2/server/api.py`
-- Strict CORS: only 4 allowed origins
-- `slowapi` rate limiting: 100/min global, 5/min register, 10/min login
-- `POST /api/leads/{id}/unlock`: BEGIN IMMEDIATE atomic transaction
-- `POST /api/attorney/verify`: Sets status to PENDING
-- `GET /api/leads`: Returns `List[SafeAsset]`, filters expired leads
-- Honeypot injection on every leads response
+### 2.2 Engines & Scrapers
 
-### File 5: `verifuse_v2/scrapers/vertex_engine_production.py`
-- Atomic lockfile (`os.O_CREAT | os.O_EXCL`) — prevents concurrent runs
-- Idempotent: `if lead.winning_bid and lead.total_debt: continue`
-- Safety gate: only writes if `confidence > 0.8` AND `bid >= debt`
-- Structured JSONL audit to `logs/engine4_audit.jsonl`
+| File | Engine # | Target | Output |
+|------|----------|--------|--------|
+| `scrapers/vertex_engine_enterprise.py` | Enterprise | All PDFs in `data/raw_pdfs/` | Upserts into `leads` table |
+| `scrapers/vertex_engine_production.py` | #4 | `assets_staging` → `assets` | For staging pipeline |
+| `scrapers/jefferson_scraper.py` | #1 | Jefferson County website | Direct to `assets` |
+| `scrapers/adams_postsale_scraper.py` | #6 | Adams County PDFs | Direct to `assets` |
+| `scrapers/elpaso_postsale_scraper.py` | #5 | El Paso County PDFs | Direct to `assets` |
+| `scrapers/tax_lien_scraper.py` | #2 | Denver excess funds | Direct to `assets` |
+| `scrapers/larimer_scraper.py` | #7 | Larimer County | Direct to `assets` |
+| `scrapers/weld_scraper.py` | #8 | Weld County | Direct to `assets` |
+| `scrapers/boulder_scraper.py` | #9 | Boulder County | Direct to `assets` |
+| `scrapers/pueblo_scraper.py` | #10 | Pueblo County | Direct to `assets` |
+
+### 2.3 API Server
+
+| File | Purpose |
+|------|---------|
+| `server/api.py` | FastAPI server, queries `leads` table, NULL-safe, CORS, rate limiting |
+| `server/auth.py` | JWT auth, bcrypt passwords, register/login |
+| `server/models.py` | Pydantic models (Lead, SafeAsset, FullAsset) |
+| `server/billing.py` | Stripe integration |
+| `server/dossier_gen.py` | PDF dossier generation |
+| `server/obfuscator.py` | PII obfuscation (text → image) |
+
+### 2.4 Verification & Health
+
+| File | Purpose |
+|------|---------|
+| `verify_system.py` | Green Light diagnostic: DB, schema, data, credentials, API |
+| `daily_healthcheck.py` | Regrade assets, compute confidence/completeness |
 
 ---
 
-## HOW TO RUN EACH COMPONENT
+## 3. HOW TO RUN THE SYSTEM
 
-### 1. Titanium Migration (Idempotent — Always Safe)
+### 3.1 Environment Setup
+
 ```bash
-cd ~/origin/continuity_lab
-python -m verifuse_v2.db.migrate_titanium
-```
-**Run this:** After every schema change or fresh deployment.
+# Required env vars
+export VERIFUSE_DB_PATH=/home/schlieve001/origin/continuity_lab/verifuse_v2/data/verifuse_v2.db
+export GOOGLE_APPLICATION_CREDENTIALS=/home/schlieve001/google_credentials.json
+export VERIFUSE_JWT_SECRET=<your-secret>
 
-### 2. System Diagnostic
-```bash
-python -m verifuse_v2.verify_system
-```
-**Expected:** 28/29 PASS, 1 WARN (duplicate cases), 0 FAIL → GREEN LIGHT
-
-### 3. API Server
-```bash
-# Production (systemd):
-sudo systemctl restart verifuse-api
-sudo systemctl status verifuse-api
-journalctl -u verifuse-api -f
-
-# Dev (manual):
-python -m uvicorn verifuse_v2.server.api:app --host 0.0.0.0 --port 8000 --reload
+# Install dependencies
+pip install -r verifuse_v2/requirements.txt
 ```
 
-### 4. Vertex AI Engine (Titanium Production)
+### 3.2 Schema Setup (idempotent — safe to run multiple times)
+
 ```bash
-# Pre-flight only:
-GOOGLE_APPLICATION_CREDENTIALS="$HOME/google_credentials.json" \
-  python -m verifuse_v2.scrapers.vertex_engine_production --preflight-only
-
-# Process 10 PDFs (test):
-python -m verifuse_v2.scrapers.vertex_engine_production --limit 10
-
-# Dry run (validate PDFs, no Vertex calls):
-python -m verifuse_v2.scrapers.vertex_engine_production --limit 50 --dry-run
+python -m verifuse_v2.db.fix_leads_schema        # Patch leads table
+python -m verifuse_v2.db.migrate_titanium         # Titanium columns
 ```
 
-### 5. County Scrapers
+### 3.3 Run Scrapers (populate leads)
+
 ```bash
-# Individual:
+# Scrape county websites
+python -m verifuse_v2.scrapers.jefferson_scraper
 python -m verifuse_v2.scrapers.adams_postsale_scraper
 python -m verifuse_v2.scrapers.elpaso_postsale_scraper
-python -m verifuse_v2.scrapers.larimer_scraper
-python -m verifuse_v2.scrapers.weld_scraper
-python -m verifuse_v2.scrapers.boulder_scraper
-python -m verifuse_v2.scrapers.pueblo_scraper
 
-# All via pipeline:
-python -c "from verifuse_v2.pipeline_manager import Governor; g = Governor(); print(g.run_pipeline())"
+# Enrich with Vertex AI (requires Google credentials)
+python -m verifuse_v2.scrapers.vertex_engine_enterprise --dry-run  # test first
+python -m verifuse_v2.scrapers.vertex_engine_enterprise --limit 50  # real run
 ```
 
-### 6. Daily Healthcheck
+### 3.4 Start API Server
+
 ```bash
-python -m verifuse_v2.daily_healthcheck
+cd /home/schlieve001/origin/continuity_lab
+uvicorn verifuse_v2.server.api:app --host 0.0.0.0 --port 8000
 ```
 
-### 7. Staging Promoter
+### 3.5 Verify System Health
+
 ```bash
-python -m verifuse_v2.staging_promoter --dry-run        # Preview
-python -m verifuse_v2.staging_promoter --link-pdfs       # Full run
+python -m verifuse_v2.verify_system
+curl http://localhost:8000/health
+curl http://localhost:8000/api/stats
+curl http://localhost:8000/api/leads?limit=5
 ```
 
-### 8. React Frontend Build
+---
+
+## 4. CURRENT DATA QUALITY REPORT
+
+### 4.1 County Pipeline
+
+| County | Leads | Enriched | Surplus | Grade |
+|--------|-------|----------|---------|-------|
+| Jefferson | 64 | 3 | $1,826,675 | High-value, low enrichment |
+| Arapahoe | 12 | 12 | $1,426,297 | Fully enriched |
+| Denver | 8 | 8 | $1,007,308 | Fully enriched |
+| Adams | 35 | 0 | $0 | Needs Vertex AI enrichment |
+| Teller | 26 | 1 | $18,245 | Needs enrichment |
+| Douglas | 1 | 1 | $4,797 | Small |
+| Mesa | 1 | 1 | $40,000 | Single lead |
+| Eagle | 312 | 0 | $0 | No surplus data — REJECT grade |
+| San Miguel | 250 | 0 | $0 | No surplus data — REJECT grade |
+| Summit | 5 | 0 | $0 | No surplus data |
+
+### 4.2 Grade Distribution
+
+| Grade | Count | Meaning |
+|-------|-------|---------|
+| GOLD | 70 | Surplus > $10K, confidence > 0.8 |
+| SILVER | 2 | Surplus > $5K, confidence > 0.6 |
+| BRONZE | 39 | Has surplus data |
+| REJECT | 603 | No financial data, need enrichment or removal |
+
+### 4.3 Immediate Actions Needed
+
+1. **Run Vertex AI Enterprise Engine on 14 PDFs** — Will enrich Adams (35 leads) and Denver leads
+2. **Scrape Jefferson County Post-Sale PDFs** — 61 of 64 Jefferson leads lack winning_bid
+3. **Purge Eagle (312) + San Miguel (250)** — These are REJECT-grade with zero surplus. Either find their source PDFs or remove them
+4. **Download more county PDFs** — Larimer, Weld, Boulder, Pueblo scrapers exist but need fresh data files
+
+---
+
+## 5. WHAT HAS BEEN DONE
+
+### Sprint 1 (Feb 10-11): Foundation
+- Built 7 county scrapers (Jefferson, Denver, Adams, El Paso, Arapahoe, Teller, Douglas)
+- Created unified `assets` table with 734 records
+- Built FastAPI server with JWT auth, Stripe billing
+
+### Sprint 2 (Feb 12): Engine #4
+- Fixed Vertex AI engine (preflight, backoff, audit log)
+- Built staging promoter for assets_staging → assets
+- Created systemd timer for automated runs
+
+### Sprint 3 (Feb 13): Infrastructure
+- Fixed port conflict (API on 8000, frontend on 4173)
+- Installed systemd timers for healthcheck, engine runs
+- DNS configuration guide
+
+### Sprint 4 (Feb 14): Titanium Architecture
+- Titanium schema (migrate_titanium.py)
+- Pydantic models with computed status
+- API rewrite with rate limiting, NULL-safe projections
+- Built 4 new county scrapers (Larimer, Weld, Boulder, Pueblo)
+
+### Sprint 5 (Feb 15): Schema Unification + Enterprise Engine
+- Converted `leads` from VIEW → real TABLE (fix_leads_schema.py)
+- Enriched leads with data from assets table (691 debt, 680 confidence, 79 sale dates)
+- Built vertex_engine_enterprise.py (scans PDFs, upserts into leads)
+- Rewrote api.py to query leads table (not assets)
+- All SafeAsset fields are Optional[float] = None (Black Screen fix)
+- Double Gate: RESTRICTED = attorney + (OPERATOR|SOVEREIGN)
+
+---
+
+## 6. WHAT STILL NEEDS TO BE DONE
+
+### Critical Path (Do First)
+
+| # | Task | Impact | Status |
+|---|------|--------|--------|
+| 1 | Run `vertex_engine_enterprise` with live Vertex AI | Enriches 14 PDFs → winning_bid + total_debt for Adams, Denver, El Paso | READY (needs GOOGLE_APPLICATION_CREDENTIALS) |
+| 2 | Download fresh county PDFs | Jefferson post-sale, Arapahoe weekly | Manual download from trustee websites |
+| 3 | Purge or enrich Eagle/San Miguel (562 REJECT leads) | Clean up grade distribution | Decision: keep or remove |
+| 4 | Set `VERIFUSE_DB_PATH` in systemd services | All services use canonical path | Quick config change |
+| 5 | Frontend deployment | Connect to API v4 endpoints | Vite build + deploy |
+
+### Revenue Acceleration
+
+| # | Task | Impact |
+|---|------|--------|
+| 6 | Stripe webhook integration | Enable paid tier upgrades |
+| 7 | Attorney verification flow | Enable RESTRICTED lead access |
+| 8 | Dossier generation | PDF reports for unlocked leads |
+| 9 | Email notifications | Alert attorneys to new GOLD leads |
+
+### Scale
+
+| # | Task | Impact |
+|---|------|--------|
+| 10 | Cron job: weekly PDF download from trustee sites | Automated lead refresh |
+| 11 | PostgreSQL migration (Supabase) | Scale beyond SQLite limits |
+| 12 | Multi-state expansion (TX, AZ, NV) | 10x lead volume |
+
+---
+
+## 7. HOW TO GET TO 100+ VERIFIED LEADS
+
+### Current State: 26 enriched leads with real surplus data
+
+### Path to 100+ Verified Leads:
+
+**Phase 1: Enrich existing data (gets to ~80 verified)**
+1. Run `vertex_engine_enterprise` on 14 PDFs in `data/raw_pdfs/` → extracts winning_bid, total_debt for Adams (35), El Paso, Denver
+2. For Jefferson (64 leads, only 3 enriched): Download post-sale PDFs from Jefferson County Public Trustee weekly list
+3. Regrade all leads after enrichment
+
+**Phase 2: New county scraping (gets to 100+)**
+1. Download Larimer County Public Trustee surplus list
+2. Download Weld County excess funds page
+3. Download Boulder County trustee data
+4. Run each county scraper → inserts into assets → schema patcher syncs to leads
+
+**Phase 3: Continuous pipeline (100+ per month)**
+1. Automate weekly PDF downloads via cron
+2. Run `vertex_engine_enterprise` weekly on new PDFs
+3. Run `daily_healthcheck.py` to regrade
+
+### Key Insight: The 691 leads with `total_debt` data but no `winning_bid` are the low-hanging fruit. Those debt figures came from the original scrape. If we can get the post-sale results (which list winning bids), we can compute surplus = bid - debt for all 691 leads in one pass.
+
+---
+
+## 8. REVOLUTIONARY IDEAS — BECOMING COLORADO'S #1 SURPLUS PLATFORM
+
+### 8.1 Competitive Moat: Data Quality > Data Quantity
+- Every competitor scrapes the same public trustee websites. The moat is **verification depth**: winning_bid + total_debt + sale_date + owner = GOLD grade. Most competitors only have estimated_surplus (unverified).
+- **Action:** Prioritize Vertex AI enrichment over new county expansion.
+
+### 8.2 The Attorney Funnel
+- Free tier (RECON): See obfuscated leads (county, surplus range, grade). 5 unlocks/month.
+- Paid tier (OPERATOR, $49/mo): 25 unlocks. Access to ACTIONABLE leads.
+- Premium tier (SOVEREIGN, $149/mo): 100 unlocks. Access to RESTRICTED leads (< 6 months post-sale = first-mover advantage).
+- **The RESTRICTED window is the killer feature.** Attorneys who act within 180 days of sale get the case before anyone else.
+
+### 8.3 Automated Motion Generator
+- Build `server/motion_gen.py` to generate Colorado surplus recovery motions
+- Pre-filled with case number, owner name, surplus amount, statute citation
+- Attorneys save hours of paperwork → willingness to pay increases dramatically
+
+### 8.4 Multi-Source Verification
+- Cross-reference Public Trustee data with county assessor records (property value)
+- If assessed_value > total_debt AND winning_bid > total_debt → GOLD confidence
+- Adds a third verification layer competitors don't have
+
+### 8.5 Real-Time Alerts
+- Email/SMS when new GOLD leads appear in an attorney's target county
+- First-mover advantage = attorney pays premium for speed
+- Technical: webhook on INSERT into leads WHERE data_grade = 'GOLD'
+
+### 8.6 County Coverage Map (Colorado)
+```
+Tier 1 (Active):  Jefferson, Denver, Arapahoe, Adams, El Paso, Teller, Douglas, Mesa
+Tier 2 (Built):   Larimer, Weld, Boulder, Pueblo
+Tier 3 (Scraped): Eagle, San Miguel, Summit
+Tier 4 (Target):  Broomfield, Douglas, Park, Clear Creek, Gilpin
+```
+Goal: Cover every Front Range county (Denver metro + I-25 corridor) by Q2 2026.
+
+### 8.7 SOTA Technical Advantages
+1. **Vertex AI + Gemini for PDF parsing** — No manual data entry, sub-$0.01 per extraction
+2. **Dynamic status computation** — Attorneys always see current legal window status
+3. **Atomic credit system** — No race conditions on unlock (BEGIN IMMEDIATE)
+4. **JSONL audit trail** — Full provenance for every data point
+5. **Idempotent everything** — Every script is safe to run repeatedly
+
+---
+
+## 9. SYSTEM TOPOLOGY
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    VERIFUSE V2                       │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────┐  │
+│  │ Scrapers │───→│  leads table │←───│ Vertex AI│  │
+│  │ (10 eng) │    │  (714 rows)  │    │ Enterprise│  │
+│  └──────────┘    └──────┬───────┘    └──────────┘  │
+│                         │                           │
+│                    ┌────┴────┐                      │
+│                    │  API    │                      │
+│                    │ v4.0   │                      │
+│                    │ :8000   │                      │
+│                    └────┬────┘                      │
+│                         │                           │
+│              ┌──────────┴──────────┐                │
+│              │   Frontend (Vite)   │                │
+│              │   :4173 / :3000     │                │
+│              └─────────────────────┘                │
+│                                                     │
+│  ENV: VERIFUSE_DB_PATH, GOOGLE_APPLICATION_CREDS    │
+│  Auth: JWT (HS256, 72h expiry)                      │
+│  Billing: Stripe (recon/operator/sovereign)          │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## 10. QUICK REFERENCE
+
 ```bash
-cd verifuse/site/app
-npm install && npm run build    # Output: dist/
+# Schema patch (always safe to run)
+export VERIFUSE_DB_PATH=/home/schlieve001/origin/continuity_lab/verifuse_v2/data/verifuse_v2.db
+python -m verifuse_v2.db.fix_leads_schema
+
+# Vertex AI enrichment (dry-run first)
+export GOOGLE_APPLICATION_CREDENTIALS=/home/schlieve001/google_credentials.json
+python -m verifuse_v2.scrapers.vertex_engine_enterprise --dry-run
+python -m verifuse_v2.scrapers.vertex_engine_enterprise --limit 50
+
+# Start API
+VERIFUSE_DB_PATH=/home/schlieve001/origin/continuity_lab/verifuse_v2/data/verifuse_v2.db \
+  uvicorn verifuse_v2.server.api:app --host 0.0.0.0 --port 8000
+
+# Health check
+curl http://localhost:8000/health
+curl http://localhost:8000/api/leads?limit=5
+curl http://localhost:8000/api/stats
 ```
-
----
-
-## API ENDPOINTS (Titanium)
-
-### Public (No Auth)
-| Method | Path | Rate Limit | Description |
-|--------|------|-----------|-------------|
-| GET | `/health` | None | Health check + asset counts |
-| GET | `/api/stats` | None | Dashboard summary |
-| GET | `/api/counties` | None | County breakdown |
-| GET | `/api/leads` | 100/min | Browse leads as `SafeAsset[]` (no PII) |
-| GET | `/api/lead/{id}` | 100/min | Single lead (SafeAsset or FullAsset if unlocked) |
-| GET | `/api/dossier/{id}` | None | Download teaser dossier PDF |
-
-### Authenticated (JWT Required)
-| Method | Path | Rate Limit | Description |
-|--------|------|-----------|-------------|
-| POST | `/api/auth/register` | 5/min | Register account |
-| POST | `/api/auth/login` | 10/min | Login, get JWT |
-| GET | `/api/auth/me` | None | User profile + attorney_status |
-| POST | `/api/attorney/verify` | None | Submit bar number (→ PENDING) |
-| POST | `/api/leads/{id}/unlock` | **5/min** | **Atomic unlock** (credit + record) |
-| GET | `/api/user/unlocks` | None | Unlock history |
-| POST | `/api/billing/checkout` | None | Create Stripe checkout |
-| POST | `/api/webhooks/stripe` | None | Stripe webhook handler |
-
-### Admin Only
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/admin/stats` | Full system stats |
-| GET | `/api/admin/leads` | All leads unredacted |
-| POST | `/api/admin/regrade` | Manual regrade all assets |
-| POST | `/api/admin/dedup` | Deduplicate database |
-| GET | `/api/admin/users` | List all users |
-| POST | `/api/admin/upgrade-user` | Promote user to admin |
-| POST | `/api/admin/verify-attorney` | Verify/reject attorney |
-
----
-
-## STRIPE BILLING SETUP
-
-### Step 1: Create Products in Stripe Dashboard
-Go to https://dashboard.stripe.com/products and create 3 products:
-
-| Product Name | Price | Credits/Month | Daily API Limit |
-|-------------|-------|--------------|-----------------|
-| VeriFuse Recon | $199/month | 5 credits | 50 views/day |
-| VeriFuse Operator | $399/month | 25 credits | 200 views/day |
-| VeriFuse Sovereign | $699/month | 100 credits | 500 views/day |
-
-### Step 2: Copy Price IDs
-After creating each product, copy the `price_xxx` ID from the Price section.
-
-### Step 3: Update systemd Service File
-```bash
-sudo nano /etc/systemd/system/verifuse-api.service
-```
-Replace the PLACEHOLDER values:
-```ini
-Environment="STRIPE_SECRET_KEY=sk_live_..."
-Environment="STRIPE_WEBHOOK_SECRET=whsec_..."
-Environment="STRIPE_PRICE_SCOUT=price_..."
-Environment="STRIPE_PRICE_OPERATOR=price_..."
-Environment="STRIPE_PRICE_SOVEREIGN=price_..."
-Environment="VERIFUSE_JWT_SECRET=<run: openssl rand -hex 32>"
-```
-Then:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart verifuse-api
-```
-
-### Step 4: Set Up Stripe Webhook
-Stripe Dashboard → Developers → Webhooks → Add endpoint:
-- **URL:** `https://verifuse.tech/api/webhooks/stripe`
-- **Events:** `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`
-
-### Step 5: Test
-| Card Number | Scenario |
-|------------|----------|
-| `4242 4242 4242 4242` | Success |
-| `4000 0000 0000 9995` | Insufficient funds |
-| `4000 0025 0000 3155` | 3D Secure required |
-
----
-
-## SYSTEMD AUTOMATION
-
-### Active Services
-| Service | Port | Manager | Status |
-|---------|------|---------|--------|
-| FastAPI (uvicorn) | 8000 | `verifuse-api.service` | Running |
-| Caddy | 80, 443 | `caddy.service` | Running (TLS pending DNS) |
-
-### Active Timers
-| Timer | Schedule | Next Run | Purpose |
-|-------|----------|----------|---------|
-| `verifuse-healthcheck` | Daily 6:00 AM UTC | Daily | Regrade all assets |
-| `verifuse-scrapers` | Thursdays 8:00 AM UTC | Feb 19 | Run all 6 county scrapers |
-| `verifuse-vertex` | Fridays 10:00 AM UTC | Feb 20 | Process 100 PDFs (Titanium engine) |
-
-### Timer Management
-```bash
-# Status:
-sudo systemctl list-timers verifuse-*
-
-# Manual trigger:
-sudo systemctl start verifuse-healthcheck.service
-sudo systemctl start verifuse-scrapers.service
-sudo systemctl start verifuse-vertex.service
-
-# Logs:
-journalctl -u verifuse-api -f
-cat verifuse_v2/logs/healthcheck.log
-cat verifuse_v2/logs/scrapers.log
-cat verifuse_v2/logs/vertex.log
-cat verifuse_v2/logs/engine4_audit.jsonl
-```
-
----
-
-## COUNTY-BY-COUNTY: WHAT YOU MUST DO MANUALLY
-
-### Counties That Are AUTOMATED (No Manual Work)
-| County | Scraper | Automation | Data Quality |
-|--------|---------|-----------|-------------|
-| Adams | `adams_postsale_scraper.py` | Weekly Thursday | GOLD — has bid, debt, overbid, sale_date |
-| El Paso | `elpaso_postsale_scraper.py` | Weekly Thursday | SILVER — pre-sale, no overbid yet |
-| Larimer | `larimer_scraper.py` | Weekly Thursday | BRONZE — GTS portal scrape |
-| Weld | `weld_scraper.py` | Weekly Thursday | BRONZE — excess funds page |
-| Boulder | `boulder_scraper.py` | Weekly Thursday | BRONZE — GTS portal scrape |
-| Pueblo | `pueblo_scraper.py` | Weekly Thursday | BRONZE — HTML schedule page |
-| Denver | `signal_denver.py` + `outcome_denver.py` | Via healthcheck | GOLD — excess funds PDF |
-
-### Counties That Need MANUAL Action
-| County | Records | What You Must Do | How to Automate |
-|--------|---------|-----------------|-----------------|
-| **Eagle** | 312 (BRONZE, $0) | **Go to Eagle County Public Trustee website.** Download their post-sale/excess funds PDFs. Place in `verifuse_v2/data/raw_pdfs/eagle/`. Then run: `python -m verifuse_v2.scrapers.vertex_engine_production --limit 312` | Build `eagle_scraper.py` that hits their PT website programmatically |
-| **San Miguel** | 250 (BRONZE, $0) | **Go to San Miguel County Public Trustee.** Same as Eagle — get post-sale PDFs. | Build `sanmiguel_scraper.py` |
-| **Jefferson** | 66 (SILVER, $2M) | Data exists from CSV import. **Verify sale_dates are correct.** Some records missing total_indebtedness. Check https://www.jeffco.us/2222/Public-Trustee | Build `jefferson_scraper.py` for weekly updates |
-| **Arapahoe** | 12 (GOLD, $1.4M) | **Currently manual.** Check https://www.arapahoegov.com/1524/Public-Trustee for new excess funds lists. | Build `arapahoe_scraper.py` |
-| **Teller** | 26 (BRONZE, $18K) | Data from GovEase portal. **Need actual sale PDFs** to extract bid/debt. | Build `teller_pdf_scraper.py` using GovEase API |
-| **Summit** | 5 (BRONZE, $0) | Same as Teller — GovEase data, needs PDF enrichment. | Part of GovEase scraper expansion |
-| **Douglas** | 1 (SILVER, $4.8K) | Single manual record. **Verify data is current.** | Add to Arapahoe-area scraper |
-| **Mesa** | 1 (SILVER, $40K) | Single manual record. **Verify data is current.** | Build `mesa_scraper.py` (low priority, only 1 record) |
-
-### Priority Action Items for County Expansion
-1. **Eagle County PDFs** (312 records, highest volume) — Download from PT office
-2. **San Miguel County PDFs** (250 records) — Download from PT office
-3. **Build Jefferson auto-scraper** (66 records, $2M surplus)
-4. **Build Arapahoe auto-scraper** (12 records, $1.4M surplus — highest per-record value)
-
----
-
-## CREDENTIAL STATUS
-
-| Credential | Location | Status | Action Needed |
-|------------|----------|--------|--------------|
-| Google Service Account | `~/google_credentials.json` | VALID (canvas-sum-481614-f6) | None |
-| Stripe Secret Key | systemd env | PLACEHOLDER | Set real `sk_live_...` or `sk_test_...` |
-| Stripe Webhook Secret | systemd env | PLACEHOLDER | Set real `whsec_...` |
-| Stripe Price IDs (3) | systemd env | PLACEHOLDER | Create products in Stripe Dashboard |
-| JWT Secret | systemd env | PLACEHOLDER | Run `openssl rand -hex 32` |
-| DNS A Record | Porkbun/Netlify | MISSING | Add A → 34.69.230.82 |
-
----
-
-## ENGINE REGISTRY
-
-| # | Engine | Module | Data Source | Titanium? |
-|---|--------|--------|-------------|-----------|
-| 0 | Governor | `pipeline_manager.py` | Rate limiter & orchestrator | - |
-| 1 | Signal Discovery | `scrapers/signal_denver.py` | Denver Public Trustee | - |
-| 2 | Outcome Resolution | `scrapers/outcome_denver.py` | Denver Foreclosure Detail | - |
-| 3 | Entity Enrichment | `enrichment/entity_resolver.py` | Denver Assessor | - |
-| 4 | **Vertex AI (Titanium)** | `scrapers/vertex_engine_production.py` | Staged PDFs via Gemini | YES |
-| 5 | El Paso Post-Sale | `scrapers/elpaso_postsale_scraper.py` | El Paso Public Trustee | - |
-| 6 | Adams Post-Sale | `scrapers/adams_postsale_scraper.py` | Adams Public Trustee | - |
-| 7 | Larimer Pre-Sale | `scrapers/larimer_scraper.py` | Larimer Public Trustee | - |
-| 8 | Weld Pre-Sale | `scrapers/weld_scraper.py` | Weld Public Trustee | - |
-| 9 | Boulder Pre-Sale | `scrapers/boulder_scraper.py` | Boulder Public Trustee | - |
-| 10 | Pueblo Schedule | `scrapers/pueblo_scraper.py` | Pueblo Public Trustee | - |
-
----
-
-## TROUBLESHOOTING
-
-| Problem | Solution |
-|---------|----------|
-| `Lead status always UNKNOWN` | Asset missing `sale_date`. Run vertex_engine_production to extract. |
-| `RESTRICTED leads can't be unlocked` | User needs `attorney_status = 'VERIFIED'`. Admin: `POST /api/admin/verify-attorney` |
-| `402 Insufficient credits` | User out of credits. Upgrade tier or wait for monthly reset. |
-| `410 Lead expired` | Claim deadline passed. Lead is permanently locked. |
-| `429 Rate limit` | Unlock: max 5/min per user. Global: 100/min per IP. |
-| `CORS error in browser` | Only 4 origins allowed. Check `api.py` CORS config. |
-| `vertex_engine: lockfile exists` | Another instance running, or stale lock. Check PID in `.vertex_engine.lock` |
-| `vertex_engine: 0 ready` | No staged records with PDFs. Run `staging_promoter --link-pdfs` |
-| `verifuse-api crash-looping` | Port 8000 in use. `ss -tlnp | grep 8000` then kill conflicting process |
-| `Caddy TLS error` | DNS A record not configured → 34.69.230.82 |
-| `Stripe checkout 400` | Price IDs not set in systemd env. See Stripe Setup section. |
-| `Migration fails` | Run: `python -m verifuse_v2.db.migrate_titanium` (idempotent, safe to retry) |
-
----
-
-## FILE MAP (Titanium)
-
-| File | Purpose | Titanium? |
-|------|---------|-----------|
-| `verifuse_v2/db/schema.sql` | 13-table schema with FK, CHECK constraints | YES |
-| `verifuse_v2/db/migrate_titanium.py` | Idempotent migration (lead_unlocks, attorney_status) | YES |
-| `verifuse_v2/db/database.py` | Core DB abstraction (FK=ON, WAL mode) | Updated |
-| `verifuse_v2/server/models.py` | Lead, SafeAsset, FullAsset with computed status | YES |
-| `verifuse_v2/server/api.py` | Titanium API guard (CORS, rate limit, atomic unlock) | YES |
-| `verifuse_v2/server/auth.py` | JWT auth (bcrypt, 72h tokens) | Existing |
-| `verifuse_v2/server/billing.py` | Stripe billing (checkout, webhooks, credit reset) | Existing |
-| `verifuse_v2/server/obfuscator.py` | PII → Base64 PNG (anti-OCR) | Existing |
-| `verifuse_v2/server/dossier_gen.py` | Intelligence dossier PDF generator | Existing |
-| `verifuse_v2/server/motion_gen.py` | Motion for disbursement PDF | Existing |
-| `verifuse_v2/scrapers/vertex_engine_production.py` | Titanium Vertex AI engine (lockfile, idempotent, safety gate) | YES |
-| `verifuse_v2/scrapers/vertex_engine.py` | Legacy engine (kept for backward compat) | Legacy |
-| `verifuse_v2/daily_healthcheck.py` | Daily regrade + scrape + report | Existing |
-| `verifuse_v2/verify_system.py` | 8-layer diagnostic (GREEN LIGHT) | Existing |
-| `verifuse_v2/staging_promoter.py` | Promote staging → assets | Existing |
-| `verifuse_v2/pipeline_manager.py` | Engine 0 (Governor) | Existing |
-| `verifuse_v2/requirements.txt` | Python deps (+ slowapi, pydantic) | Updated |
-| `verifuse/site/app/` | React frontend | Existing |
-| `verifuse_v2/deploy/` | Systemd service + timer units | Updated |
-
----
-
-## WHAT NEEDS TO HAPPEN NEXT (Priority Order)
-
-### CRITICAL (Do These First — 30 minutes total)
-1. **Fix DNS** → Add A record `34.69.230.82` in Porkbun. Then `sudo systemctl restart caddy`.
-2. **Set Stripe credentials** → Create products, get price IDs, update systemd env vars.
-3. **Set JWT secret** → `openssl rand -hex 32`, update in systemd service file.
-
-### HIGH PRIORITY (This Week)
-4. **Download Eagle County PDFs** (312 records) → Place in `data/raw_pdfs/eagle/`, run vertex engine.
-5. **Download San Miguel County PDFs** (250 records) → Same process.
-6. **Run all scrapers** → `python -c "from verifuse_v2.pipeline_manager import Governor; g = Governor(); print(g.run_pipeline())"` or wait for Thursday's automated run.
-7. **Process available PDFs** → `python -m verifuse_v2.scrapers.vertex_engine_production --limit 50`
-
-### MEDIUM PRIORITY (Next Sprint)
-8. **Build auto-scrapers** for Jefferson ($2M) and Arapahoe ($1.4M) counties.
-9. **Test end-to-end flow** → Register → Login → Browse → Checkout → Unlock → Dossier.
-10. **Attorney verification flow** → Register with bar number → Admin verifies → Unlock RESTRICTED leads.
-
-### LOWER PRIORITY
-11. **Build scrapers** for Teller, Summit, Douglas, Mesa counties.
-12. **Marketing site** → Auto-update stats from API.
-13. **Monitoring/alerting** → Email on scraper failures.
-
-### COMPLETED (Sprint 4 — Titanium)
-- [x] Rewrote `schema.sql` with lead_unlocks, attorney_status, V2 financial columns
-- [x] Created `migrate_titanium.py` — idempotent, backfilled 103 claim_deadlines
-- [x] Created `models.py` — Lead with computed status, SafeAsset/FullAsset projections
-- [x] Rewrote `api.py` — strict CORS, slowapi rate limiting, atomic BEGIN IMMEDIATE unlocks
-- [x] Rewrote `vertex_engine_production.py` — lockfile, idempotency, safety gate
-- [x] All 5 files verified working: API v3.0.0 running, 28/29 PASS diagnostic
-- [x] Installed slowapi + pydantic in requirements.txt
-- [x] Updated vertex systemd timer to use Titanium production engine

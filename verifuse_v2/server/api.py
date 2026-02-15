@@ -1,89 +1,247 @@
 """
-VERIFUSE V2 — Titanium API Guard
+VERIFUSE V2 — Titanium API (leads-native)
 
-Core invariants enforced:
-  1. Dynamic Status: RESTRICTED/ACTIONABLE/EXPIRED computed at runtime (UTC).
-  2. Hybrid Access Gate: RESTRICTED → attorneys only. ACTIONABLE → paid users. EXPIRED → locked.
-  3. Projection Redaction: SafeAsset by default, FullAsset only with valid lead_unlock.
-  4. Atomic Transactions: Credit deduction + unlock in BEGIN IMMEDIATE.
-  5. Strict CORS, rate limiting, audit everything.
+All queries hit the `leads` table via VERIFUSE_DB_PATH.
+SafeAsset fields are Optional[float] = None (Black Screen fix).
+
+Gates:
+  RESTRICTED → is_verified_attorney + (OPERATOR or SOVEREIGN)
+  ACTIONABLE → any paid user with credits
+  EXPIRED    → locked, cannot unlock
+
+Atomic: credit deduction uses BEGIN IMMEDIATE.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
-from collections import defaultdict
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from verifuse_v2.contracts.schemas import EntityRecord, OutcomeRecord, SignalRecord
-from verifuse_v2.db import database as db
-from verifuse_v2.server.auth import (
-    create_token,
-    get_current_user,
-    get_optional_user,
-    hash_password,
-    is_admin_user,
-    login_user,
-    register_user,
-    require_admin,
-    verify_password,
-)
-from verifuse_v2.server.billing import (
-    TIER_DAILY_API_LIMIT,
-    create_checkout_session,
-    handle_stripe_webhook,
-)
-from verifuse_v2.server.models import (
-    AttorneyVerifyRequest,
-    FullAsset,
-    Lead,
-    SafeAsset,
-    UnlockRequest,
-)
-from verifuse_v2.server.obfuscator import text_to_image
+# ── Fail-fast: VERIFUSE_DB_PATH ────────────────────────────────────
+
+VERIFUSE_DB_PATH = os.environ.get("VERIFUSE_DB_PATH")
+if not VERIFUSE_DB_PATH:
+    raise RuntimeError(
+        "FATAL: VERIFUSE_DB_PATH not set. "
+        "export VERIFUSE_DB_PATH=/path/to/verifuse_v2.db"
+    )
 
 log = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# ── Database connection (strict VERIFUSE_DB_PATH) ───────────────────
 
-# ── Rate Limiter (slowapi) ───────────────────────────────────────────
+def _get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(VERIFUSE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+# ── SafeAsset model (NULL-safe: every numeric field is Optional) ────
+
+class SafeAsset(BaseModel):
+    """Public projection. All floats are Optional = None (Black Screen fix)."""
+    id: Optional[str] = None
+    county: Optional[str] = None
+    case_number: Optional[str] = None
+    status: Optional[str] = None
+    surplus_estimate: Optional[float] = None
+    data_grade: Optional[str] = None
+    confidence_score: Optional[float] = None
+    sale_date: Optional[str] = None
+    claim_deadline: Optional[str] = None
+    days_remaining: Optional[int] = None
+    city_hint: Optional[str] = None
+    surplus_verified: Optional[bool] = None
+
+
+class FullAsset(SafeAsset):
+    """Unlocked projection with PII."""
+    owner_name: Optional[str] = None
+    property_address: Optional[str] = None
+    winning_bid: Optional[float] = None
+    total_debt: Optional[float] = None
+    surplus_amount: Optional[float] = None
+    overbid_amount: Optional[float] = None
+
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+RESTRICTION_DAYS = 180  # C.R.S. § 38-38-111
+
+
+def _compute_status(row: dict) -> str:
+    """Dynamic status from UTC dates. NEVER stored."""
+    today = datetime.now(timezone.utc).date()
+
+    deadline = row.get("claim_deadline")
+    if deadline:
+        try:
+            if today > date.fromisoformat(deadline):
+                return "EXPIRED"
+        except (ValueError, TypeError):
+            pass
+
+    sale = row.get("sale_date")
+    if sale:
+        try:
+            sale_dt = date.fromisoformat(str(sale)[:10])
+            if today < sale_dt + timedelta(days=RESTRICTION_DAYS):
+                return "RESTRICTED"
+            return "ACTIONABLE"
+        except (ValueError, TypeError):
+            pass
+
+    return "ACTIONABLE"
+
+
+def _safe_float(val) -> Optional[float]:
+    """Safely convert DB value to float, returning None for NULL/invalid."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_city(address: Optional[str], county: Optional[str]) -> str:
+    if not address:
+        return f"{county or 'CO'}, CO"
+    parts = [p.strip() for p in address.split(",")]
+    if len(parts) >= 2:
+        return ", ".join(parts[-2:]).strip()
+    return f"{county or 'CO'}, CO"
+
+
+def _round_surplus(amount: Optional[float]) -> Optional[float]:
+    if amount is None or amount <= 0:
+        return 0.0
+    return round(amount / 100) * 100
+
+
+def _row_to_safe(row: dict) -> dict:
+    """Convert a leads row to SafeAsset dict. NULL-safe."""
+    surplus = _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus")) or 0.0
+    bid = _safe_float(row.get("winning_bid")) or 0.0
+    debt = _safe_float(row.get("total_debt")) or 0.0
+    conf = _safe_float(row.get("confidence_score")) or 0.0
+    status = _compute_status(row)
+
+    days_left = None
+    deadline = row.get("claim_deadline")
+    if deadline:
+        try:
+            days_left = (date.fromisoformat(deadline) - datetime.now(timezone.utc).date()).days
+        except (ValueError, TypeError):
+            pass
+
+    verified = bid > 0 and debt > 0 and conf >= 0.7
+
+    return SafeAsset(
+        id=row.get("id"),
+        county=row.get("county"),
+        case_number=row.get("case_number"),
+        status=status,
+        surplus_estimate=_round_surplus(surplus),
+        data_grade=row.get("data_grade"),
+        confidence_score=round(conf, 2) if conf else None,
+        sale_date=row.get("sale_date"),
+        claim_deadline=deadline,
+        days_remaining=days_left,
+        city_hint=_extract_city(row.get("property_address"), row.get("county")),
+        surplus_verified=verified,
+    ).model_dump()
+
+
+def _row_to_full(row: dict) -> dict:
+    """Convert a leads row to FullAsset dict. NULL-safe."""
+    safe = _row_to_safe(row)
+    safe.update({
+        "owner_name": row.get("owner_name"),
+        "property_address": row.get("property_address"),
+        "winning_bid": _safe_float(row.get("winning_bid")),
+        "total_debt": _safe_float(row.get("total_debt")),
+        "surplus_amount": _safe_float(row.get("surplus_amount")),
+        "overbid_amount": _safe_float(row.get("overbid_amount")),
+    })
+    return safe
+
+
+# ── Auth helpers (inline, using VERIFUSE_DB_PATH) ───────────────────
+
+def _get_user_from_request(request: Request) -> Optional[dict]:
+    """Extract JWT and look up user. Returns None if unauthenticated."""
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Bearer "):
+        return None
+    token = auth.split(" ", 1)[1]
+    try:
+        import jwt as pyjwt
+        secret = os.getenv("VERIFUSE_JWT_SECRET", "vf2-dev-secret-change-in-production")
+        payload = pyjwt.decode(token, secret, algorithms=["HS256"])
+    except Exception:
+        return None
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", [payload.get("sub")]).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def _require_user(request: Request) -> dict:
+    """Like _get_user but raises 401 if not authenticated."""
+    user = _get_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if not user.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Account deactivated.")
+    return user
+
+
+def _is_verified_attorney(user: dict) -> bool:
+    return user.get("attorney_status") == "VERIFIED"
+
+
+def _is_admin(user: dict) -> bool:
+    return bool(user.get("is_admin", 0))
+
+
+# ── Rate Limiter ────────────────────────────────────────────────────
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
-
-# ── Honeypot ─────────────────────────────────────────────────────────
-
-HONEYPOT_ID = "TRAP_999"
-_blacklisted_ips: set[str] = set()
 
 # ── App ──────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="VeriFuse V2 — Titanium API",
-    version="3.0.0",
-    description="Colorado Surplus Intelligence Platform (Titanium Spec)",
+    version="4.0.0",
+    description="Colorado Surplus Intelligence Platform",
 )
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# STRICT CORS — only trusted origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://verifuse.tech",
         "https://www.verifuse.tech",
         "http://localhost:3000",
-        "http://localhost:5173",
+        "http://34.69.230.82:4173",
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -91,432 +249,206 @@ app.add_middleware(
 )
 
 
-# ── Startup ──────────────────────────────────────────────────────────
+# ── Startup ─────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup():
-    db.init_db()
-    # Run Titanium migration on startup (idempotent)
+    """Run schema patcher on startup (idempotent)."""
     try:
-        from verifuse_v2.db.migrate_titanium import migrate
-        migrate()
+        from verifuse_v2.db.fix_leads_schema import patch_leads_schema
+        patch_leads_schema()
     except Exception as e:
-        log.warning("Migration on startup: %s", e)
-    # Ensure admin exists
-    db.upgrade_to_admin("schlieve001@gmail.com", credits=9999)
-    log.info("Titanium API initialized")
+        log.warning("Schema patch on startup: %s", e)
+    log.info("Titanium API v4 initialized (DB: %s)", VERIFUSE_DB_PATH)
 
 
-# ── Helpers ──────────────────────────────────────────────────────────
-
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
-def _get_lead_or_404(asset_id: str) -> Lead:
-    """Fetch a lead from DB and return as Lead model, or raise 404."""
-    row = db.get_lead_by_id(asset_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Lead not found.")
-    return Lead.from_row(row)
-
-
-def _check_unlock(conn: sqlite3.Connection, user_id: str, lead_id: str) -> bool:
-    """Check if user has a valid lead_unlock record."""
-    row = conn.execute(
-        "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
-        [user_id, lead_id],
-    ).fetchone()
-    return row is not None
-
-
-def _user_unlock_count_last_minute(conn: sqlite3.Connection, user_id: str) -> int:
-    """Count unlocks by this user in the last 60 seconds (throttle check)."""
-    cutoff = datetime.now(timezone.utc).isoformat()[:19]  # Trim to seconds
-    row = conn.execute("""
-        SELECT COUNT(*) FROM lead_unlocks
-        WHERE user_id = ? AND unlocked_at > datetime(?, '-60 seconds')
-    """, [user_id, cutoff]).fetchone()
-    return row[0] if row else 0
-
-
-# ── Middleware ────────────────────────────────────────────────────────
-
-@app.middleware("http")
-async def blacklist_check(request: Request, call_next):
-    ip = _client_ip(request)
-    if ip in _blacklisted_ips:
-        log.warning("Blocked blacklisted IP: %s", ip)
-        return JSONResponse(status_code=403, content={"detail": "Access denied."})
-    return await call_next(request)
-
-
-@app.middleware("http")
-async def enforce_foreign_keys(request: Request, call_next):
-    """Ensure PRAGMA foreign_keys = ON for every request cycle."""
-    # This runs before each request — the DB connections created
-    # during this request will already have FK enforcement from database.py
-    return await call_next(request)
-
-
-# ── Health ───────────────────────────────────────────────────────────
+# ── Health ──────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    stats = db.get_lead_stats()
+    conn = _get_conn()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+        with_surplus = conn.execute(
+            "SELECT COUNT(*) FROM leads WHERE surplus_amount > 0"
+        ).fetchone()[0]
+        total_surplus = conn.execute(
+            "SELECT COALESCE(SUM(surplus_amount), 0) FROM leads WHERE surplus_amount > 0"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
     return {
         "status": "ok",
-        "engine": "titanium_api",
-        "version": "3.0.0",
-        "assets": stats["total_assets"],
-        "attorney_ready": stats["attorney_ready"],
-        "total_surplus": stats["total_claimable_surplus"],
+        "engine": "titanium_api_v4",
+        "db": VERIFUSE_DB_PATH,
+        "total_leads": total,
+        "with_surplus": with_surplus,
+        "total_surplus": round(total_surplus, 2),
     }
 
 
-# ── Auth endpoints ───────────────────────────────────────────────────
-
-@app.post("/api/auth/register")
-@limiter.limit("5/minute")
-async def api_register(request: Request):
-    """Register a new attorney account."""
-    body = await request.json()
-    email = body.get("email", "").strip().lower()
-    password = body.get("password", "")
-    full_name = body.get("full_name", "")
-    firm_name = body.get("firm_name", "")
-    bar_number = body.get("bar_number", "")
-    tier = body.get("tier", "recon")
-
-    if not email or not password:
-        raise HTTPException(status_code=400, detail="Email and password required.")
-
-    user, token = register_user(
-        email=email, password=password, full_name=full_name,
-        firm_name=firm_name, bar_number=bar_number, tier=tier,
-    )
-    return {
-        "token": token,
-        "user": {
-            "user_id": user["user_id"],
-            "email": user["email"],
-            "full_name": user["full_name"],
-            "firm_name": user["firm_name"],
-            "tier": user["tier"],
-            "credits_remaining": user["credits_remaining"],
-        },
-    }
-
-
-@app.post("/api/auth/login")
-@limiter.limit("10/minute")
-async def api_login(request: Request):
-    """Log in and receive a JWT token."""
-    body = await request.json()
-    email = body.get("email", "").strip().lower()
-    password = body.get("password", "")
-
-    if not email or not password:
-        raise HTTPException(status_code=400, detail="Email and password required.")
-
-    user, token = login_user(email=email, password=password)
-    return {
-        "token": token,
-        "user": {
-            "user_id": user["user_id"],
-            "email": user["email"],
-            "full_name": user["full_name"],
-            "firm_name": user["firm_name"],
-            "tier": user["tier"],
-            "credits_remaining": user["credits_remaining"],
-        },
-    }
-
-
-@app.get("/api/auth/me")
-async def api_me(request: Request):
-    """Get current user profile."""
-    user = get_current_user(request)
-    with db.get_db() as conn:
-        unlock_count = conn.execute(
-            "SELECT COUNT(*) FROM lead_unlocks WHERE user_id = ?",
-            [user["user_id"]],
-        ).fetchone()[0]
-    return {
-        "user_id": user["user_id"],
-        "email": user["email"],
-        "full_name": user["full_name"],
-        "firm_name": user["firm_name"],
-        "bar_number": user.get("bar_number", ""),
-        "attorney_status": user.get("attorney_status", "NONE"),
-        "tier": user["tier"],
-        "credits_remaining": user["credits_remaining"],
-        "unlocked_leads": unlock_count,
-        "is_active": bool(user["is_active"]),
-        "is_admin": bool(user.get("is_admin", 0)),
-    }
-
-
-# ── Attorney Verification ───────────────────────────────────────────
-
-@app.post("/api/attorney/verify")
-async def verify_attorney_status(request: Request):
-    """Submit bar number for attorney verification. Sets status to PENDING."""
-    user = get_current_user(request)
-    body = await request.json()
-    bar_number = body.get("bar_number", "").strip()
-    bar_state = body.get("bar_state", "CO").strip().upper()
-
-    if not bar_number or len(bar_number) < 3:
-        raise HTTPException(status_code=400, detail="Valid bar number required.")
-
-    with db.get_db() as conn:
-        conn.execute("""
-            UPDATE users SET bar_number = ?, bar_state = ?, attorney_status = 'PENDING'
-            WHERE user_id = ?
-        """, [bar_number, bar_state, user["user_id"]])
-
-    db.log_pipeline_event(
-        user["user_id"], "ATTORNEY_VERIFY_REQUEST",
-        old_value=user.get("attorney_status", "NONE"),
-        new_value="PENDING",
-        actor="api",
-        reason=f"bar={bar_number} state={bar_state}",
-    )
-
-    return {"status": "PENDING", "bar_number": bar_number, "bar_state": bar_state}
-
-
-# ── Public endpoints ─────────────────────────────────────────────────
-
-@app.get("/api/stats")
-async def get_stats():
-    """Dashboard summary stats (public)."""
-    return db.get_lead_stats()
-
-
-@app.get("/api/counties")
-async def get_counties():
-    """County-level summary (public)."""
-    counties = db.get_county_summary()
-    statutes = db.get_statute_authority()
-    statute_map = {}
-    for s in statutes:
-        statute_map[s["county"]] = {
-            "statute_citation": s["statute_citation"],
-            "statute_years": s["statute_years"],
-            "requires_court": bool(s["requires_court"]),
-            "fee_cap_pct": s["fee_cap_pct"],
-        }
-
-    result = []
-    for c in counties:
-        entry = {
-            "county": c["county"],
-            "lead_count": c["lead_count"],
-            "total_surplus": round(c["total_surplus"], 2),
-            "avg_surplus": round(c["avg_surplus"], 2),
-            "gold_count": c["gold_count"],
-        }
-        if c["county"] in statute_map:
-            entry["statute"] = statute_map[c["county"]]
-        result.append(entry)
-
-    return {"count": len(result), "counties": result}
-
-
-# ── Lead Browsing (SafeAsset projection) ────────────────────────────
+# ── GET /api/leads — Paginated, NULL-safe ───────────────────────────
 
 @app.get("/api/leads")
 @limiter.limit("100/minute")
 async def get_leads(
     request: Request,
     county: Optional[str] = Query(None),
-    min_surplus: float = Query(0.0),
+    min_surplus: float = Query(0.0, ge=0),
     grade: Optional[str] = Query(None),
-    status_filter: Optional[str] = Query(None, alias="status"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """Return leads as List[SafeAsset]. Expired leads are filtered out.
-
-    SQL Filter: WHERE claim_deadline >= date('now') OR claim_deadline IS NULL
-    """
-    # Rate limit by tier
-    ip = _client_ip(request)
-    user = get_optional_user(request)
-
-    # Fetch from DB — only non-expired leads
-    with db.get_db() as conn:
-        query = """
-            SELECT a.*, ls.record_class, ls.work_status
-            FROM assets a
-            LEFT JOIN legal_status ls ON a.asset_id = ls.asset_id
-            WHERE (a.claim_deadline >= date('now') OR a.claim_deadline IS NULL)
-              AND a.surplus_amount >= ?
-        """
-        params: list = [max(min_surplus, 1000.0)]
+    """Return paginated leads as SafeAsset. Handles NULLs gracefully."""
+    conn = _get_conn()
+    try:
+        query = "SELECT * FROM leads WHERE 1=1"
+        params: list = []
 
         if county:
-            query += " AND a.county = ?"
+            query += " AND county = ?"
             params.append(county)
+        if min_surplus > 0:
+            query += " AND COALESCE(surplus_amount, estimated_surplus, 0) >= ?"
+            params.append(min_surplus)
         if grade:
-            query += " AND a.data_grade = ?"
+            query += " AND data_grade = ?"
             params.append(grade)
 
-        query += " ORDER BY a.surplus_amount DESC LIMIT ? OFFSET ?"
+        # Count for pagination
+        count_q = query.replace("SELECT *", "SELECT COUNT(*)")
+        total = conn.execute(count_q, params).fetchone()[0]
+
+        query += " ORDER BY COALESCE(surplus_amount, estimated_surplus, 0) DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
 
-    # Convert to SafeAsset projections
     leads = []
     for row in rows:
         try:
-            lead = Lead.from_row(dict(row))
-            safe = SafeAsset.from_lead(lead)
-
-            # Apply status filter if requested
-            if status_filter and safe.status != status_filter.upper():
+            safe = _row_to_safe(dict(row))
+            # Filter out EXPIRED
+            if safe.get("status") == "EXPIRED":
                 continue
-
-            leads.append(safe.model_dump())
+            leads.append(safe)
         except Exception as e:
-            log.warning("Lead projection error for %s: %s", dict(row).get("asset_id"), e)
+            log.warning("Lead projection error: %s", e)
             continue
 
-    # Inject honeypot
-    leads.append(_honeypot_safe())
-
-    return {"count": len(leads), "leads": leads}
-
-
-@app.get("/api/lead/{asset_id}")
-@limiter.limit("100/minute")
-async def get_lead_detail(asset_id: str, request: Request):
-    """Get a single lead as SafeAsset. Or FullAsset if user has unlocked it."""
-    ip = _client_ip(request)
-
-    # Honeypot trap
-    if asset_id == HONEYPOT_ID:
-        log.critical("HONEYPOT HIT — detail from IP %s", ip)
-        _blacklisted_ips.add(ip)
-        raise HTTPException(status_code=403, detail="Access denied.")
-
-    lead = _get_lead_or_404(asset_id)
-
-    # Check if authenticated user has unlocked this lead
-    user = get_optional_user(request)
-    if user:
-        with db.get_db() as conn:
-            if _check_unlock(conn, user["user_id"], asset_id) or is_admin_user(user):
-                return FullAsset.from_lead(lead).model_dump()
-
-    # Default: SafeAsset (redacted)
-    return SafeAsset.from_lead(lead).model_dump()
+    return {
+        "count": len(leads),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "leads": leads,
+    }
 
 
-# ── Lead Unlock (Atomic Transaction) ────────────────────────────────
+# ── POST /api/leads/{id}/unlock — Double Gate + Atomic Credits ──────
 
-@app.post("/api/leads/{asset_id}/unlock")
-@limiter.limit("5/minute")
-async def unlock_lead(asset_id: str, request: Request):
-    """Unlock a lead: atomic credit deduction + record creation.
+@app.post("/api/leads/{lead_id}/unlock")
+@limiter.limit("10/minute")
+async def unlock_lead(lead_id: str, request: Request):
+    """Unlock a lead with Double Gate enforcement.
 
-    Hybrid Access Gate:
-      RESTRICTED → Verified attorneys ONLY
-      ACTIONABLE → Any paid user
-      EXPIRED    → Cannot unlock (locked)
-
-    Returns FullAsset on success.
+    RESTRICTED: requires is_verified_attorney + (OPERATOR or SOVEREIGN tier)
+    ACTIONABLE: any paid user with credits >= 1
+    EXPIRED: cannot unlock
     """
-    user = get_current_user(request)
-    ip = _client_ip(request)
+    user = _require_user(request)
+    now = datetime.now(timezone.utc).isoformat()
 
-    # Honeypot trap
-    if asset_id == HONEYPOT_ID:
-        log.critical("HONEYPOT HIT — unlock from IP %s user %s", ip, user["user_id"])
-        _blacklisted_ips.add(ip)
-        raise HTTPException(status_code=403, detail="Access denied.")
+    # Admin bypass
+    if _is_admin(user):
+        conn = _get_conn()
+        try:
+            row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Lead not found.")
+        return _row_to_full(dict(row))
 
-    lead = _get_lead_or_404(asset_id)
+    # Fetch lead
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+    finally:
+        conn.close()
 
-    # ── Gate 1: Check status ─────────────────────────────────────
-    if lead.status == "EXPIRED":
+    if not row:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+
+    lead = dict(row)
+    status = _compute_status(lead)
+
+    # ── Gate 1: EXPIRED check ────────────────────────────────────
+    if status == "EXPIRED":
         raise HTTPException(
             status_code=410,
-            detail="This lead has expired. The claim deadline has passed.",
+            detail="This lead has expired. Claim deadline has passed.",
         )
 
-    # ── Gate 2: Hybrid access check ──────────────────────────────
-    if lead.status == "RESTRICTED":
-        # Only verified attorneys can unlock RESTRICTED leads
-        attorney_status = user.get("attorney_status", "NONE")
-        if attorney_status != "VERIFIED" and not is_admin_user(user):
+    # ── Gate 2: RESTRICTED — Double Gate ─────────────────────────
+    if status == "RESTRICTED":
+        if not _is_verified_attorney(user):
             raise HTTPException(
                 status_code=403,
-                detail="RESTRICTED lead: requires verified attorney status. "
-                       "Submit your bar number at POST /api/attorney/verify.",
+                detail="RESTRICTED lead requires verified attorney status.",
+            )
+        if user.get("tier") not in ("operator", "sovereign"):
+            raise HTTPException(
+                status_code=403,
+                detail="RESTRICTED lead requires OPERATOR or SOVEREIGN tier.",
             )
 
-    # ── Gate 3: Atomic credit + unlock (BEGIN IMMEDIATE) ─────────
-    # Admin bypasses credit check
-    if is_admin_user(user):
-        return FullAsset.from_lead(lead).model_dump()
-
-    now = datetime.now(timezone.utc).isoformat()
-    conn = db.get_connection()
+    # ── Gate 3: Atomic credit deduction (BEGIN IMMEDIATE) ────────
+    conn = _get_conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
 
         # Check if already unlocked
         existing = conn.execute(
             "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
-            [user["user_id"], asset_id],
+            [user["user_id"], lead_id],
         ).fetchone()
 
         if existing:
             conn.execute("COMMIT")
-            return FullAsset.from_lead(lead).model_dump()
-
-        # Throttle: max 5 unlocks/min per user
-        recent = conn.execute("""
-            SELECT COUNT(*) FROM lead_unlocks
-            WHERE user_id = ? AND unlocked_at > datetime('now', '-60 seconds')
-        """, [user["user_id"]]).fetchone()[0]
-
-        if recent >= 5:
-            conn.execute("ROLLBACK")
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit: max 5 unlocks per minute.",
-            )
+            return _row_to_full(lead)
 
         # Check credits
-        credits_row = conn.execute(
+        credits = conn.execute(
             "SELECT credits_remaining FROM users WHERE user_id = ?",
             [user["user_id"]],
         ).fetchone()
 
-        if not credits_row or credits_row[0] <= 0:
+        if not credits or credits[0] <= 0:
             conn.execute("ROLLBACK")
             raise HTTPException(
                 status_code=402,
                 detail="Insufficient credits. Upgrade your plan.",
             )
 
-        # ATOMIC: Deduct credit + record unlock
+        # Deduct 1 credit
         conn.execute(
             "UPDATE users SET credits_remaining = credits_remaining - 1 WHERE user_id = ?",
             [user["user_id"]],
         )
+
+        # Record unlock
+        ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if not ip and request.client:
+            ip = request.client.host
+
         conn.execute("""
             INSERT INTO lead_unlocks (user_id, lead_id, unlocked_at, ip_address, plan_tier)
             VALUES (?, ?, ?, ?, ?)
-        """, [user["user_id"], asset_id, now, ip, user.get("tier", "recon")])
+        """, [user["user_id"], lead_id, now, ip, user.get("tier", "recon")])
 
         # Audit trail
         conn.execute("""
@@ -524,11 +456,11 @@ async def unlock_lead(asset_id: str, request: Request):
             (asset_id, event_type, old_value, new_value, actor, reason, created_at)
             VALUES (?, 'LEAD_UNLOCK', ?, ?, ?, ?, ?)
         """, [
-            asset_id,
-            f"credits={credits_row[0]}",
-            f"credits={credits_row[0] - 1}",
+            lead_id,
+            f"credits={credits[0]}",
+            f"credits={credits[0] - 1}",
             user["user_id"],
-            f"ip={ip} tier={user.get('tier')} status={lead.status}",
+            f"tier={user.get('tier')} status={status}",
             now,
         ])
 
@@ -537,219 +469,165 @@ async def unlock_lead(asset_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        conn.execute("ROLLBACK")
-        log.error("Unlock transaction failed: %s", e)
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.error("Unlock failed: %s", e)
         raise HTTPException(status_code=500, detail="Unlock failed.")
     finally:
         conn.close()
 
-    return FullAsset.from_lead(lead).model_dump()
+    return _row_to_full(lead)
 
 
-# ── User endpoints ───────────────────────────────────────────────────
+# ── POST /api/billing/upgrade — Tier upgrade + credit refill ────────
 
-@app.get("/api/user/unlocks")
-async def get_user_unlock_history(request: Request):
-    """Get the authenticated user's unlock history with lead details."""
-    user = get_current_user(request)
-    with db.get_db() as conn:
-        rows = conn.execute("""
-            SELECT lu.lead_id, lu.unlocked_at, lu.plan_tier,
-                   a.county, a.surplus_amount, a.data_grade
-            FROM lead_unlocks lu
-            JOIN assets a ON lu.lead_id = a.asset_id
-            WHERE lu.user_id = ?
-            ORDER BY lu.unlocked_at DESC
-        """, [user["user_id"]]).fetchall()
+@app.post("/api/billing/upgrade")
+async def billing_upgrade(request: Request):
+    """Update tier and refill credits."""
+    user = _require_user(request)
+    body = await request.json()
+    new_tier = body.get("tier", "").lower()
+
+    valid_tiers = {
+        "recon": 5,
+        "operator": 25,
+        "sovereign": 100,
+    }
+
+    if new_tier not in valid_tiers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tier. Choose from: {list(valid_tiers.keys())}",
+        )
+
+    credits = valid_tiers[new_tier]
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = _get_conn()
+    try:
+        conn.execute("""
+            UPDATE users SET tier = ?, credits_remaining = ?, credits_reset_at = ?
+            WHERE user_id = ?
+        """, [new_tier, credits, now, user["user_id"]])
+        conn.commit()
+    finally:
+        conn.close()
 
     return {
+        "status": "ok",
         "user_id": user["user_id"],
-        "credits_remaining": user["credits_remaining"],
-        "total_unlocks": len(rows),
-        "unlocks": [dict(r) for r in rows],
+        "tier": new_tier,
+        "credits_remaining": credits,
     }
 
 
-# ── Dossier PDF ──────────────────────────────────────────────────────
+# ── GET /api/stats — Public dashboard stats ────────────────────────
 
-@app.get("/api/dossier/{asset_id}")
-async def get_dossier(asset_id: str, request: Request):
-    """Generate and return a Dossier PDF (free teaser — no credits)."""
-    ip = _client_ip(request)
-    if asset_id == HONEYPOT_ID:
-        _blacklisted_ips.add(ip)
-        raise HTTPException(status_code=403, detail="Access denied.")
-
-    raw = db.get_lead_by_id(asset_id)
-    if not raw:
-        raise HTTPException(status_code=404, detail="Lead not found.")
-
-    lead = Lead.from_row(raw)
-
-    signal = SignalRecord(
-        signal_id=lead.asset_id,
-        county=lead.county,
-        signal_type="FORECLOSURE_FILED",
-        case_number=lead.case_number or "",
-        event_date=lead.sale_date or "",
-        source_url=lead.recorder_link or "",
-        property_address=lead.property_address,
-    )
-    outcome = OutcomeRecord(
-        signal_id=lead.asset_id,
-        outcome_type="OVERBID" if lead.effective_surplus > 100 else "NO_SURPLUS",
-        gross_amount=lead.overbid_amount,
-        net_amount=lead.effective_surplus,
-        holding_entity="Trustee",
-        confidence_score=lead.confidence_score,
-        source_url=lead.recorder_link or "",
-    )
-    entity = EntityRecord(
-        signal_id=lead.asset_id,
-        entity_type="OWNER",
-        name=lead.owner_of_record,
-        mailing_address=lead.property_address,
-        contact_score=int(lead.completeness_score * 100),
-    )
-
-    is_restricted = lead.status == "RESTRICTED"
-
+@app.get("/api/stats")
+async def get_stats():
+    conn = _get_conn()
     try:
-        from verifuse_v2.server.dossier_gen import generate_dossier
-        pdf_path = generate_dossier(signal, outcome, entity, is_restricted=is_restricted)
-    except Exception as exc:
-        log.error("Dossier generation failed for %s: %s", asset_id, exc)
-        raise HTTPException(status_code=500, detail="Dossier generation failed.")
+        total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+        with_surplus = conn.execute(
+            "SELECT COUNT(*) FROM leads WHERE COALESCE(surplus_amount, 0) > 1000"
+        ).fetchone()[0]
+        total_surplus = conn.execute(
+            "SELECT COALESCE(SUM(surplus_amount), 0) FROM leads WHERE surplus_amount > 0"
+        ).fetchone()[0]
+        counties = conn.execute("""
+            SELECT county, COUNT(*) as cnt,
+                   COALESCE(SUM(surplus_amount), 0) as total
+            FROM leads
+            WHERE COALESCE(surplus_amount, 0) > 0
+            GROUP BY county ORDER BY total DESC
+        """).fetchall()
+    finally:
+        conn.close()
 
-    return FileResponse(path=pdf_path, media_type="application/pdf", filename=Path(pdf_path).name)
-
-
-# ── Stripe endpoints ────────────────────────────────────────────────
-
-@app.post("/api/billing/checkout")
-async def api_checkout(request: Request):
-    """Create a Stripe Checkout session."""
-    user = get_current_user(request)
-    body = await request.json()
-    tier = body.get("tier", "operator")
-    url = create_checkout_session(user["user_id"], user["email"], tier)
-    return {"checkout_url": url}
-
-
-@app.post("/api/webhooks/stripe")
-async def stripe_webhook(request: Request):
-    """Handle Stripe webhook events."""
-    return await handle_stripe_webhook(request)
+    return {
+        "total_leads": total,
+        "with_surplus": with_surplus,
+        "total_claimable_surplus": round(total_surplus, 2),
+        "counties": [dict(r) for r in counties],
+    }
 
 
-# ── Admin endpoints ──────────────────────────────────────────────────
+# ── Auth endpoints (delegate to auth module) ────────────────────────
 
-@app.get("/api/admin/stats")
-async def admin_stats(request: Request):
-    """Full system stats (admin only)."""
-    require_admin(request)
-    stats = db.get_lead_stats()
-    with db.get_db() as conn:
-        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        total_unlocks = conn.execute("SELECT COUNT(*) FROM lead_unlocks").fetchone()[0]
-        total_events = conn.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0]
-    stats.update({
-        "total_users": total_users,
-        "total_unlocks": total_unlocks,
-        "total_events": total_events,
-    })
-    return stats
-
-
-@app.get("/api/admin/leads")
-async def admin_leads(request: Request, limit: int = Query(500, ge=1, le=5000)):
-    """Get all leads with raw data (admin only)."""
-    require_admin(request)
-    return {"leads": db.get_all_leads_raw(limit=limit)}
-
-
-@app.post("/api/admin/regrade")
-async def admin_regrade(request: Request):
-    """Trigger a full regrade of all assets (admin only)."""
-    require_admin(request)
-    from verifuse_v2.daily_healthcheck import regrade_all_assets
-    result = regrade_all_assets()
-    return {"status": "ok", "result": result}
-
-
-@app.post("/api/admin/dedup")
-async def admin_dedup(request: Request):
-    """Trigger deduplication (admin only)."""
-    require_admin(request)
-    result = db.deduplicate_assets()
-    return {"status": "ok", "result": result}
-
-
-@app.get("/api/admin/users")
-async def admin_users(request: Request):
-    """Get all users (admin only)."""
-    require_admin(request)
-    return {"users": db.get_all_users()}
-
-
-@app.post("/api/admin/upgrade-user")
-async def admin_upgrade_user(request: Request):
-    """Upgrade a user to admin (admin only)."""
-    require_admin(request)
+@app.post("/api/auth/register")
+@limiter.limit("5/minute")
+async def api_register(request: Request):
+    from verifuse_v2.server.auth import register_user
     body = await request.json()
     email = body.get("email", "").strip().lower()
-    if not email:
-        raise HTTPException(status_code=400, detail="Email required.")
-    success = db.upgrade_to_admin(email)
-    if not success:
-        raise HTTPException(status_code=404, detail="User not found.")
-    return {"status": "ok", "email": email}
+    password = body.get("password", "")
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password required.")
+    user, token = register_user(
+        email=email, password=password,
+        full_name=body.get("full_name", ""),
+        firm_name=body.get("firm_name", ""),
+        bar_number=body.get("bar_number", ""),
+        tier=body.get("tier", "recon"),
+    )
+    return {"token": token, "user": {
+        "user_id": user["user_id"], "email": user["email"],
+        "tier": user["tier"], "credits_remaining": user["credits_remaining"],
+    }}
 
 
-@app.post("/api/admin/verify-attorney")
-async def admin_verify_attorney(request: Request):
-    """Verify (or reject) an attorney's bar number (admin only)."""
-    require_admin(request)
+@app.post("/api/auth/login")
+@limiter.limit("10/minute")
+async def api_login(request: Request):
+    from verifuse_v2.server.auth import login_user
     body = await request.json()
-    user_id = body.get("user_id", "")
-    action = body.get("action", "verify")  # "verify" or "reject"
-
-    if action not in ("verify", "reject"):
-        raise HTTPException(status_code=400, detail="action must be 'verify' or 'reject'")
-
-    new_status = "VERIFIED" if action == "verify" else "REJECTED"
-    now = datetime.now(timezone.utc).isoformat()
-
-    with db.get_db() as conn:
-        result = conn.execute("""
-            UPDATE users SET attorney_status = ?,
-                attorney_verified_at = CASE WHEN ? = 'VERIFIED' THEN ? ELSE attorney_verified_at END
-            WHERE user_id = ?
-        """, [new_status, new_status, now, user_id])
-
-        if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="User not found.")
-
-    return {"status": new_status, "user_id": user_id}
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password required.")
+    user, token = login_user(email=email, password=password)
+    return {"token": token, "user": {
+        "user_id": user["user_id"], "email": user["email"],
+        "tier": user["tier"], "credits_remaining": user["credits_remaining"],
+    }}
 
 
-# ── Honeypot helpers ─────────────────────────────────────────────────
-
-def _honeypot_safe() -> dict:
-    """Generate honeypot as SafeAsset dict."""
+@app.get("/api/auth/me")
+async def api_me(request: Request):
+    user = _require_user(request)
     return {
-        "asset_id": HONEYPOT_ID,
-        "county": "Arapahoe",
-        "state": "CO",
-        "case_number": "2024-HT-999",
-        "asset_type": "FORECLOSURE_SURPLUS",
-        "status": "ACTIONABLE",
-        "surplus_estimate": 5_000_000.00,
-        "data_grade": "GOLD",
-        "confidence_score": 0.95,
-        "sale_date": "2024-05-01",
-        "claim_deadline": "2025-10-28",
-        "days_remaining": 999,
-        "city_hint": "Arapahoe, CO",
-        "surplus_verified": True,
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "full_name": user.get("full_name", ""),
+        "firm_name": user.get("firm_name", ""),
+        "tier": user["tier"],
+        "credits_remaining": user["credits_remaining"],
+        "attorney_status": user.get("attorney_status", "NONE"),
+        "is_admin": bool(user.get("is_admin", 0)),
+    }
+
+
+# ── GET /api/counties — County breakdown ───────────────────────────
+
+@app.get("/api/counties")
+async def get_counties():
+    conn = _get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT county, COUNT(*) as lead_count,
+                   COALESCE(SUM(surplus_amount), 0) as total_surplus,
+                   COALESCE(AVG(surplus_amount), 0) as avg_surplus,
+                   COALESCE(MAX(surplus_amount), 0) as max_surplus
+            FROM leads
+            WHERE COALESCE(surplus_amount, estimated_surplus, 0) > 0
+            GROUP BY county ORDER BY total_surplus DESC
+        """).fetchall()
+    finally:
+        conn.close()
+
+    return {
+        "count": len(rows),
+        "counties": [dict(r) for r in rows],
     }
