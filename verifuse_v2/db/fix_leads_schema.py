@@ -133,8 +133,17 @@ def patch_leads_schema() -> dict:
     try:
         obj_type = _get_object_type(conn, "leads")
 
-        # ── Case 1: `leads` is a VIEW → convert to real table ────────
+        # ── Case 1: `leads` is a VIEW → REFUSE (manual migration required)
         if obj_type == "view":
+            print("\n  [DETECT] 'leads' is a VIEW. REFUSING to auto-convert.")
+            print("  [SAFETY] Run manual migration: DROP VIEW leads; CREATE TABLE leads ...")
+            report["action"] = "refused_view"
+            report["errors"].append("leads is a VIEW — manual migration required (anti-wipe safety)")
+            conn.close()
+            return report
+
+        # Legacy Case 1 code removed — VIEW→TABLE conversion is now manual-only
+        if False:  # Dead code preserved for reference
             print("\n  [DETECT] 'leads' is a VIEW on 'assets'. Converting to real TABLE...")
             report["action"] = "view_to_table"
 

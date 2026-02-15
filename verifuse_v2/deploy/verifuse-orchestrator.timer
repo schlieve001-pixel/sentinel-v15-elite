@@ -1,0 +1,10 @@
+[Unit]
+Description=VeriFuse Orchestrator Timer — runs daily at 06:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

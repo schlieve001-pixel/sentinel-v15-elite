@@ -36,6 +36,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+try:
+    from dateutil.relativedelta import relativedelta
+    RESTRICTION_DELTA = relativedelta(months=6)
+except ImportError:
+    RESTRICTION_DELTA = timedelta(days=182)
+
 # ── Fail-fast: require VERIFUSE_DB_PATH ─────────────────────────────
 
 DB_PATH = os.environ.get("VERIFUSE_DB_PATH")
@@ -50,6 +56,61 @@ PDF_DIR = BASE_DIR / "data" / "raw_pdfs"
 MAX_PDF_SIZE = 50 * 1024 * 1024  # 50 MB
 MAX_RETRIES = 5
 CONFIDENCE_GATE = 0.6
+
+# ── PDF Classification (Ghost Prevention) ────────────────────────────
+# DENY list: keywords that indicate non-actionable PDFs (no financial data)
+PDF_DENY_KEYWORDS = [
+    "continuance", "postponed", "postponement", "docket", "rescheduled",
+    "vacated", "cancelled", "canceled", "adjournment", "continued to",
+]
+# ALLOW list: keywords that indicate actionable surplus/financial PDFs
+PDF_ALLOW_KEYWORDS = [
+    "excess funds", "overbid", "surplus", "overage", "excess proceeds",
+    "winning bid", "sale price", "total debt", "indebtedness",
+    "foreclosure sale results", "post-sale",
+]
+
+
+def classify_pdf(pdf_path: Path) -> tuple[str, str]:
+    """Classify a PDF as ALLOW, DENY, or UNKNOWN before Vertex extraction.
+
+    Returns (decision, reason).
+    Decision: 'ALLOW', 'DENY', 'UNKNOWN'
+    """
+    name_lower = pdf_path.stem.lower()
+
+    # Check filename against deny list
+    for kw in PDF_DENY_KEYWORDS:
+        if kw in name_lower:
+            return "DENY", f"filename contains '{kw}'"
+
+    # Check filename against allow list
+    for kw in PDF_ALLOW_KEYWORDS:
+        if kw.replace(" ", "_") in name_lower or kw.replace(" ", "-") in name_lower:
+            return "ALLOW", f"filename contains '{kw}'"
+
+    # Check first 4KB of PDF text content for keywords
+    try:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            text = ""
+            for page in pdf.pages[:3]:  # Only first 3 pages
+                t = page.extract_text() or ""
+                text += t.lower() + " "
+                if len(text) > 4096:
+                    break
+
+        for kw in PDF_DENY_KEYWORDS:
+            if kw in text and not any(ak in text for ak in PDF_ALLOW_KEYWORDS):
+                return "DENY", f"content contains '{kw}' without surplus indicators"
+
+        for kw in PDF_ALLOW_KEYWORDS:
+            if kw in text:
+                return "ALLOW", f"content contains '{kw}'"
+    except Exception:
+        pass  # If we can't read it, let Vertex try
+
+    return "UNKNOWN", "no keyword match — allowing Vertex extraction"
 
 # Gemini response schema
 EXTRACTION_SCHEMA = {
@@ -229,81 +290,124 @@ def extract_from_pdf(client, model: str, pdf_path: Path) -> dict:
 # ── Upsert Logic ────────────────────────────────────────────────────
 
 def upsert_lead(conn: sqlite3.Connection, lead: dict) -> str:
-    """Check if case_number exists in leads. UPDATE if yes, INSERT if no.
+    """Safe upsert: NEVER overwrite existing data with $0.00 or NULL.
 
-    Returns 'updated', 'inserted', or 'skipped'.
+    Returns 'updated', 'inserted', 'quarantined', or 'skipped'.
     """
     case_number = lead.get("case_number")
     lead_id = lead.get("id")
     now = datetime.now(timezone.utc).isoformat()
+    surplus = lead.get("surplus_amount", 0.0) or 0.0
 
     # Check by case_number first
     existing = None
     if case_number:
         existing = conn.execute(
-            "SELECT id FROM leads WHERE case_number = ?", [case_number]
+            "SELECT id, surplus_amount FROM leads WHERE case_number = ?", [case_number]
         ).fetchone()
 
     if existing:
-        # UPDATE: enrich existing row
+        # SAFE UPDATE: only enrich — never overwrite with $0 or NULL
         conn.execute("""
             UPDATE leads SET
-                winning_bid     = COALESCE(NULLIF(?, 0.0), winning_bid),
-                total_debt      = COALESCE(NULLIF(?, 0.0), total_debt),
-                surplus_amount  = COALESCE(NULLIF(?, 0.0), surplus_amount),
-                overbid_amount  = COALESCE(NULLIF(?, 0.0), overbid_amount),
-                confidence_score = COALESCE(NULLIF(?, 0.0), confidence_score),
+                winning_bid     = CASE WHEN ? > 0 THEN ? ELSE winning_bid END,
+                total_debt      = CASE WHEN ? > 0 THEN ? ELSE total_debt END,
+                surplus_amount  = CASE WHEN ? > 0 THEN ? ELSE surplus_amount END,
+                overbid_amount  = CASE WHEN ? > 0 THEN ? ELSE overbid_amount END,
+                confidence_score = CASE WHEN ? > 0 THEN ? ELSE confidence_score END,
                 sale_date       = COALESCE(?, sale_date),
                 claim_deadline  = COALESCE(?, claim_deadline),
-                data_grade      = COALESCE(?, data_grade),
+                data_grade      = CASE WHEN ? IN ('GOLD','SILVER') THEN ? ELSE data_grade END,
                 source_name     = COALESCE(?, source_name),
+                pdf_filename    = COALESCE(?, pdf_filename),
                 vertex_processed = 1,
+                vertex_processed_at = ?,
                 status          = 'ENRICHED',
                 updated_at      = ?
             WHERE case_number = ?
         """, [
-            lead.get("winning_bid", 0.0),
-            lead.get("total_debt", 0.0),
-            lead.get("surplus_amount", 0.0),
-            lead.get("overbid_amount", 0.0),
-            lead.get("confidence_score", 0.0),
+            lead.get("winning_bid", 0.0), lead.get("winning_bid", 0.0),
+            lead.get("total_debt", 0.0), lead.get("total_debt", 0.0),
+            surplus, surplus,
+            lead.get("overbid_amount", 0.0), lead.get("overbid_amount", 0.0),
+            lead.get("confidence_score", 0.0), lead.get("confidence_score", 0.0),
             lead.get("sale_date"),
             lead.get("claim_deadline"),
-            lead.get("data_grade"),
+            lead.get("data_grade"), lead.get("data_grade"),
             lead.get("source_name"),
+            lead.get("pdf_filename"),
+            now,
             now,
             case_number,
         ])
         return "updated"
 
-    else:
-        # INSERT: new lead
-        conn.execute("""
-            INSERT OR IGNORE INTO leads
-                (id, case_number, county, owner_name, property_address,
-                 estimated_surplus, winning_bid, total_debt, surplus_amount,
-                 overbid_amount, confidence_score, sale_date, claim_deadline,
-                 data_grade, source_name, vertex_processed, status, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'NEW',?)
-        """, [
-            lead_id,
-            case_number,
-            lead.get("county", "Unknown"),
-            lead.get("owner_name"),
-            lead.get("property_address"),
-            lead.get("surplus_amount", 0.0),
-            lead.get("winning_bid", 0.0),
-            lead.get("total_debt", 0.0),
-            lead.get("surplus_amount", 0.0),
-            lead.get("overbid_amount", 0.0),
-            lead.get("confidence_score", 0.0),
-            lead.get("sale_date"),
-            lead.get("claim_deadline"),
-            lead.get("data_grade", "BRONZE"),
-            lead.get("source_name"),
-            now,
-        ])
-        return "inserted"
+    # NEW lead with $0 surplus → quarantine instead of inserting
+    if surplus <= 0:
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO leads_quarantine
+                    (id, case_number, county, owner_name, property_address,
+                     estimated_surplus, winning_bid, total_debt, surplus_amount,
+                     overbid_amount, confidence_score, sale_date, claim_deadline,
+                     data_grade, source_name, vertex_processed, status, updated_at,
+                     pdf_filename, vertex_processed_at,
+                     quarantine_reason, quarantined_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'QUARANTINED',?,?,?,?,?)
+            """, [
+                lead_id, case_number,
+                lead.get("county", "Unknown"),
+                lead.get("owner_name"),
+                lead.get("property_address"),
+                0.0,
+                lead.get("winning_bid", 0.0),
+                lead.get("total_debt", 0.0),
+                0.0,
+                lead.get("overbid_amount", 0.0),
+                lead.get("confidence_score", 0.0),
+                lead.get("sale_date"),
+                lead.get("claim_deadline"),
+                "IRON",
+                lead.get("source_name"),
+                now,
+                lead.get("pdf_filename"),
+                now,
+                "VERTEX_ZERO_SURPLUS_NEW_LEAD",
+                now,
+            ])
+            return "quarantined"
+        except Exception:
+            pass  # quarantine table may not exist; fall through to insert
+
+    # INSERT: new lead with real surplus
+    conn.execute("""
+        INSERT OR IGNORE INTO leads
+            (id, case_number, county, owner_name, property_address,
+             estimated_surplus, winning_bid, total_debt, surplus_amount,
+             overbid_amount, confidence_score, sale_date, claim_deadline,
+             data_grade, source_name, vertex_processed, status, updated_at,
+             pdf_filename, vertex_processed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'NEW',?,?,?)
+    """, [
+        lead_id, case_number,
+        lead.get("county", "Unknown"),
+        lead.get("owner_name"),
+        lead.get("property_address"),
+        surplus,
+        lead.get("winning_bid", 0.0),
+        lead.get("total_debt", 0.0),
+        surplus,
+        lead.get("overbid_amount", 0.0),
+        lead.get("confidence_score", 0.0),
+        lead.get("sale_date"),
+        lead.get("claim_deadline"),
+        lead.get("data_grade", "BRONZE"),
+        lead.get("source_name"),
+        now,
+        lead.get("pdf_filename"),
+        now,
+    ])
+    return "inserted"
 
 
 # ── Confidence Scoring ──────────────────────────────────────────────
@@ -377,7 +481,8 @@ def process_all(limit: int = 100, dry_run: bool = False,
     """Main processing loop."""
     stats = {
         "pdfs_found": 0, "processed": 0, "updated": 0,
-        "inserted": 0, "failed": 0, "skipped": 0, "errors": [],
+        "inserted": 0, "quarantined": 0, "denied": 0,
+        "failed": 0, "skipped": 0, "errors": [],
     }
 
     pdfs = scan_pdfs()
@@ -416,7 +521,14 @@ def process_all(limit: int = 100, dry_run: bool = False,
                 stats["skipped"] += 1
                 continue
 
-            print(f"  [{i+1}/{min(limit, len(pdfs))}] {county}: {pdf_path.name} ({pdf_path.stat().st_size/1024:.0f}KB)")
+            # ── PDF Classification Gate ─────────────────────────────
+            decision, reason = classify_pdf(pdf_path)
+            tag = f"[{decision}]"
+            print(f"  [{i+1}/{min(limit, len(pdfs))}] {county}: {pdf_path.name} ({pdf_path.stat().st_size/1024:.0f}KB) {tag} {reason}")
+
+            if decision == "DENY":
+                stats["denied"] += 1
+                continue
 
             if dry_run:
                 print(f"    DRY RUN — would process")
@@ -460,13 +572,13 @@ def process_all(limit: int = 100, dry_run: bool = False,
                 confidence = compute_confidence(bid, debt, sale_date, address or "", owner or "")
                 overbid = max(0.0, bid - debt) if bid > 0 and debt > 0 else 0.0
 
-                # Claim deadline: 180 days from sale
+                # Claim deadline: 6 calendar months from sale (C.R.S. § 38-38-111)
                 claim_deadline = None
                 if sale_date:
                     try:
                         dt = datetime.fromisoformat(sale_date)
-                        claim_deadline = (dt + timedelta(days=180)).strftime("%Y-%m-%d")
-                    except ValueError:
+                        claim_deadline = (dt + RESTRICTION_DELTA).strftime("%Y-%m-%d")
+                    except (ValueError, TypeError):
                         pass
 
                 grade = compute_grade(surplus, confidence)
@@ -487,6 +599,7 @@ def process_all(limit: int = 100, dry_run: bool = False,
                     "claim_deadline": claim_deadline,
                     "data_grade": grade,
                     "source_name": f"vertex_enterprise_{pdf_path.name}",
+                    "pdf_filename": pdf_path.name,
                 }
 
                 action = upsert_lead(conn, lead)
@@ -496,6 +609,9 @@ def process_all(limit: int = 100, dry_run: bool = False,
                 elif action == "inserted":
                     stats["inserted"] += 1
                     print(f"    INSERT case={case_num} bid=${bid:,.2f} debt=${debt:,.2f} surplus=${surplus:,.2f}")
+                elif action == "quarantined":
+                    stats["quarantined"] += 1
+                    print(f"    QUARANTINE case={case_num} surplus=$0 — routed to leads_quarantine")
 
             # Rate limiting courtesy
             time.sleep(1.0)

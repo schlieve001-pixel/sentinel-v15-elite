@@ -14,10 +14,12 @@ Atomic: credit deduction uses BEGIN IMMEDIATE.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import sqlite3
 from datetime import datetime, date, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -82,7 +84,23 @@ class FullAsset(SafeAsset):
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-RESTRICTION_DAYS = 180  # C.R.S. § 38-38-111
+# C.R.S. § 38-38-111: Trustee holds for SIX CALENDAR MONTHS (not 180 days).
+# Using relativedelta for legally precise calendar month arithmetic.
+try:
+    from dateutil.relativedelta import relativedelta
+    RESTRICTION_DELTA = relativedelta(months=6)
+except ImportError:
+    # Fallback if dateutil not installed (182 days ≈ 6 months)
+    RESTRICTION_DELTA = timedelta(days=182)
+
+
+def _compute_restriction_end(sale_date_str: str) -> date | None:
+    """Compute the end of the 6 calendar month restriction period."""
+    try:
+        sale_dt = date.fromisoformat(str(sale_date_str)[:10])
+        return sale_dt + RESTRICTION_DELTA
+    except (ValueError, TypeError):
+        return None
 
 
 def _compute_status(row: dict) -> str:
@@ -99,13 +117,11 @@ def _compute_status(row: dict) -> str:
 
     sale = row.get("sale_date")
     if sale:
-        try:
-            sale_dt = date.fromisoformat(str(sale)[:10])
-            if today < sale_dt + timedelta(days=RESTRICTION_DAYS):
-                return "RESTRICTED"
+        restriction_end = _compute_restriction_end(sale)
+        if restriction_end and today < restriction_end:
+            return "RESTRICTED"
+        if restriction_end:
             return "ACTIONABLE"
-        except (ValueError, TypeError):
-            pass
 
     return "ACTIONABLE"
 
@@ -261,17 +277,43 @@ app.add_middleware(
 )
 
 
+# ── Legal constants ────────────────────────────────────────────────
+LEGAL_DISCLAIMER = (
+    "Forensic information service only. Not a debt collection or asset recovery agency. "
+    "Subscriber responsible for all legal compliance under C.R.S. § 38-38-111."
+)
+
+UNLOCK_DISCLAIMER = (
+    "I certify I am a licensed legal professional and understand "
+    "C.R.S. § 38-38-111 restrictions on inducing compensation agreements "
+    "during the six calendar month holding period."
+)
+
+
 # ── Startup ─────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup():
-    """Run schema patcher on startup (idempotent)."""
+    """Log DB identity on boot. NO migrations — migrations are manual only."""
+    db_path = Path(VERIFUSE_DB_PATH)
+    inode = "N/A"
+    sha = "N/A"
+    rows = "N/A"
     try:
-        from verifuse_v2.db.fix_leads_schema import patch_leads_schema
-        patch_leads_schema()
+        stat = db_path.stat()
+        inode = stat.st_ino
+        sha = hashlib.sha256(db_path.read_bytes()[:8192]).hexdigest()[:16]
+        conn = _get_conn()
+        try:
+            rows = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+        finally:
+            conn.close()
     except Exception as e:
-        log.warning("Schema patch on startup: %s", e)
-    log.info("Titanium API v4 initialized (DB: %s)", VERIFUSE_DB_PATH)
+        log.warning("Startup DB check: %s", e)
+    log.info(
+        "Titanium API v4 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s",
+        VERIFUSE_DB_PATH, inode, sha, rows,
+    )
 
 
 # ── Health ──────────────────────────────────────────────────────────
@@ -330,6 +372,7 @@ async def health():
         "scoreboard": scoreboard,
         "quarantined": quarantined,
         "verified_total": round(verified_total, 2),
+        "legal_disclaimer": LEGAL_DISCLAIMER,
     }
 
 
@@ -611,7 +654,10 @@ async def get_stats():
 @limiter.limit("5/minute")
 async def api_register(request: Request):
     from verifuse_v2.server.auth import register_user
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
     if not email or not password:
@@ -633,7 +679,10 @@ async def api_register(request: Request):
 @limiter.limit("10/minute")
 async def api_login(request: Request):
     from verifuse_v2.server.auth import login_user
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
     if not email or not password:
@@ -687,12 +736,10 @@ async def get_lead_detail(lead_id: str, request: Request):
     restriction_end = None
     sale = d.get("sale_date")
     if sale:
-        try:
-            sale_dt = date.fromisoformat(str(sale)[:10])
-            restriction_end = (sale_dt + timedelta(days=RESTRICTION_DAYS)).isoformat()
-            days_until = (sale_dt + timedelta(days=RESTRICTION_DAYS) - datetime.now(timezone.utc).date()).days
-        except (ValueError, TypeError):
-            pass
+        end_dt = _compute_restriction_end(sale)
+        if end_dt:
+            restriction_end = end_dt.isoformat()
+            days_until = (end_dt - datetime.now(timezone.utc).date()).days
 
     return {
         **safe,
@@ -738,7 +785,7 @@ async def unlock_restricted_lead(lead_id: str, request: Request):
     if not body.get("disclaimer_accepted"):
         raise HTTPException(
             status_code=400,
-            detail="You must accept the legal disclaimer to unlock restricted leads.",
+            detail=f"You must accept the legal disclaimer: {UNLOCK_DISCLAIMER}",
         )
 
     # Verify attorney status

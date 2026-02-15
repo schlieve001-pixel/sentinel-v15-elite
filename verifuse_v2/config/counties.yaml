@@ -1,0 +1,97 @@
+# VeriFuse V2 — Colorado County Configuration
+# Each county has: name, source URL patterns, PDF patterns, and scraping config.
+
+counties:
+  - name: Denver
+    code: denver
+    public_trustee_url: https://www.denvergov.org/Government/Departments/Department-of-Finance/Public-Trustee
+    pdf_patterns:
+      - "*excess*funds*"
+      - "*surplus*"
+      - "*foreclosure*sale*results*"
+    scrape_interval_hours: 24
+    enabled: true
+
+  - name: Adams
+    code: adams
+    public_trustee_url: https://adcogov.org/public-trustee
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+      - "*sale*results*"
+    scrape_interval_hours: 24
+    enabled: true
+
+  - name: Arapahoe
+    code: arapahoe
+    public_trustee_url: https://www.arapahoegov.com/201/Public-Trustee
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+      - "*overbid*"
+    scrape_interval_hours: 24
+    enabled: true
+
+  - name: Jefferson
+    code: jefferson
+    public_trustee_url: https://www.jeffco.us/732/Public-Trustee
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+    scrape_interval_hours: 24
+    enabled: true
+
+  - name: El Paso
+    code: el_paso
+    public_trustee_url: https://publictrustee.elpasoco.com/
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+      - "*sale*"
+    scrape_interval_hours: 24
+    enabled: true
+
+  - name: Douglas
+    code: douglas
+    public_trustee_url: https://www.douglas.co.us/public-trustee/
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+    scrape_interval_hours: 48
+    enabled: true
+
+  - name: Boulder
+    code: boulder
+    public_trustee_url: https://www.bouldercounty.org/departments/public-trustee/
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+    scrape_interval_hours: 48
+    enabled: true
+
+  - name: Larimer
+    code: larimer
+    public_trustee_url: https://www.larimer.org/public-trustee
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+    scrape_interval_hours: 48
+    enabled: true
+
+  - name: Weld
+    code: weld
+    public_trustee_url: https://www.weldgov.com/Departments/Public-Trustee
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+    scrape_interval_hours: 48
+    enabled: true
+
+  - name: Mesa
+    code: mesa
+    public_trustee_url: https://www.mesacounty.us/public-trustee
+    pdf_patterns:
+      - "*excess*"
+      - "*surplus*"
+    scrape_interval_hours: 72
+    enabled: true
