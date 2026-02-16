@@ -129,6 +129,35 @@ def run_quarantine() -> dict:
         else:
             print("  No ghost leads found matching criteria")
 
+        # ── Step 3b: Quarantine Eagle/San Miguel portal debt-only records ──
+        print("[3b/5] Quarantining Eagle + San Miguel portal debt-only noise...")
+
+        portal_count = conn.execute("""
+            SELECT COUNT(*) FROM leads
+            WHERE county IN ('Eagle', 'San Miguel')
+              AND COALESCE(surplus_amount, estimated_surplus, 0) = 0
+        """).fetchone()[0]
+
+        if portal_count > 0:
+            conn.execute(f"""
+                INSERT OR IGNORE INTO leads_quarantine ({col_list}, quarantine_reason, quarantined_at)
+                SELECT {col_list}, 'PORTAL_DEBT_ONLY_NO_SURPLUS', ?
+                FROM leads
+                WHERE county IN ('Eagle', 'San Miguel')
+                  AND COALESCE(surplus_amount, estimated_surplus, 0) = 0
+            """, [now])
+
+            conn.execute("""
+                DELETE FROM leads
+                WHERE county IN ('Eagle', 'San Miguel')
+                  AND COALESCE(surplus_amount, estimated_surplus, 0) = 0
+            """)
+            report["portal_noise_quarantined"] = portal_count
+            print(f"  {portal_count} Eagle/San Miguel debt-only records quarantined")
+        else:
+            report["portal_noise_quarantined"] = 0
+            print("  No Eagle/San Miguel debt-only records found")
+
         # ── Step 4: Demote Jefferson false-GOLDs ─────────────────────
         print("[4/5] Demoting Jefferson false-GOLD leads...")
         jefferson_count = conn.execute("""

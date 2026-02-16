@@ -1,0 +1,28 @@
+| Eagle (debt-only portal scrapes) | 312 | 36% | $0 | DELETE or quarantine |
+| San Miguel (debt-only portal scrapes) | 250 | 29% | $0 | DELETE or quarantine |
+| El Paso (pre-sale, quarantined) | 114 | 13% | $0 | Already quarantined |
+| Pipeline staging (no enrichment) | 567 | 66% | $0 | Need post-sale follow-up |
+| **Actionable leads with surplus** | **41** | **4.8%** | **$4.3M** | **THESE ARE YOUR BUSINESS** |
+
+**Recommendation:** Quarantine Eagle and San Miguel records. They're GovEase debt-only scrapes with zero financial data. They dilute your metrics and slow queries.
+
+### Attorney View (Ready to File)
+
+10 records currently in `attorney_view` — ALL Arapahoe county, ALL GOLD grade:
+
+| Owner | Surplus | Days Until Deadline |
+|-------|---------|-------------------|
+| CHERI M. CRAWFORD | $50,497 | 954 days |
+| ROBERT V. KIRK | $380,969 | 1,010 days |
+| JOHN L. MONAGHAN et al. | $102,700 | 1,163 days |
+| DANIEL P. POND | $34,333 | 1,331 days |
+| DAVID J. GOODMAN | $249,589 | 1,450 days |
+| RAVI VAMSI PATCHIGOLLA et al. | $124,799 | 1,478 days |
+| BRADLEY BUCHOLZ et al. | $107,923 | 1,478 days |
+| LINDA C. WILSON | $59,282 | 1,562 days |
+| SUSAN SHORT | $249,692 | 1,765 days |
+| BRIAN MAHLER | $27,641 | 1,765 days |
+
+**$1,387,425 ready for attorney filing. Deadlines are 2.5-4.8 years out. No rush, but no reason to wait.**
+
+:
