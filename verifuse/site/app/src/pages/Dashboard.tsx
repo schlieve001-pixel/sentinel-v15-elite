@@ -198,7 +198,7 @@ export default function Dashboard() {
           {actionable.length > 0 && (
             <div className="bucket-section">
               <div className="bucket-header actionable">
-                <h2>ACTIONABLE NOW</h2>
+                <h2>ESCROW ENDED — ACTIONABLE</h2>
                 <span className="bucket-count">{actionable.length} leads</span>
                 <p className="bucket-desc">
                   Sold &gt; 6 months ago. C.R.S. § 38-38-111 restriction period has passed.
@@ -217,11 +217,11 @@ export default function Dashboard() {
           {watchlist.length > 0 && (
             <div className="bucket-section">
               <div className="bucket-header watchlist">
-                <h2>WATCHLIST — RESTRICTION PERIOD</h2>
+                <h2>DATA ACCESS ONLY — RESTRICTION PERIOD</h2>
                 <span className="bucket-count">{watchlist.length} leads</span>
                 <p className="bucket-desc">
                   Sold &lt; 6 months ago. C.R.S. § 38-38-111(2.5)(c): Compensation agreements
-                  are prohibited while funds are held by the Public Trustee. Monitor these assets.
+                  are void and unenforceable while funds are held by the Public Trustee.
                 </p>
               </div>
               <div className="vault-grid">

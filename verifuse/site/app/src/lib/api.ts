@@ -91,7 +91,9 @@ export interface Lead {
   days_to_claim: number | null;
   deadline_passed: boolean | null;
   // C.R.S. § 38-38-111 restriction period
-  restriction_status: "RESTRICTED" | "WATCHLIST" | "ACTIONABLE" | "UNKNOWN";
+  restriction_status: "RESTRICTED" | "WATCHLIST" | "ACTIONABLE" | "EXPIRED" | "UNKNOWN";
+  // Internal DB label: DATA_ACCESS_ONLY | ESCROW_ENDED | EXPIRED | UNKNOWN
+  statute_window_status?: string;
   restriction_end_date: string | null;
   blackout_end_date: string | null;
   days_until_actionable: number | null;
@@ -184,6 +186,41 @@ export function unlockRestrictedLead(
 
 export function getDossierUrl(assetId: string): string {
   return `${API_BASE}/api/dossier/${assetId}`;
+}
+
+export function getDossierDocxUrl(assetId: string): string {
+  return `${API_BASE}/api/dossier/${assetId}/docx`;
+}
+
+export function getDossierPdfUrl(assetId: string): string {
+  return `${API_BASE}/api/dossier/${assetId}/pdf`;
+}
+
+// ── Attorney Tools ───────────────────────────────────────────────
+
+export function generateLetter(assetId: string): Promise<Blob> {
+  return fetch(`${API_BASE}/api/letter/${assetId}`, {
+    method: "POST",
+    headers: authHeaders(),
+  }).then((res) => {
+    if (!res.ok) throw new ApiError(res.status, "Letter generation failed");
+    return res.blob();
+  });
+}
+
+export function getCasePacketUrl(assetId: string): string {
+  return `${API_BASE}/api/case-packet/${assetId}`;
+}
+
+export function getAttorneyReadyLeads(params?: {
+  limit?: number;
+  offset?: number;
+}): Promise<LeadsResponse> {
+  const qs = new URLSearchParams();
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const q = qs.toString();
+  return request(`/api/leads/attorney-ready${q ? `?${q}` : ""}`);
 }
 
 // ── Billing ───────────────────────────────────────────────────────

@@ -541,17 +541,18 @@ class ElPasoPostSaleParser(CountyParser):
         return records
 
 
-class GenericExcessFundsParser(CountyParser):
-    """Fallback parser for generic excess/surplus funds lists.
+class GTSPreSaleParser(CountyParser):
+    """Generic GTS pre-sale format parser.
 
-    Detects: "excess funds", "surplus funds", "unclaimed funds"
-    Extracts tabular data with $ amounts.
+    Reusable across GTS-platform counties (Boulder, Garfield, etc.).
+    Detects: GTS-style tabular data with foreclosure numbers and amounts.
     """
     county = "Unknown"
 
     def detect(self, text: str) -> bool:
         return bool(
-            re.search(r"(?:excess|surplus|unclaimed)\s+funds", text, re.IGNORECASE)
+            re.search(r"(?:pre[- ]?sale|foreclosure\s+search|foreclosure\s+listing)", text, re.IGNORECASE)
+            and re.search(r"(?:public\s+trustee|foreclosure)", text, re.IGNORECASE)
         )
 
     def extract(self, text: str, source_file: str = "") -> list[dict]:
@@ -559,7 +560,159 @@ class GenericExcessFundsParser(CountyParser):
         lines = text.split("\n")
 
         for line in lines:
-            money_m = re.search(r"\$\s*([\d\s,]+\.\d{2})", line)
+            # GTS format: case# | address | bid | debt | date
+            money_matches = re.findall(r"\$\s*[\d,]+\.?\d*", line)
+            case_m = re.search(r"(\d{2,4}[-/]\d{3,6})", line)
+
+            if case_m and money_matches:
+                amounts = [clean_money(m) for m in money_matches]
+                bid = amounts[0] if len(amounts) >= 1 else 0.0
+                debt = amounts[1] if len(amounts) >= 2 else 0.0
+
+                date_m = re.search(r"(\d{2}/\d{2}/\d{2,4})", line)
+                sale_date = parse_date(date_m.group(1)) if date_m else None
+
+                records.append({
+                    "case_number": case_m.group(1),
+                    "county": self.county,
+                    "owner_name": "",
+                    "property_address": "",
+                    "winning_bid": bid,
+                    "total_debt": debt,
+                    "surplus_amount": max(0.0, bid - debt) if bid > 0 and debt > 0 else 0.0,
+                    "overbid_amount": 0.0,
+                    "sale_date": sale_date,
+                    "source_file": source_file,
+                })
+
+        return records
+
+
+class BoulderParser(CountyParser):
+    """Boulder County parser — GTS pre-sale format."""
+    county = "Boulder"
+
+    def detect(self, text: str) -> bool:
+        return bool(re.search(r"Boulder\s+County", text, re.IGNORECASE))
+
+    def extract(self, text: str, source_file: str = "") -> list[dict]:
+        # Delegate to GTSPreSaleParser logic
+        parser = GTSPreSaleParser()
+        parser.county = self.county
+        records = parser.extract(text, source_file)
+        for r in records:
+            r["county"] = self.county
+        return records
+
+
+class LarimerParser(CountyParser):
+    """Larimer County parser — RealForeclose format."""
+    county = "Larimer"
+
+    def detect(self, text: str) -> bool:
+        return bool(re.search(r"Larimer\s+County", text, re.IGNORECASE))
+
+    def extract(self, text: str, source_file: str = "") -> list[dict]:
+        records = []
+        lines = text.split("\n")
+
+        for line in lines:
+            money_matches = re.findall(r"\$\s*[\d,]+\.?\d*", line)
+            case_m = re.search(r"(\d{2,4}[-/]\d{3,6})", line)
+
+            if case_m and money_matches:
+                amounts = [clean_money(m) for m in money_matches]
+                bid = amounts[0] if len(amounts) >= 1 else 0.0
+                debt = amounts[1] if len(amounts) >= 2 else 0.0
+
+                date_m = re.search(r"(\d{2}/\d{2}/\d{2,4})", line)
+                sale_date = parse_date(date_m.group(1)) if date_m else None
+
+                records.append({
+                    "case_number": case_m.group(1),
+                    "county": self.county,
+                    "owner_name": "",
+                    "property_address": "",
+                    "winning_bid": bid,
+                    "total_debt": debt,
+                    "surplus_amount": max(0.0, bid - debt) if bid > 0 and debt > 0 else 0.0,
+                    "overbid_amount": 0.0,
+                    "sale_date": sale_date,
+                    "source_file": source_file,
+                })
+
+        return records
+
+
+class WeldParser(CountyParser):
+    """Weld County parser — Hybrid GTS + RealForeclose."""
+    county = "Weld"
+
+    def detect(self, text: str) -> bool:
+        return bool(re.search(r"Weld\s+County", text, re.IGNORECASE))
+
+    def extract(self, text: str, source_file: str = "") -> list[dict]:
+        # Try GTS-style first, then generic
+        parser = GTSPreSaleParser()
+        parser.county = self.county
+        records = parser.extract(text, source_file)
+        if records:
+            for r in records:
+                r["county"] = self.county
+            return records
+
+        # Fallback to generic excess funds
+        fallback = GenericExcessFundsParser()
+        fallback.county = self.county
+        records = fallback.extract(text, source_file)
+        for r in records:
+            r["county"] = self.county
+        return records
+
+
+class PuebloParser(CountyParser):
+    """Pueblo County parser — County page format."""
+    county = "Pueblo"
+
+    def detect(self, text: str) -> bool:
+        return bool(re.search(r"Pueblo\s+County", text, re.IGNORECASE))
+
+    def extract(self, text: str, source_file: str = "") -> list[dict]:
+        fallback = GenericExcessFundsParser()
+        fallback.county = self.county
+        records = fallback.extract(text, source_file)
+        for r in records:
+            r["county"] = self.county
+        return records
+
+
+class GenericExcessFundsParser(CountyParser):
+    """Fallback parser for generic excess/surplus funds lists.
+
+    Detects: "excess funds", "surplus funds", "unclaimed funds",
+             "foreclosure sale results", "overbid", "public trustee sale"
+    Extracts tabular data with $ amounts.
+    """
+    county = "Unknown"
+
+    def detect(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"(?:excess|surplus|unclaimed)\s+funds"
+                r"|foreclosure\s+sale\s+results?"
+                r"|over\s*bid"
+                r"|public\s+trustee\s+sale",
+                text, re.IGNORECASE,
+            )
+        )
+
+    def extract(self, text: str, source_file: str = "") -> list[dict]:
+        records = []
+        lines = text.split("\n")
+
+        for line in lines:
+            # Match dollar amounts (with possible OCR spaces)
+            money_m = re.search(r"\$\s*([\d\s,]+\.?\d{0,2})", line)
             if not money_m:
                 continue
 
@@ -567,13 +720,18 @@ class GenericExcessFundsParser(CountyParser):
             if amount < 10:
                 continue
 
-            case_m = re.search(r"(\d{4}-\d{4,6})", line)
+            # Try various case number formats
+            case_m = (
+                re.search(r"(\d{4}-\d{4,6})", line)
+                or re.search(r"(\d{2}-\d{4,6})", line)
+                or re.search(r"([A-Z]\d{6,})", line)
+            )
             case_num = case_m.group(1) if case_m else f"GEN-{hash(line) % 100000:05d}"
 
             date_m = re.search(r"(\d{2}/\d{2}/\d{2,4})", line)
             sale_date = parse_date(date_m.group(1)) if date_m else None
 
-            owner_m = re.match(r"^([A-Z][A-Z\s,.']+?)\s+\d", line)
+            owner_m = re.match(r"^([A-Z][A-Z\s,.\-']+?)\s+\d", line)
             owner = owner_m.group(1).strip() if owner_m else ""
 
             records.append({
@@ -599,6 +757,11 @@ PARSER_REGISTRY: list[CountyParser] = [
     DenverExcessParser(),
     ElPasoPreSaleParser(),
     ElPasoPostSaleParser(),
+    BoulderParser(),
+    LarimerParser(),
+    WeldParser(),
+    PuebloParser(),
+    GTSPreSaleParser(),
     GenericExcessFundsParser(),  # Fallback — always last
 ]
 

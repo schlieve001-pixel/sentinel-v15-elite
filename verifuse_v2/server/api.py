@@ -268,8 +268,6 @@ app.add_middleware(
     allow_origins=[
         "https://verifuse.tech",
         "https://www.verifuse.tech",
-        "http://localhost:3000",
-        "http://34.69.230.82:4173",
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -385,10 +383,14 @@ async def get_leads(
     county: Optional[str] = Query(None),
     min_surplus: float = Query(0.0, ge=0),
     grade: Optional[str] = Query(None),
+    include_expired: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """Return paginated leads as SafeAsset. Handles NULLs gracefully."""
+    """Return paginated leads as SafeAsset. Handles NULLs gracefully.
+
+    EXPIRED leads hidden by default. Pass ?include_expired=true to show them.
+    """
     conn = _get_conn()
     try:
         query = "SELECT * FROM leads WHERE 1=1"
@@ -419,8 +421,8 @@ async def get_leads(
     for row in rows:
         try:
             safe = _row_to_safe(dict(row))
-            # Filter out EXPIRED
-            if safe.get("status") == "EXPIRED":
+            # Filter out EXPIRED unless explicitly requested
+            if not include_expired and safe.get("status") == "EXPIRED":
                 continue
             leads.append(safe)
         except Exception as e:
@@ -987,3 +989,244 @@ async def admin_users(request: Request):
     finally:
         conn.close()
     return {"count": len(rows), "users": [dict(r) for r in rows]}
+
+
+# ── Attorney Tool Endpoints ───────────────────────────────────────
+
+def _check_lead_unlocked(user: dict, lead_id: str, doc_type: str = "UNKNOWN", request: Request = None) -> None:
+    """Verify user has unlocked this lead (or is admin). Log to download_audit."""
+    ip = ""
+    if request:
+        ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if not ip and request.client:
+            ip = request.client.host
+
+    if _is_admin(user):
+        # Log admin access
+        try:
+            conn = _get_conn()
+            conn.execute("""
+                INSERT INTO download_audit (user_id, lead_id, doc_type, granted, ip_address)
+                VALUES (?, ?, ?, 1, ?)
+            """, [user["user_id"], lead_id, doc_type, ip])
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        return
+
+    conn = _get_conn()
+    try:
+        unlock = conn.execute(
+            "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
+            [user["user_id"], lead_id],
+        ).fetchone()
+
+        granted = 1 if unlock else 0
+        try:
+            conn.execute("""
+                INSERT INTO download_audit (user_id, lead_id, doc_type, granted, ip_address)
+                VALUES (?, ?, ?, ?, ?)
+            """, [user["user_id"], lead_id, doc_type, granted, ip])
+            conn.commit()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+    if not unlock:
+        raise HTTPException(
+            status_code=403,
+            detail="You must unlock this lead first.",
+        )
+
+
+@app.get("/api/dossier/{lead_id}/docx")
+async def get_dossier_docx(lead_id: str, request: Request):
+    """Generate and serve a Word .docx dossier for an unlocked lead."""
+    from fastapi.responses import FileResponse
+    from verifuse_v2.attorney.dossier_docx import generate_dossier
+
+    user = _require_user(request)
+    _check_lead_unlocked(user, lead_id, doc_type="DOSSIER_DOCX", request=request)
+
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+
+    try:
+        filepath = generate_dossier(VERIFUSE_DB_PATH, lead_id)
+    except Exception as e:
+        log.error("Dossier generation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Dossier generation failed.")
+
+    return FileResponse(
+        filepath,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=Path(filepath).name,
+    )
+
+
+@app.get("/api/dossier/{lead_id}/pdf")
+async def get_dossier_pdf(lead_id: str, request: Request):
+    """Alias: serve existing text dossier as PDF-format download."""
+    return await get_dossier(lead_id, request)
+
+
+@app.post("/api/letter/{lead_id}")
+async def generate_letter_endpoint(lead_id: str, request: Request):
+    """Generate a Rule 7.3 solicitation letter. Requires VERIFIED attorney."""
+    from fastapi.responses import FileResponse
+    from verifuse_v2.legal.mail_room import generate_letter
+
+    user = _require_user(request)
+    if not _is_verified_attorney(user) and not _is_admin(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Rule 7.3 letters require verified attorney status.",
+        )
+    # Block Rule 7.3 Letter unless: verified_attorney=1 AND firm_name AND bar_number AND firm_address
+    if not _is_admin(user):
+        if not user.get("verified_attorney"):
+            raise HTTPException(status_code=403, detail="Verified attorney status required for letters.")
+        if not user.get("firm_name"):
+            raise HTTPException(status_code=403, detail="Firm name required for letter generation.")
+        if not user.get("bar_number"):
+            raise HTTPException(status_code=403, detail="Bar number required for letter generation.")
+        if not user.get("firm_address"):
+            raise HTTPException(status_code=403, detail="Firm address required for letter generation.")
+    _check_lead_unlocked(user, lead_id, doc_type="LETTER", request=request)
+
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+
+    try:
+        filepath = generate_letter(VERIFUSE_DB_PATH, lead_id, user["user_id"])
+    except Exception as e:
+        log.error("Letter generation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Letter generation failed.")
+
+    return FileResponse(
+        filepath,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=Path(filepath).name,
+    )
+
+
+@app.get("/api/case-packet/{lead_id}")
+async def get_case_packet(lead_id: str, request: Request):
+    """Download HTML case packet. Requires VERIFIED attorney + GOLD/SILVER lead."""
+    from fastapi.responses import HTMLResponse
+    from verifuse_v2.attorney.case_packet import generate_case_packet
+
+    user = _require_user(request)
+    if not _is_verified_attorney(user) and not _is_admin(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Case packets require verified attorney status.",
+        )
+    _check_lead_unlocked(user, lead_id, doc_type="CASE_PACKET", request=request)
+
+    try:
+        filepath = generate_case_packet(VERIFUSE_DB_PATH, lead_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.error("Case packet generation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Case packet generation failed.")
+
+    html_content = Path(filepath).read_text(encoding="utf-8")
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/api/leads/attorney-ready")
+@limiter.limit("100/minute")
+async def get_attorney_ready_leads(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """List leads where attorney_packet_ready=1."""
+    conn = _get_conn()
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM leads WHERE attorney_packet_ready = 1"
+        ).fetchone()[0]
+
+        rows = conn.execute("""
+            SELECT * FROM leads
+            WHERE attorney_packet_ready = 1
+            ORDER BY COALESCE(surplus_amount, estimated_surplus, 0) DESC
+            LIMIT ? OFFSET ?
+        """, [limit, offset]).fetchall()
+    finally:
+        conn.close()
+
+    leads = [_row_to_safe(dict(r)) for r in rows]
+    return {
+        "count": len(leads),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "leads": leads,
+    }
+
+
+# ── POST /api/leads/{id}/attorney-ready — Set attorney_packet_ready ──
+
+@app.post("/api/leads/{lead_id}/attorney-ready")
+async def set_attorney_ready(lead_id: str, request: Request):
+    """Mark a lead as attorney_packet_ready=1. Requires provenance + completeness."""
+    _require_api_key(request)
+
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Lead not found.")
+
+        lead = dict(row)
+
+        # Provenance check
+        provenance_count = conn.execute(
+            "SELECT COUNT(*) FROM lead_provenance WHERE lead_id = ?", [lead_id]
+        ).fetchone()[0]
+
+        surplus = lead.get("estimated_surplus") or lead.get("surplus_amount") or 0
+        errors = []
+        if not lead.get("county"):
+            errors.append("missing county")
+        if not lead.get("case_number"):
+            errors.append("missing case_number")
+        if not lead.get("owner_name"):
+            errors.append("missing owner_name")
+        if not lead.get("sale_date"):
+            errors.append("missing sale_date")
+        if not (surplus and float(surplus) > 0):
+            errors.append("estimated_surplus must be > 0")
+        if provenance_count == 0:
+            errors.append("no rows in lead_provenance (SHA256 provenance required)")
+
+        if errors:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Lead not attorney-ready: {', '.join(errors)}",
+            )
+
+        conn.execute(
+            "UPDATE leads SET attorney_packet_ready = 1 WHERE id = ?", [lead_id]
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"status": "ok", "lead_id": lead_id, "attorney_packet_ready": True}

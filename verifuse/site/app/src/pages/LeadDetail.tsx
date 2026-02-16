@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { getLeadDetail, unlockLead, unlockRestrictedLead, getDossierUrl, type Lead, type UnlockResponse, ApiError } from "../lib/api";
+import { getLeadDetail, unlockLead, unlockRestrictedLead, getDossierUrl, getDossierDocxUrl, getDossierPdfUrl, getCasePacketUrl, generateLetter, type Lead, type UnlockResponse, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 function fmt(n: number | null | undefined): string {
@@ -69,6 +69,7 @@ export default function LeadDetail() {
   }
 
   const isRestricted = lead?.restriction_status === "RESTRICTED";
+  const isExpired = lead?.deadline_passed === true || lead?.restriction_status === ("EXPIRED" as any);
 
   return (
     <div className="detail-page">
@@ -95,6 +96,11 @@ export default function LeadDetail() {
                 </span>
                 {!lead.surplus_verified && (
                   <span className="unverified-badge" style={{ marginLeft: 8 }}>UNVERIFIED</span>
+                )}
+                {(lead as any).attorney_packet_ready === 1 && (
+                  <span className="grade-badge grade-gold" style={{ marginLeft: 8 }}>
+                    ATTORNEY READY
+                  </span>
                 )}
               </div>
               {isRestricted ? (
@@ -161,10 +167,10 @@ export default function LeadDetail() {
               <div className="detail-field">
                 <label>Restriction Status</label>
                 <span style={{
-                  color: isRestricted ? "#ef4444" : "#22c55e",
+                  color: isRestricted ? "#ef4444" : isExpired ? "#6b7280" : "#22c55e",
                   fontWeight: 600,
                 }}>
-                  {isRestricted ? "RESTRICTED" : "ACTIONABLE"}
+                  {isRestricted ? "DATA ACCESS ONLY" : isExpired ? "EXPIRED" : "ESCROW ENDED"}
                 </span>
               </div>
               <div className="detail-field">
@@ -289,6 +295,60 @@ export default function LeadDetail() {
                     <p>Court-ready motion citing C.R.S. § 38-38-111 has been prepared.</p>
                   </div>
                 )}
+
+                {/* Attorney Tool Downloads */}
+                <div style={{ marginTop: 20, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <a
+                    href={getDossierDocxUrl(lead!.asset_id)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-outline"
+                    style={{ fontSize: "0.85em" }}
+                  >
+                    DOWNLOAD DOSSIER (.DOCX)
+                  </a>
+                  <a
+                    href={getDossierPdfUrl(lead!.asset_id)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-outline"
+                    style={{ fontSize: "0.85em" }}
+                  >
+                    DOWNLOAD DOSSIER (.PDF)
+                  </a>
+                  {(lead!.data_grade === "GOLD" || lead!.data_grade === "SILVER") && (
+                    <a
+                      href={getCasePacketUrl(lead!.asset_id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn-outline"
+                      style={{ fontSize: "0.85em" }}
+                    >
+                      CASE PACKET (HTML)
+                    </a>
+                  )}
+                  {user?.bar_number && (
+                    <button
+                      className="btn-outline"
+                      style={{ fontSize: "0.85em" }}
+                      onClick={async () => {
+                        try {
+                          const blob = await generateLetter(lead!.asset_id);
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `letter_${lead!.asset_id}.docx`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        } catch (err) {
+                          setError(err instanceof ApiError ? err.message : "Letter generation failed");
+                        }
+                      }}
+                    >
+                      GENERATE RULE 7.3 LETTER
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>

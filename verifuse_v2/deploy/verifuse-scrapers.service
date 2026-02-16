@@ -1,20 +1,22 @@
+# VERIFUSE SCRAPER — systemd service (Sprint 11)
+# Runs the unified scraper runner instead of individual scrapers.
+# Install: sudo cp verifuse-scrapers.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+
 [Unit]
-Description=VeriFuse V2 Weekly Scraper Run (Titanium)
+Description=VeriFuse V2 Scraper Runner (Sprint 11)
 After=network.target
 
 [Service]
 Type=oneshot
 User=schlieve001
-WorkingDirectory=/home/schlieve001/verifuse_titanium_prod/current
+WorkingDirectory=/home/schlieve001/origin/continuity_lab
 EnvironmentFile=/home/schlieve001/verifuse_titanium_prod/secrets.env
-MemoryMax=512M
+Nice=10
 
-ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.adams_postsale_scraper
-ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.elpaso_postsale_scraper
-ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.larimer_scraper
-ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.weld_scraper
-ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.boulder_scraper
-ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.pueblo_scraper
-ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.daily_healthcheck
-StandardOutput=append:/home/schlieve001/verifuse_titanium_prod/logs/scrapers.log
-StandardError=append:/home/schlieve001/verifuse_titanium_prod/logs/scrapers.log
+ExecStart=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scrapers.runner --all
+ExecStartPost=/home/schlieve001/origin/continuity_lab/.venv/bin/python -m verifuse_v2.scripts.morning_report
+
+MemoryMax=1G
+StandardOutput=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/scrapers.log
+StandardError=append:/home/schlieve001/origin/continuity_lab/verifuse_v2/logs/scrapers.log
