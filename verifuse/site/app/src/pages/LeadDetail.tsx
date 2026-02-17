@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, generateLetter, sendVerification, verifyEmail, type Lead, type UnlockResponse, ApiError } from "../lib/api";
+import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, type Lead, type UnlockResponse, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 function isVerifyEmailError(err: unknown): boolean {
@@ -113,7 +113,7 @@ export default function LeadDetail() {
                   {lead.data_grade}
                 </span>
                 {!lead.surplus_verified && (
-                  <span className="unverified-badge" style={{ marginLeft: 8 }}>UNVERIFIED</span>
+                  <span className="unverified-badge" style={{ marginLeft: 8 }}>DETECTED</span>
                 )}
                 {(lead as any).attorney_packet_ready === 1 && (
                   <span className="grade-badge grade-gold" style={{ marginLeft: 8 }}>
@@ -213,12 +213,21 @@ export default function LeadDetail() {
                 )}
 
                 <div className="unlock-actions">
-                  <button
-                    className="btn-outline"
-                    onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.txt`)}
-                  >
-                    DOWNLOAD FREE DOSSIER
-                  </button>
+                  {lead.preview_key ? (
+                    <button
+                      className="btn-outline"
+                      onClick={() => downloadSample(lead.preview_key!)}
+                    >
+                      SAMPLE DOSSIER
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-outline"
+                      onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.pdf`)}
+                    >
+                      DOWNLOAD DOSSIER
+                    </button>
+                  )}
                   {isRestricted ? (
                     <button
                       className="decrypt-btn-sota"
@@ -378,14 +387,14 @@ export default function LeadDetail() {
                     style={{ fontSize: "0.85em" }}
                     onClick={() => downloadSecure(`/api/dossier/${lead!.asset_id}/docx`, `dossier_${lead!.asset_id}.docx`)}
                   >
-                    DOWNLOAD DOSSIER (.DOCX)
+                    DOSSIER (.DOCX)
                   </button>
                   <button
                     className="btn-outline"
                     style={{ fontSize: "0.85em" }}
                     onClick={() => downloadSecure(`/api/dossier/${lead!.asset_id}/pdf`, `dossier_${lead!.asset_id}.pdf`)}
                   >
-                    DOWNLOAD DOSSIER (.PDF)
+                    DOSSIER (.PDF)
                   </button>
                   {(lead!.data_grade === "GOLD" || lead!.data_grade === "SILVER") && (
                     <button
