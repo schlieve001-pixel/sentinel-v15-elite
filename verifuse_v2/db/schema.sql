@@ -5,6 +5,7 @@
 -- ── Core leads table ───────────────────────────────────────────────
 -- NOTE: "status" (RESTRICTED/ACTIONABLE/EXPIRED) is NEVER stored.
 --       It is computed at runtime from sale_date + claim_deadline.
+-- DEPRECATED (Sprint 11): Use `leads` table instead. Read-only from now on.
 CREATE TABLE IF NOT EXISTS assets (
     asset_id            TEXT PRIMARY KEY,
     county              TEXT NOT NULL,
@@ -60,6 +61,8 @@ CREATE TABLE IF NOT EXISTS legal_status (
 );
 
 -- ── Statute authority (jurisdiction rules) ───────────────────────
+-- NOTE: fee_cap_pct and fee_cap_flat columns DEPRECATED (Sprint 11).
+-- C.R.S. § 38-38-111 makes compensation agreements unenforceable.
 CREATE TABLE IF NOT EXISTS statute_authority (
     jurisdiction    TEXT NOT NULL,
     state           TEXT NOT NULL,
@@ -68,8 +71,8 @@ CREATE TABLE IF NOT EXISTS statute_authority (
     statute_years   INTEGER,
     triggering_event TEXT,
     statute_citation TEXT,
-    fee_cap_pct     REAL,
-    fee_cap_flat    REAL,
+    fee_cap_pct     REAL,       -- DEPRECATED: always NULL (Sprint 11)
+    fee_cap_flat    REAL,       -- DEPRECATED: always NULL (Sprint 11)
     requires_court  INTEGER DEFAULT 0,
     known_issues    TEXT,
     verified_date   TEXT,

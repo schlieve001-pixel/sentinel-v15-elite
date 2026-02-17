@@ -121,7 +121,8 @@ def migrate() -> dict:
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, [d["jurisdiction"], d["state"], d["county"], d["asset_type"],
                   d["statute_years"], d.get("triggering_event"), d.get("statute_citation"),
-                  d.get("fee_cap_pct"), d.get("fee_cap_flat"), d.get("requires_court", 0),
+                  None, None,  # fee_cap_pct/flat DEPRECATED (Sprint 11)
+                  d.get("requires_court", 0),
                   d.get("known_issues"), d.get("verified_date"), d.get("verified_by"),
                   d.get("confidence", 1.0)])
             stats["statutes_migrated"] += 1

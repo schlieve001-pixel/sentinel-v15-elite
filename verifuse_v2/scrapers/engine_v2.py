@@ -197,6 +197,83 @@ def extract_text(pdf_path: Path) -> str:
     return text
 
 
+def _vertex_fallback_enabled() -> bool:
+    """Check if Vertex AI fallback is available."""
+    return bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
+
+
+def _vertex_fallback(pdf_path: Path, source_file: str) -> list[dict]:
+    """Send unmatched PDF to Vertex AI for extraction. Returns list of records."""
+    try:
+        from verifuse_v2.scrapers.vertex_engine import extract_from_pdf, validate_pdf, _sha256_file
+        import hashlib
+
+        valid, msg = validate_pdf(pdf_path)
+        if not valid:
+            log.debug("Vertex fallback skip %s: %s", pdf_path.name, msg)
+            return []
+
+        # Budget check via vertex_usage table
+        from verifuse_v2.scrapers.vertex_engine import _get_daily_usage, _log_vertex_usage, DAILY_PDF_CAP
+        conn_check = sqlite3.connect(DB_PATH)
+        conn_check.execute("PRAGMA journal_mode=WAL")
+        daily_used = _get_daily_usage(conn_check)
+        if daily_used >= DAILY_PDF_CAP:
+            log.warning("Vertex fallback: budget exceeded (%d/%d)", daily_used, DAILY_PDF_CAP)
+            conn_check.close()
+            return []
+
+        from google import genai
+        import json as _json
+
+        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        project = None
+        if cred_path and Path(cred_path).exists():
+            cred_data = _json.loads(Path(cred_path).read_text())
+            project = cred_data.get("project_id")
+
+        if not project:
+            conn_check.close()
+            return []
+
+        model = "gemini-2.0-flash"
+        client = genai.Client(vertexai=True, project=project, location="us-central1")
+        result = extract_from_pdf(client, model, pdf_path)
+
+        # Log usage
+        pdf_sha256 = _sha256_file(pdf_path)
+        status_str = "OK" if result.get("ok") else result.get("error", "FAILED")
+        _log_vertex_usage(conn_check, pdf_sha256, model, status_str)
+        conn_check.close()
+
+        if not result.get("ok"):
+            return []
+
+        # Convert Vertex result to engine_v2 record format
+        county = pdf_path.parent.name.capitalize() if pdf_path.parent != PDF_DIR else "Unknown"
+        record = {
+            "case_number": "",
+            "county": county,
+            "owner_name": None,
+            "property_address": None,
+            "winning_bid": result.get("winning_bid", 0) or 0,
+            "total_debt": result.get("total_debt", 0) or 0,
+            "surplus_amount": result.get("surplus", 0) or 0,
+            "overbid_amount": max(0, (result.get("winning_bid") or 0) - (result.get("total_debt") or 0)),
+            "sale_date": result.get("sale_date"),
+            "source_file": source_file,
+            "confidence_score": 0.85 if result.get("ok") else 0.5,
+        }
+        return [record]
+
+    except ImportError:
+        log.debug("Vertex AI packages not installed — fallback disabled")
+        return []
+    except Exception as e:
+        log.warning("Vertex fallback error for %s: %s", pdf_path.name, e)
+        return []
+
+
 def process_all(dry_run: bool = False, verbose: bool = False) -> dict:
     """Main processing loop."""
     stats = {
@@ -238,6 +315,40 @@ def process_all(dry_run: bool = False, verbose: bool = False) -> dict:
             # Find matching parser
             parser = get_parser_for(text)
             if not parser:
+                # ── Vertex AI Fallback ────────────────────────────────
+                if _vertex_fallback_enabled():
+                    if verbose:
+                        print(f"  [VERTEX FALLBACK] {rel}")
+                    vertex_records = _vertex_fallback(pdf_path, str(rel))
+                    if vertex_records:
+                        stats["pdfs_matched"] += 1
+                        stats["parser_hits"]["VertexAI"] = stats["parser_hits"].get("VertexAI", 0) + 1
+                        for vr in vertex_records:
+                            confidence = vr.get("confidence_score", 0.0)
+                            surplus = vr.get("surplus_amount", 0) or 0.0
+                            grade = "GOLD" if surplus >= 10000 and confidence >= 0.8 else "SILVER" if surplus >= 5000 and confidence >= 0.6 else "BRONZE" if surplus > 0 else "IRON"
+                            vr["source_name"] = "engine_v2_VertexAI"
+                            vr["lead_id"] = f"vertex_{vr.get('case_number', pdf_path.stem)}"
+
+                            if confidence > ENRICHED_THRESHOLD:
+                                status = "ENRICHED"
+                                stats["enriched"] += 1
+                            elif confidence > REVIEW_THRESHOLD:
+                                status = "REVIEW_REQUIRED"
+                                stats["review_required"] += 1
+                            else:
+                                stats["anomaly"] += 1
+                                log_anomaly(vr, confidence, "vertex_low_confidence", str(rel))
+                                continue
+
+                            stats["records_extracted"] += 1
+                            if not dry_run and conn:
+                                action = upsert_to_leads(conn, vr, confidence, grade, status)
+                                if action == "updated":
+                                    stats["updated"] += 1
+                                elif action == "inserted":
+                                    stats["inserted"] += 1
+                        continue
                 if verbose:
                     print(f"  [NO MATCH] {rel}")
                 continue
@@ -312,6 +423,11 @@ def process_all(dry_run: bool = False, verbose: bool = False) -> dict:
     finally:
         if conn:
             conn.close()
+
+    # Add alias keys for runner integration
+    stats["parsed_records"] = stats["records_extracted"]
+    stats["leads_inserted"] = stats["inserted"]
+    stats["rejects"] = stats["anomaly"]
 
     return stats
 

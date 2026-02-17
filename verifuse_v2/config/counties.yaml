@@ -1,97 +1,613 @@
-# VeriFuse V2 — Colorado County Configuration
-# Each county has: name, source URL patterns, PDF patterns, and scraping config.
+# VeriFuse V2 — Colorado County Configuration (Sprint 11: 64-County Expansion)
+# SINGLE SOURCE OF TRUTH for county scraper configuration.
+#
+# Each county has: name, code, platform, parser, URLs, patterns, interval, tier.
+# Runner reads this file and instantiates the correct adapter per `platform` field.
+#
+# Platforms: realforeclose | gts | county_page | govease | manual
+# Tiers: large (>100K pop) | medium (25-100K) | small (10-25K) | rural (<10K)
 
 counties:
+  # ── PHASE 1: Original 10 counties (enabled) ─────────────────────
+
   - name: Denver
     code: denver
+    platform: county_page
+    parser: DenverExcessParser
     public_trustee_url: https://www.denvergov.org/Government/Departments/Department-of-Finance/Public-Trustee
-    pdf_patterns:
-      - "*excess*funds*"
-      - "*surplus*"
-      - "*foreclosure*sale*results*"
+    pdf_patterns: ["*excess*funds*", "*surplus*", "*foreclosure*sale*results*"]
     scrape_interval_hours: 24
     enabled: true
+    population_tier: large
 
   - name: Adams
     code: adams
+    platform: gts
+    parser: AdamsParser
+    base_url: https://apps.adcogov.org/PTForeclosureSearch/
     public_trustee_url: https://adcogov.org/public-trustee
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
-      - "*sale*results*"
+    pdf_patterns: ["*POST*SALE*", "*excess*", "*surplus*"]
     scrape_interval_hours: 24
     enabled: true
+    population_tier: large
 
   - name: Arapahoe
     code: arapahoe
+    platform: gts
+    parser: GenericExcessFundsParser
     public_trustee_url: https://www.arapahoegov.com/201/Public-Trustee
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
-      - "*overbid*"
+    pdf_patterns: ["*excess*", "*surplus*", "*overbid*"]
     scrape_interval_hours: 24
     enabled: true
+    population_tier: large
 
   - name: Jefferson
     code: jefferson
+    platform: county_page
+    parser: GenericExcessFundsParser
     public_trustee_url: https://www.jeffco.us/732/Public-Trustee
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
+    pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 24
     enabled: true
+    population_tier: large
 
   - name: El Paso
     code: el_paso
+    platform: realforeclose
+    parser: ElPasoPostSaleParser
+    base_url: https://elpaso.realforeclose.com
     public_trustee_url: https://publictrustee.elpasoco.com/
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
-      - "*sale*"
+    pdf_patterns: ["*excess*", "*surplus*", "*sale*"]
     scrape_interval_hours: 24
     enabled: true
+    population_tier: large
 
   - name: Douglas
     code: douglas
+    platform: gts
+    parser: GenericExcessFundsParser
     public_trustee_url: https://www.douglas.co.us/public-trustee/
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
+    pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 48
     enabled: true
+    population_tier: large
 
   - name: Boulder
     code: boulder
+    platform: gts
+    parser: GTSPreSaleParser
     public_trustee_url: https://www.bouldercounty.org/departments/public-trustee/
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
+    pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 48
     enabled: true
+    population_tier: large
 
   - name: Larimer
     code: larimer
+    platform: realforeclose
+    parser: GenericExcessFundsParser
+    base_url: https://larimer.realforeclose.com
     public_trustee_url: https://www.larimer.org/public-trustee
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
+    pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 48
     enabled: true
+    population_tier: large
 
   - name: Weld
     code: weld
+    platform: gts
+    parser: WeldParser
     public_trustee_url: https://www.weldgov.com/Departments/Public-Trustee
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
+    pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 48
     enabled: true
+    population_tier: large
 
   - name: Mesa
     code: mesa
+    platform: realforeclose
+    parser: GenericExcessFundsParser
+    base_url: https://mesa.realforeclose.com
     public_trustee_url: https://www.mesacounty.us/public-trustee
-    pdf_patterns:
-      - "*excess*"
-      - "*surplus*"
+    pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 72
     enabled: true
+    population_tier: medium
+
+  # ── PHASE 1: 5 additional counties (existing scraper code) ──────
+
+  - name: Pueblo
+    code: pueblo
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://county.pueblo.org/public-trustee
+    pdf_patterns: ["*excess*", "*surplus*", "*overbid*"]
+    scrape_interval_hours: 48
+    enabled: true
+    population_tier: medium
+
+  - name: Summit
+    code: summit
+    platform: realforeclose
+    parser: GenericExcessFundsParser
+    base_url: https://summit.realforeclose.com
+    public_trustee_url: https://www.summitcountyco.gov/201/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 72
+    enabled: true
+    population_tier: small
+
+  - name: Teller
+    code: teller
+    platform: govease
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.co.teller.co.us/PublicTrustee/
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: false  # GovEase — disabled by default (Task 0D)
+    population_tier: small
+
+  - name: Eagle
+    code: eagle
+    platform: realforeclose
+    parser: GenericExcessFundsParser
+    base_url: https://eagle.realforeclose.com
+    public_trustee_url: https://www.eaglecounty.us/Clerk/Public_Trustee/
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 72
+    enabled: true
+    population_tier: small
+
+  # ── PHASE 2: 8 new counties ────────────────────────────────────
+
+  - name: Garfield
+    code: garfield
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://foreclosures.garfield-county.com
+    public_trustee_url: https://www.garfield-county.com/public-trustee/
+    pdf_patterns: ["*excess*", "*surplus*", "*foreclosure*"]
+    scrape_interval_hours: 72
+    enabled: true
+    population_tier: medium
+
+  - name: Pitkin
+    code: pitkin
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.pitkincounty.com/175/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  - name: Routt
+    code: routt
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://co.routt.co.us/260/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  - name: Grand
+    code: grand
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://co.grand.co.us/192/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  - name: Broomfield
+    code: broomfield
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.broomfield.org/157/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: medium
+
+  - name: Clear Creek
+    code: clear_creek
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.clearcreekcounty.us/149/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: rural
+
+  - name: Gilpin
+    code: gilpin
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.co.gilpin.co.us/departments/public-trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: rural
+
+  # ── PHASE 3: 10+ medium counties ──────────────────────────────
+
+  - name: Morgan
+    code: morgan
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.co.morgan.co.us/public-trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  - name: Fremont
+    code: fremont
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.fremontco.com/public-trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: medium
+
+  - name: Park
+    code: park
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.parkco.us/236/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  - name: Lake
+    code: lake
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.lakecountyco.com/publictrustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: rural
+
+  - name: La Plata
+    code: la_plata
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://co.laplata.co.us/departments/public_trustee/
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: medium
+
+  - name: Montrose
+    code: montrose
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.montrosecounty.us/364/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: medium
+
+  - name: Delta
+    code: delta
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.deltacounty.com/363/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  - name: Elbert
+    code: elbert
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.elbertcounty-co.gov/277/Public-Trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  - name: Logan
+    code: logan
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.logancountyco.gov/public-trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  - name: Chaffee
+    code: chaffee
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.chaffeecounty.org/public-trustee
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
+    population_tier: small
+
+  # ── PHASE 4: Remaining rural counties ──────────────────────────
+  # Many rural counties have 0-5 foreclosures/year.
+  # CountyPageAdapter scans their public trustee page for PDFs.
+  # Vertex AI handles non-standard formats.
+  # Counties with no web presence: platform=manual + CORA request.
+
+  - name: Alamosa
+    code: alamosa
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.alamosacounty.org/public-trustee
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: rural
+
+  - name: Archuleta
+    code: archuleta
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.archuletacounty.org/213/Public-Trustee
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: rural
+
+  - name: Baca
+    code: baca
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Bent
+    code: bent
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Cheyenne
+    code: cheyenne
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Conejos
+    code: conejos
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Costilla
+    code: costilla
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Crowley
+    code: crowley
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Custer
+    code: custer
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Dolores
+    code: dolores
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Gunnison
+    code: gunnison
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.gunnisoncounty.org/241/Public-Trustee
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: small
+
+  - name: Hinsdale
+    code: hinsdale
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Huerfano
+    code: huerfano
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Jackson
+    code: jackson
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Kiowa
+    code: kiowa
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Kit Carson
+    code: kit_carson
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Las Animas
+    code: las_animas
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.lasanimascounty.org/public-trustee
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: small
+
+  - name: Lincoln
+    code: lincoln
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Mineral
+    code: mineral
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Moffat
+    code: moffat
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://moffatcounty.net/public-trustee
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: small
+
+  - name: Montezuma
+    code: montezuma
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.montezumacounty.org/public-trustee.html
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: small
+
+  - name: Otero
+    code: otero
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.oterogov.com/public-trustee
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: small
+
+  - name: Ouray
+    code: ouray
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.ouraycountyco.gov/200/Public-Trustee
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: rural
+
+  - name: Phillips
+    code: phillips
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Prowers
+    code: prowers
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Rio Blanco
+    code: rio_blanco
+    platform: county_page
+    parser: GenericExcessFundsParser
+    public_trustee_url: https://www.rbc.us/197/Public-Trustee
+    scrape_interval_hours: 336
+    enabled: true
+    population_tier: rural
+
+  - name: Rio Grande
+    code: rio_grande
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Saguache
+    code: saguache
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: San Juan
+    code: san_juan
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: San Miguel
+    code: san_miguel
+    platform: govease
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 336
+    enabled: false  # GovEase — disabled by default
+    population_tier: rural
+
+  - name: Sedgwick
+    code: sedgwick
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Washington
+    code: washington
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural
+
+  - name: Yuma
+    code: yuma
+    platform: manual
+    parser: GenericExcessFundsParser
+    scrape_interval_hours: 720
+    enabled: true
+    population_tier: rural

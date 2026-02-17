@@ -39,6 +39,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import hashlib
+import sqlite3
+
 from verifuse_v2.db import database as db
 from verifuse_v2.daily_healthcheck import compute_confidence, compute_grade
 
@@ -49,6 +52,7 @@ LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 AUDIT_LOG = LOG_DIR / "engine4_audit.jsonl"
 MAX_PDF_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_RETRIES = 5
+DAILY_PDF_CAP = 50  # Hard cap: 50 PDFs per day via Vertex AI
 
 MONEY_RE = re.compile(r"[-]?\$?\s*([0O9]{0,1}[0-9]{0,2}(?:[,.\s][0-9O]{3})*|[0-9]+)(?:\.(\d{1,2}))?")
 ISO_DATE_RE = re.compile(r"\b(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
@@ -305,6 +309,60 @@ def extract_from_pdf(client, model: str, pdf_path: Path) -> dict:
     return {"ok": False, "error": f"max_retries_exceeded ({MAX_RETRIES})"}
 
 
+# ── Budget enforcement ───────────────────────────────────────────────
+
+def _sha256_file(filepath: Path) -> str:
+    """Compute SHA256 of a file."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while chunk := f.read(8192):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _get_daily_usage(conn: sqlite3.Connection) -> int:
+    """Count PDFs processed today via Vertex AI."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    row = conn.execute(
+        "SELECT COUNT(*) FROM vertex_usage WHERE date = ?", [today]
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def _log_vertex_usage(conn: sqlite3.Connection, pdf_sha256: str, model_used: str, status: str, cost_usd: float = 0.0) -> None:
+    """Log a Vertex AI call to vertex_usage table."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    conn.execute(
+        "INSERT INTO vertex_usage (date, source_pdf_sha256, cost_usd, model_used, status) VALUES (?, ?, ?, ?, ?)",
+        [today, pdf_sha256, cost_usd, model_used, status],
+    )
+    conn.commit()
+
+
+def _queue_pdf(conn: sqlite3.Connection, pdf_path: str, pdf_sha256: str) -> None:
+    """Queue a PDF for later processing when budget is exceeded."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT OR IGNORE INTO vertex_queue (source_pdf_path, source_pdf_sha256, queued_at, status) VALUES (?, ?, ?, 'PENDING')",
+        [pdf_path, pdf_sha256, now],
+    )
+    conn.commit()
+
+
+def _get_queued_pdfs(conn: sqlite3.Connection, limit: int) -> list[tuple]:
+    """Get queued PDFs (FIFO, oldest first)."""
+    return conn.execute(
+        "SELECT rowid, source_pdf_path, source_pdf_sha256 FROM vertex_queue WHERE status = 'PENDING' ORDER BY queued_at ASC LIMIT ?",
+        [limit],
+    ).fetchall()
+
+
+def _mark_queue_done(conn: sqlite3.Connection, rowid: int) -> None:
+    """Mark a queued PDF as processed."""
+    conn.execute("UPDATE vertex_queue SET status = 'PROCESSED' WHERE rowid = ?", [rowid])
+    conn.commit()
+
+
 # ── Main processing loop ─────────────────────────────────────────────
 
 def process_batch(limit: int = 50, project: str | None = None, model: str = "gemini-2.0-flash") -> dict:
@@ -314,7 +372,7 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
     """
     from google import genai
 
-    stats = {"processed": 0, "ingested": 0, "failed": 0, "skipped": 0, "errors": []}
+    stats = {"processed": 0, "ingested": 0, "failed": 0, "skipped": 0, "queued": 0, "errors": []}
     now = datetime.now(timezone.utc).isoformat()
 
     if not project:
@@ -330,6 +388,17 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
     client = genai.Client(vertexai=True, project=project, location="us-central1")
     log.info("Vertex AI client initialized (project: %s, model: %s)", project, model)
 
+    # ── Budget check: daily PDF cap ──────────────────────────────────
+    with db.get_db() as conn:
+        daily_used = _get_daily_usage(conn)
+        remaining_budget = max(0, DAILY_PDF_CAP - daily_used)
+        log.info("Vertex budget: %d/%d PDFs used today, %d remaining", daily_used, DAILY_PDF_CAP, remaining_budget)
+
+        # Process queued PDFs first (FIFO)
+        queued = _get_queued_pdfs(conn, min(remaining_budget, limit))
+        if queued:
+            log.info("Processing %d queued PDFs first (FIFO)...", len(queued))
+
     # Query staged records — uses asset_id as PK (no staging_id column)
     with db.get_db() as conn:
         rows = conn.execute("""
@@ -340,11 +409,11 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
             LIMIT ?
         """, [limit]).fetchall()
 
-    if not rows:
+    if not rows and not queued:
         log.info("No staged records with PDFs to process")
         return stats
 
-    log.info("Processing %d staged records...", len(rows))
+    log.info("Processing %d staged records (+ %d queued)...", len(rows), len(queued) if queued else 0)
 
     for row in rows:
         asset_id = row[0]
@@ -365,9 +434,29 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
             _audit_log({"action": "skip", "asset_id": asset_id, "reason": msg})
             continue
 
-        log.info("  [%s] %s / %s ...", asset_id[:20], county, case_number or pdf_path.name)
+        # ── Budget gate: check daily cap before each Vertex call ─────
+        pdf_sha256 = _sha256_file(pdf_path)
+        with db.get_db() as conn:
+            daily_used = _get_daily_usage(conn)
+            if daily_used >= DAILY_PDF_CAP:
+                log.warning("BUDGET EXCEEDED: %d/%d PDFs today. Queuing %s", daily_used, DAILY_PDF_CAP, asset_id)
+                _queue_pdf(conn, str(pdf_path), pdf_sha256)
+                stats["queued"] += 1
+                db.log_pipeline_event(
+                    asset_id, "VERTEX_BUDGET_EXCEEDED",
+                    f"daily_used={daily_used}", f"queued={str(pdf_path)}",
+                    actor="vertex_engine", reason=f"cap={DAILY_PDF_CAP}",
+                )
+                continue
+
+        log.info("  [%s] %s / %s (sha256=%s)...", asset_id[:20], county, case_number or pdf_path.name, pdf_sha256[:12])
         result = extract_from_pdf(client, model, pdf_path)
         stats["processed"] += 1
+
+        # Log to vertex_usage for budget tracking
+        with db.get_db() as conn:
+            status = "OK" if result["ok"] else result.get("error", "FAILED")
+            _log_vertex_usage(conn, pdf_sha256, model, status)
 
         _audit_log({
             "action": "extract",
@@ -375,6 +464,7 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
             "county": county,
             "case_number": case_number,
             "pdf_path": str(pdf_path),
+            "source_pdf_sha256": pdf_sha256,
             "result": {k: v for k, v in result.items() if k != "evidence"},
         })
 
@@ -451,7 +541,7 @@ def process_batch(limit: int = 50, project: str | None = None, model: str = "gem
     db.log_pipeline_event(
         "SYSTEM", "ENGINE4_BATCH",
         f"Processed {stats['processed']} PDFs",
-        f"Ingested {stats['ingested']}, Failed {stats['failed']}, Skipped {stats['skipped']}",
+        f"Ingested {stats['ingested']}, Failed {stats['failed']}, Skipped {stats['skipped']}, Queued {stats['queued']}",
         actor="vertex_engine",
         reason=f"model={model}, project={project}",
     )

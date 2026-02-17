@@ -42,6 +42,7 @@ export interface AuthUser {
   unlocked_assets?: number;
   is_active?: boolean;
   is_admin?: boolean;
+  email_verified?: boolean;
 }
 
 export interface AuthResponse {
@@ -74,6 +75,48 @@ export function getMe(): Promise<AuthUser> {
   return request("/api/auth/me");
 }
 
+export function sendVerification(): Promise<{ status: string }> {
+  return request("/api/auth/send-verification", { method: "POST" });
+}
+
+export function verifyEmail(code: string): Promise<{ status: string }> {
+  return request("/api/auth/verify-email", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+// ── Preview ──────────────────────────────────────────────────────
+
+export interface PreviewLead {
+  preview_key: string;
+  county: string;
+  sale_date: string | null;
+  data_grade: string;
+  confidence_score: number;
+  estimated_surplus: number;
+  restriction_status: "RESTRICTED" | "WATCHLIST" | "ACTIONABLE" | "EXPIRED" | "UNKNOWN";
+  days_until_actionable: number | null;
+}
+
+export interface PreviewLeadsResponse {
+  count: number;
+  leads: PreviewLead[];
+}
+
+export function getPreviewLeads(params?: {
+  county?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PreviewLeadsResponse> {
+  const qs = new URLSearchParams();
+  if (params?.county) qs.set("county", params.county);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const q = qs.toString();
+  return request(`/api/preview/leads${q ? `?${q}` : ""}`);
+}
+
 // ── Leads ─────────────────────────────────────────────────────────
 
 export interface Lead {
@@ -91,7 +134,9 @@ export interface Lead {
   days_to_claim: number | null;
   deadline_passed: boolean | null;
   // C.R.S. § 38-38-111 restriction period
-  restriction_status: "RESTRICTED" | "WATCHLIST" | "ACTIONABLE" | "UNKNOWN";
+  restriction_status: "RESTRICTED" | "WATCHLIST" | "ACTIONABLE" | "EXPIRED" | "UNKNOWN";
+  // Internal DB label: DATA_ACCESS_ONLY | ESCROW_ENDED | EXPIRED | UNKNOWN
+  statute_window_status?: string;
   restriction_end_date: string | null;
   blackout_end_date: string | null;
   days_until_actionable: number | null;
@@ -137,6 +182,8 @@ export interface Stats {
   attorney_ready: number;
   gold_grade: number;
   total_claimable_surplus: number;
+  verified_pipeline: number;
+  total_raw_volume: number;
   counties: { county: string; cnt: number; total: number }[];
 }
 
@@ -162,6 +209,7 @@ export interface UnlockResponse {
   data_grade: string | null;
   confidence_score: number | null;
   motion_pdf: string | null;
+  credits_remaining?: number;
 }
 
 export function unlockLead(assetId: string): Promise<UnlockResponse> {
@@ -180,10 +228,54 @@ export function unlockRestrictedLead(
   });
 }
 
-// ── Dossier ───────────────────────────────────────────────────────
+// ── Downloads ────────────────────────────────────────────────────
 
-export function getDossierUrl(assetId: string): string {
-  return `${API_BASE}/api/dossier/${assetId}`;
+export async function downloadSecure(path: string, fallbackFilename: string): Promise<void> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(res.status, body.detail || "Download failed");
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition");
+  let filename = fallbackFilename;
+  if (disposition) {
+    const match = disposition.match(/filename="?([^";\n]+)"?/);
+    if (match) filename = match[1];
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ── Attorney Tools ───────────────────────────────────────────────
+
+export function generateLetter(assetId: string): Promise<Blob> {
+  return fetch(`${API_BASE}/api/letter/${assetId}`, {
+    method: "POST",
+    headers: authHeaders(),
+  }).then((res) => {
+    if (!res.ok) throw new ApiError(res.status, "Letter generation failed");
+    return res.blob();
+  });
+}
+
+export function getAttorneyReadyLeads(params?: {
+  limit?: number;
+  offset?: number;
+}): Promise<LeadsResponse> {
+  const qs = new URLSearchParams();
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const q = qs.toString();
+  return request(`/api/leads/attorney-ready${q ? `?${q}` : ""}`);
 }
 
 // ── Billing ───────────────────────────────────────────────────────

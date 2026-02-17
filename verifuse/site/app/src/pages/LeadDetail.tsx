@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { getLeadDetail, unlockLead, unlockRestrictedLead, getDossierUrl, type Lead, type UnlockResponse, ApiError } from "../lib/api";
+import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, generateLetter, sendVerification, verifyEmail, type Lead, type UnlockResponse, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
+
+function isVerifyEmailError(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403 &&
+    /verify/i.test(err.message) && /email/i.test(err.message);
+}
 
 function fmt(n: number | null | undefined): string {
   if (n == null) return "\u2014";
@@ -17,6 +22,10 @@ export default function LeadDetail() {
   const [loading, setLoading] = useState(true);
   const [unlocking, setUnlocking] = useState(false);
   const [error, setError] = useState("");
+  const [showVerifyPrompt, setShowVerifyPrompt] = useState(false);
+  const [verifyCode, setVerifyCode] = useState("");
+  const [verifySending, setVerifySending] = useState(false);
+  const [verifyMsg, setVerifyMsg] = useState("");
 
   useEffect(() => {
     if (!assetId) return;
@@ -25,6 +34,15 @@ export default function LeadDetail() {
       .catch((err) => setError(err instanceof ApiError ? err.message : "Failed to load"))
       .finally(() => setLoading(false));
   }, [assetId]);
+
+  function handleUnlockError(err: unknown) {
+    if (isVerifyEmailError(err)) {
+      setShowVerifyPrompt(true);
+      setError("");
+    } else {
+      setError(err instanceof ApiError ? err.message : "Unlock failed");
+    }
+  }
 
   async function handleUnlock() {
     if (!assetId) return;
@@ -38,7 +56,7 @@ export default function LeadDetail() {
       const res = await unlockLead(assetId);
       setUnlocked(res);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Unlock failed");
+      handleUnlockError(err);
     } finally {
       setUnlocking(false);
     }
@@ -69,6 +87,7 @@ export default function LeadDetail() {
   }
 
   const isRestricted = lead?.restriction_status === "RESTRICTED";
+  const isExpired = lead?.deadline_passed === true || lead?.restriction_status === ("EXPIRED" as any);
 
   return (
     <div className="detail-page">
@@ -95,6 +114,11 @@ export default function LeadDetail() {
                 </span>
                 {!lead.surplus_verified && (
                   <span className="unverified-badge" style={{ marginLeft: 8 }}>UNVERIFIED</span>
+                )}
+                {(lead as any).attorney_packet_ready === 1 && (
+                  <span className="grade-badge grade-gold" style={{ marginLeft: 8 }}>
+                    ATTORNEY READY
+                  </span>
                 )}
               </div>
               {isRestricted ? (
@@ -161,10 +185,10 @@ export default function LeadDetail() {
               <div className="detail-field">
                 <label>Restriction Status</label>
                 <span style={{
-                  color: isRestricted ? "#ef4444" : "#22c55e",
+                  color: isRestricted ? "#ef4444" : isExpired ? "#6b7280" : "#22c55e",
                   fontWeight: 600,
                 }}>
-                  {isRestricted ? "RESTRICTED" : "ACTIONABLE"}
+                  {isRestricted ? "DATA ACCESS ONLY" : isExpired ? "EXPIRED" : "ESCROW ENDED"}
                 </span>
               </div>
               <div className="detail-field">
@@ -189,14 +213,12 @@ export default function LeadDetail() {
                 )}
 
                 <div className="unlock-actions">
-                  <a
-                    href={getDossierUrl(lead.asset_id)}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
                     className="btn-outline"
+                    onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.txt`)}
                   >
                     DOWNLOAD FREE DOSSIER
-                  </a>
+                  </button>
                   {isRestricted ? (
                     <button
                       className="decrypt-btn-sota"
@@ -223,27 +245,86 @@ export default function LeadDetail() {
                           const res = await unlockRestrictedLead(assetId, true);
                           setUnlocked(res);
                         } catch (err) {
-                          setError(err instanceof ApiError ? err.message : "Unlock failed");
+                          handleUnlockError(err);
                         } finally {
                           setUnlocking(false);
                         }
                       }}
-                      disabled={unlocking}
+                      disabled={unlocking || (user && !user.email_verified)}
                     >
                       {unlocking ? "VERIFYING..." : "ATTORNEY ACCESS ONLY (1 CREDIT)"}
                     </button>
                   ) : (
-                    <button
-                      className="decrypt-btn-sota"
-                      onClick={handleUnlock}
-                      disabled={unlocking}
-                    >
-                      {unlocking ? "DECRYPTING..." : "UNLOCK FULL INTEL (1 CREDIT)"}
-                    </button>
+                    <div className="unlock-cta-expanded">
+                      <button
+                        className="decrypt-btn-sota decrypt-btn-lg"
+                        onClick={handleUnlock}
+                        disabled={unlocking || (user && !user.email_verified)}
+                      >
+                        {unlocking ? "DECRYPTING..." : "UNLOCK FULL INTEL (1 CREDIT)"}
+                      </button>
+                      <p className="unlock-cta-details">
+                        You'll get: Owner name, full address, recorder link, court-ready dossier
+                      </p>
+                    </div>
                   )}
                 </div>
 
                 {error && <p className="auth-error" style={{ marginTop: 12 }}>{error}</p>}
+
+                {/* Email Verification Prompt */}
+                {(showVerifyPrompt || (user && !user.email_verified)) && (
+                  <div className="verify-banner" style={{ marginTop: 16 }}>
+                    <strong>Verify your email to unlock leads</strong>
+                    <div className="verify-row">
+                      <input
+                        type="text"
+                        placeholder="Enter verification code"
+                        value={verifyCode}
+                        onChange={(e) => setVerifyCode(e.target.value)}
+                        className="verify-input"
+                      />
+                      <button
+                        className="btn-outline-sm"
+                        disabled={!verifyCode || verifySending}
+                        onClick={async () => {
+                          setVerifySending(true);
+                          setVerifyMsg("");
+                          try {
+                            await verifyEmail(verifyCode);
+                            setVerifyMsg("Email verified!");
+                            window.location.reload();
+                          } catch {
+                            setVerifyMsg("Invalid code. Try again.");
+                          } finally {
+                            setVerifySending(false);
+                          }
+                        }}
+                      >
+                        VERIFY
+                      </button>
+                      <button
+                        className="btn-outline-sm"
+                        disabled={verifySending}
+                        onClick={async () => {
+                          setVerifySending(true);
+                          setVerifyMsg("");
+                          try {
+                            await sendVerification();
+                            setVerifyMsg("Verification email sent!");
+                          } catch {
+                            setVerifyMsg("Failed to send. Try again.");
+                          } finally {
+                            setVerifySending(false);
+                          }
+                        }}
+                      >
+                        RESEND CODE
+                      </button>
+                    </div>
+                    {verifyMsg && <p className="verify-msg">{verifyMsg}</p>}
+                  </div>
+                )}
               </div>
             )}
 
@@ -289,6 +370,54 @@ export default function LeadDetail() {
                     <p>Court-ready motion citing C.R.S. § 38-38-111 has been prepared.</p>
                   </div>
                 )}
+
+                {/* Attorney Tool Downloads */}
+                <div style={{ marginTop: 20, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <button
+                    className="btn-outline"
+                    style={{ fontSize: "0.85em" }}
+                    onClick={() => downloadSecure(`/api/dossier/${lead!.asset_id}/docx`, `dossier_${lead!.asset_id}.docx`)}
+                  >
+                    DOWNLOAD DOSSIER (.DOCX)
+                  </button>
+                  <button
+                    className="btn-outline"
+                    style={{ fontSize: "0.85em" }}
+                    onClick={() => downloadSecure(`/api/dossier/${lead!.asset_id}/pdf`, `dossier_${lead!.asset_id}.pdf`)}
+                  >
+                    DOWNLOAD DOSSIER (.PDF)
+                  </button>
+                  {(lead!.data_grade === "GOLD" || lead!.data_grade === "SILVER") && (
+                    <button
+                      className="btn-outline"
+                      style={{ fontSize: "0.85em" }}
+                      onClick={() => downloadSecure(`/api/case-packet/${lead!.asset_id}`, `case_packet_${lead!.asset_id}.html`)}
+                    >
+                      CASE PACKET (HTML)
+                    </button>
+                  )}
+                  {user?.bar_number && (
+                    <button
+                      className="btn-outline"
+                      style={{ fontSize: "0.85em" }}
+                      onClick={async () => {
+                        try {
+                          const blob = await generateLetter(lead!.asset_id);
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `letter_${lead!.asset_id}.docx`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        } catch (err) {
+                          setError(err instanceof ApiError ? err.message : "Letter generation failed");
+                        }
+                      }}
+                    >
+                      GENERATE RULE 7.3 LETTER
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>

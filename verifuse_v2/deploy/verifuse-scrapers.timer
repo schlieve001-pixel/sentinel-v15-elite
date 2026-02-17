@@ -1,9 +1,17 @@
+# VERIFUSE SCRAPER TIMER — systemd timer (Sprint 11)
+# Runs daily at 2 AM with 15-minute jitter to avoid thundering herd.
+# Install: sudo cp verifuse-scrapers.timer /etc/systemd/system/
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable verifuse-scrapers.timer
+#          sudo systemctl start verifuse-scrapers.timer
+
 [Unit]
-Description=Run VeriFuse V2 scrapers weekly on Thursdays (day after sales)
+Description=Run VeriFuse V2 scrapers daily at 2 AM
 
 [Timer]
-OnCalendar=Thu *-*-* 08:00:00
+OnCalendar=*-*-* 02:00:00
 Persistent=true
+RandomizedDelaySec=900
 
 [Install]
 WantedBy=timers.target

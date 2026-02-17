@@ -51,6 +51,12 @@ export default function Landing() {
 
   return (
     <div className="landing">
+      {/* Top Nav */}
+      <div className="landing-topnav">
+        <span className="topnav-brand">VERIFUSE <span className="text-green">// INTELLIGENCE</span></span>
+        <Link to="/login" className="btn-outline-sm">LOGIN</Link>
+      </div>
+
       {/* Hero */}
       <section className="landing-hero">
         <div className="hero-badge">COLORADO SURPLUS INTELLIGENCE</div>
@@ -73,8 +79,8 @@ export default function Landing() {
           <Link to="/register" className="btn-primary">
             START FREE TRIAL
           </Link>
-          <Link to="/dashboard" className="btn-outline">
-            BROWSE ASSETS
+          <Link to="/dashboard?preview=1" className="btn-outline">
+            Preview the Vault
           </Link>
         </div>
 
@@ -102,6 +108,25 @@ export default function Landing() {
             </div>
           </div>
         )}
+      </section>
+
+      {/* What You Get */}
+      <section className="landing-section landing-value-props">
+        <h2>What You Get</h2>
+        <div className="steps-grid">
+          <div className="step-card">
+            <h3>Exact surplus amounts — down to the penny</h3>
+          </div>
+          <div className="step-card">
+            <h3>County, sale date, grade, confidence — free to preview</h3>
+          </div>
+          <div className="step-card">
+            <h3>Owner name, address, case number — unlock with 1 credit</h3>
+          </div>
+          <div className="step-card">
+            <h3>Court-ready dossiers, case packets, Rule 7.3 letters</h3>
+          </div>
+        </div>
       </section>
 
       {/* How It Works */}

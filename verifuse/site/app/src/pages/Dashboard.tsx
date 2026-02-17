@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { getLeads, getStats, getDossierUrl, type Lead, type Stats } from "../lib/api";
+import { Link, useSearchParams } from "react-router-dom";
+import { getLeads, getStats, downloadSecure, getPreviewLeads, sendVerification, verifyEmail, type Lead, type Stats, type PreviewLead } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 const COUNTIES = ["", "Denver", "Jefferson", "Arapahoe", "Adams", "El Paso", "Douglas"];
@@ -84,14 +84,46 @@ function LeadCard({ lead }: { lead: Lead }) {
         <Link to={`/lead/${lead.asset_id}`} className="decrypt-btn-sota">
           {isRestricted ? "VIEW DETAILS" : "UNLOCK INTEL"}
         </Link>
-        <a
-          href={getDossierUrl(lead.asset_id)}
-          target="_blank"
-          rel="noopener noreferrer"
+        <button
           className="btn-outline-sm full-width"
+          onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.txt`)}
         >
           FREE DOSSIER
-        </a>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PreviewCard({ lead }: { lead: PreviewLead }) {
+  return (
+    <div className="lead-card preview-card">
+      <div className="card-header">
+        <span className="county-badge">{lead.county}</span>
+        {lead.restriction_status === "RESTRICTED" && lead.days_until_actionable != null && (
+          <span className="restriction-badge">
+            RESTRICTED — {lead.days_until_actionable} DAYS
+          </span>
+        )}
+      </div>
+      <div className="card-value">
+        {formatCurrency(lead.estimated_surplus)}
+      </div>
+      <div className="card-meta">
+        <span className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`}>
+          {lead.data_grade}
+        </span>
+        <span className="confidence-pill">
+          {Math.round((lead.confidence_score || 0) * 100)}%
+        </span>
+        {lead.sale_date && (
+          <span className="sale-date-pill">Sale: {lead.sale_date}</span>
+        )}
+      </div>
+      <div className="card-actions stacked">
+        <Link to="/register" className="decrypt-btn-sota">
+          Sign Up to Unlock
+        </Link>
       </div>
     </div>
   );
@@ -99,14 +131,29 @@ function LeadCard({ lead }: { lead: Lead }) {
 
 export default function Dashboard() {
   const { user, logout } = useAuth();
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get("preview") === "1" && !user;
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [previewLeads, setPreviewLeads] = useState<PreviewLead[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [county, setCounty] = useState("");
+  const [grade, setGrade] = useState("");
+  const [sortBy, setSortBy] = useState<"surplus" | "newest" | "grade">("surplus");
   const [loading, setLoading] = useState(true);
+  const [verifyCode, setVerifyCode] = useState("");
+  const [verifySending, setVerifySending] = useState(false);
+  const [verifyMsg, setVerifyMsg] = useState("");
 
   useEffect(() => {
+    if (isPreview) {
+      getPreviewLeads({ county: county || undefined, limit: 100 })
+        .then((res) => setPreviewLeads(res.leads))
+        .catch(() => {})
+        .finally(() => setLoading(false));
+      return;
+    }
     Promise.all([
-      getLeads({ county: county || undefined, limit: 100 }),
+      getLeads({ county: county || undefined, grade: grade || undefined, limit: 100 }),
       getStats(),
     ])
       .then(([leadsRes, statsRes]) => {
@@ -115,15 +162,25 @@ export default function Dashboard() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [county]);
+  }, [county, grade, isPreview]);
+
+  // Client-side sorting
+  const gradeOrder: Record<string, number> = { GOLD: 0, SILVER: 1, BRONZE: 2 };
+  function sortLeads(arr: Lead[]): Lead[] {
+    return [...arr].sort((a, b) => {
+      if (sortBy === "surplus") return b.estimated_surplus - a.estimated_surplus;
+      if (sortBy === "newest") return (b.sale_date || "").localeCompare(a.sale_date || "");
+      return (gradeOrder[a.data_grade] ?? 9) - (gradeOrder[b.data_grade] ?? 9);
+    });
+  }
 
   // Split leads into buckets
-  const actionable = leads.filter(
+  const actionable = sortLeads(leads.filter(
     (l) => l.restriction_status !== "RESTRICTED"
-  );
-  const watchlist = leads.filter(
+  ));
+  const watchlist = sortLeads(leads.filter(
     (l) => l.restriction_status === "RESTRICTED"
-  );
+  ));
 
   return (
     <div className="dashboard">
@@ -134,7 +191,9 @@ export default function Dashboard() {
         </Link>
         <div className="dash-status">
           <span className="blink-dot">●</span>
-          SYSTEM LIVE
+          <a href="/health" target="_blank" rel="noopener noreferrer" style={{ color: "inherit", textDecoration: "none" }}>
+            SYSTEM LIVE
+          </a>
         </div>
         <div className="dash-user">
           {user ? (
@@ -149,8 +208,62 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {/* Email Verification Banner */}
+      {user && !user.email_verified && (
+        <div className="verify-banner">
+          <strong>Verify your email to unlock leads</strong>
+          <div className="verify-row">
+            <input
+              type="text"
+              placeholder="Enter verification code"
+              value={verifyCode}
+              onChange={(e) => setVerifyCode(e.target.value)}
+              className="verify-input"
+            />
+            <button
+              className="btn-outline-sm"
+              disabled={!verifyCode || verifySending}
+              onClick={async () => {
+                setVerifySending(true);
+                setVerifyMsg("");
+                try {
+                  await verifyEmail(verifyCode);
+                  setVerifyMsg("Email verified!");
+                  window.location.reload();
+                } catch {
+                  setVerifyMsg("Invalid code. Try again.");
+                } finally {
+                  setVerifySending(false);
+                }
+              }}
+            >
+              VERIFY
+            </button>
+            <button
+              className="btn-outline-sm"
+              disabled={verifySending}
+              onClick={async () => {
+                setVerifySending(true);
+                setVerifyMsg("");
+                try {
+                  await sendVerification();
+                  setVerifyMsg("Verification email sent!");
+                } catch {
+                  setVerifyMsg("Failed to send. Try again.");
+                } finally {
+                  setVerifySending(false);
+                }
+              }}
+            >
+              RESEND CODE
+            </button>
+          </div>
+          {verifyMsg && <p className="verify-msg">{verifyMsg}</p>}
+        </div>
+      )}
+
       {/* Stats Row */}
-      {stats && (
+      {stats && !isPreview && (
         <div className="stats-row">
           <div className="stat-pill">
             <span className="stat-value">{stats.total_assets}</span>
@@ -181,13 +294,60 @@ export default function Dashboard() {
             <option key={c} value={c}>{c.toUpperCase()}</option>
           ))}
         </select>
+
+        <div className="grade-filters">
+          {["", "GOLD", "SILVER", "BRONZE"].map((g) => (
+            <button
+              key={g || "ALL"}
+              className={`grade-filter-btn ${grade === g ? "active" : ""}`}
+              onClick={() => { setGrade(g); setLoading(true); }}
+            >
+              {g || "ALL"}
+            </button>
+          ))}
+        </div>
+
+        <select
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value as "surplus" | "newest" | "grade")}
+          className="filter-select"
+        >
+          <option value="surplus">Highest Surplus</option>
+          <option value="newest">Newest Sale</option>
+          <option value="grade">Best Grade</option>
+        </select>
       </div>
+
+      {/* Preview Banner */}
+      {isPreview && (
+        <div className="preview-banner">
+          Viewing Preview — <Link to="/register">Sign Up for Full Access</Link>
+        </div>
+      )}
 
       {loading ? (
         <div className="center-content">
           <div className="loader-ring"></div>
           <p className="processing-text">LOADING INTELLIGENCE...</p>
         </div>
+      ) : isPreview ? (
+        previewLeads.length === 0 ? (
+          <div className="center-content">
+            <p style={{ color: "#64748b" }}>No preview leads available.</p>
+          </div>
+        ) : (
+          <div className="bucket-section">
+            <div className="bucket-header actionable">
+              <h2>PREVIEW — SURPLUS ASSETS</h2>
+              <span className="bucket-count">{previewLeads.length} leads</span>
+            </div>
+            <div className="vault-grid">
+              {previewLeads.map((lead) => (
+                <PreviewCard key={lead.preview_key} lead={lead} />
+              ))}
+            </div>
+          </div>
+        )
       ) : leads.length === 0 ? (
         <div className="center-content">
           <p style={{ color: "#64748b" }}>No leads found for selected filters.</p>
@@ -198,7 +358,7 @@ export default function Dashboard() {
           {actionable.length > 0 && (
             <div className="bucket-section">
               <div className="bucket-header actionable">
-                <h2>ACTIONABLE NOW</h2>
+                <h2>ESCROW ENDED — ACTIONABLE</h2>
                 <span className="bucket-count">{actionable.length} leads</span>
                 <p className="bucket-desc">
                   Sold &gt; 6 months ago. C.R.S. § 38-38-111 restriction period has passed.
@@ -217,11 +377,11 @@ export default function Dashboard() {
           {watchlist.length > 0 && (
             <div className="bucket-section">
               <div className="bucket-header watchlist">
-                <h2>WATCHLIST — RESTRICTION PERIOD</h2>
+                <h2>DATA ACCESS ONLY — RESTRICTION PERIOD</h2>
                 <span className="bucket-count">{watchlist.length} leads</span>
                 <p className="bucket-desc">
                   Sold &lt; 6 months ago. C.R.S. § 38-38-111(2.5)(c): Compensation agreements
-                  are prohibited while funds are held by the Public Trustee. Monitor these assets.
+                  are void and unenforceable while funds are held by the Public Trustee.
                 </p>
               </div>
               <div className="vault-grid">
