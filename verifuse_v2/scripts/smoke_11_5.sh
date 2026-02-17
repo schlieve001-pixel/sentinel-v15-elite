@@ -37,7 +37,8 @@ check_absent() {
 check_header() {
   local desc="$1" url="$2" header="$3" expect="$4"
   local val
-  val=$(curl -sI "$url" 2>/dev/null | grep -i "^$header:" | head -1 || echo "")
+  # Use -D- with GET (not -I/HEAD) so GET-only endpoints don't 405
+  val=$(curl -s -D- -o /dev/null "$url" 2>/dev/null | grep -i "^$header:" | head -1 || echo "")
   if echo "$val" | grep -qi "$expect"; then
     echo "  PASS: $desc"
     PASS=$((PASS + 1))
