@@ -197,6 +197,7 @@ export interface UnlockResponse {
   data_grade: string | null;
   confidence_score: number | null;
   motion_pdf: string | null;
+  credits_remaining?: number;
 }
 
 export function unlockLead(assetId: string): Promise<UnlockResponse> {
