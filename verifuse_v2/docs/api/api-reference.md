@@ -34,6 +34,44 @@ Public health check endpoint.
 
 ---
 
+## GET /api/preview/leads (Sprint 11.5)
+
+Preview leads for unauthenticated users. Returns HMAC-signed preview keys instead of asset IDs. No PII is exposed.
+
+**Rate Limit:** 100/minute
+**Auth:** None
+
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `county` | string | null | Filter by county name |
+| `limit` | int | 50 | Results per page (1-200) |
+| `offset` | int | 0 | Pagination offset |
+
+**Response 200:**
+```json
+{
+    "count": 3,
+    "leads": [
+        {
+            "preview_key": "hmac_abc123...",
+            "county": "Denver",
+            "sale_date": "2025-06-15",
+            "data_grade": "GOLD",
+            "confidence_score": 0.95,
+            "estimated_surplus": 125000.0,
+            "restriction_status": "ACTIONABLE",
+            "days_until_actionable": null
+        }
+    ]
+}
+```
+
+**Fields explicitly excluded:** `asset_id`, `case_number`, `owner_name`, `property_address`, `owner_img`
+
+---
+
 ## GET /api/leads
 
 List leads with pagination and filters. Returns SafeAsset projections (no PII).
@@ -49,6 +87,8 @@ List leads with pagination and filters. Returns SafeAsset projections (no PII).
 | `min_surplus` | float | 0.0 | Minimum surplus amount |
 | `grade` | string | null | Filter by data grade (GOLD, SILVER, BRONZE) |
 | `include_expired` | bool | false | Include expired leads |
+| `include_zombies` | bool | false | Include zombie leads |
+| `include_reject` | bool | false | Include rejected leads (admin only) |
 | `limit` | int | 50 | Results per page (1-200) |
 | `offset` | int | 0 | Pagination offset |
 
@@ -184,6 +224,8 @@ Authorization: Bearer <jwt_token>
 - Credit deduction is atomic (`BEGIN IMMEDIATE` transaction)
 - Re-unlocking an already-unlocked lead returns the data without deducting a credit
 - Admin users bypass all gates
+- Both unlock endpoints return `credits_remaining` in the response (Sprint 11.5)
+- Both unlock endpoints enforce email verification — returns 403 with `"Please verify your email before unlocking leads."` if not verified (Sprint 11.5)
 
 ---
 
@@ -236,6 +278,8 @@ Public dashboard statistics.
     "with_surplus": 42,
     "gold_grade": 15,
     "total_claimable_surplus": 2148135.00,
+    "verified_pipeline": 120,
+    "total_raw_volume": 450,
     "counties": [
         {"county": "Denver", "cnt": 45, "total": 890123.00},
         {"county": "Adams", "cnt": 32, "total": 567890.00}
@@ -362,9 +406,38 @@ Mark a lead as attorney-packet-ready. Requires provenance and data completeness.
     "tier": "recon",
     "credits_remaining": 4,
     "attorney_status": "VERIFIED",
-    "is_admin": false
+    "is_admin": false,
+    "email_verified": true
 }
 ```
+
+### POST /api/auth/send-verification (Sprint 11.5)
+
+Send a verification code to the user's registered email.
+
+**Auth:** JWT Bearer token
+
+**Response 200:**
+```json
+{"status": "ok"}
+```
+
+### POST /api/auth/verify-email (Sprint 11.5)
+
+Verify email with a 6-digit code.
+
+**Auth:** JWT Bearer token
+**Body:**
+```json
+{"code": "123456"}
+```
+
+**Response 200:**
+```json
+{"status": "ok"}
+```
+
+**Response 400:** `{"detail": "Invalid or expired verification code."}`
 
 ---
 
@@ -458,6 +531,29 @@ All quarantined leads.
 ### GET /api/admin/users
 
 All user accounts (no password hashes).
+
+---
+
+### GET /api/admin/coverage (Sprint 11.5)
+
+Pipeline coverage report showing scraper status per county.
+
+**Auth:** API key (x-verifuse-api-key header)
+
+**Response 200:**
+```json
+{
+    "counties": [...],
+    "total_counties": 64,
+    "active_counties": 6
+}
+```
+
+---
+
+## Stripe Guard (Sprint 11.5)
+
+`POST /api/billing/checkout` returns 503 if `STRIPE_SECRET_KEY` environment variable is not set, preventing silent billing failures.
 
 ---
 
