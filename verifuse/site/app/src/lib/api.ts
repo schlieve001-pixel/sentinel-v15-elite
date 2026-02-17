@@ -74,6 +74,37 @@ export function getMe(): Promise<AuthUser> {
   return request("/api/auth/me");
 }
 
+// ── Preview ──────────────────────────────────────────────────────
+
+export interface PreviewLead {
+  preview_key: string;
+  county: string;
+  sale_date: string | null;
+  data_grade: string;
+  confidence_score: number;
+  estimated_surplus: number;
+  restriction_status: "RESTRICTED" | "WATCHLIST" | "ACTIONABLE" | "EXPIRED" | "UNKNOWN";
+  days_until_actionable: number | null;
+}
+
+export interface PreviewLeadsResponse {
+  count: number;
+  leads: PreviewLead[];
+}
+
+export function getPreviewLeads(params?: {
+  county?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PreviewLeadsResponse> {
+  const qs = new URLSearchParams();
+  if (params?.county) qs.set("county", params.county);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const q = qs.toString();
+  return request(`/api/preview/leads${q ? `?${q}` : ""}`);
+}
+
 // ── Leads ─────────────────────────────────────────────────────────
 
 export interface Lead {

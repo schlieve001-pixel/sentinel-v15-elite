@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { getLeads, getStats, getDossierUrl, type Lead, type Stats } from "../lib/api";
+import { Link, useSearchParams } from "react-router-dom";
+import { getLeads, getStats, getDossierUrl, getPreviewLeads, type Lead, type Stats, type PreviewLead } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 const COUNTIES = ["", "Denver", "Jefferson", "Arapahoe", "Adams", "El Paso", "Douglas"];
@@ -97,14 +97,58 @@ function LeadCard({ lead }: { lead: Lead }) {
   );
 }
 
+function PreviewCard({ lead }: { lead: PreviewLead }) {
+  return (
+    <div className="lead-card preview-card">
+      <div className="card-header">
+        <span className="county-badge">{lead.county}</span>
+        {lead.restriction_status === "RESTRICTED" && lead.days_until_actionable != null && (
+          <span className="restriction-badge">
+            RESTRICTED — {lead.days_until_actionable} DAYS
+          </span>
+        )}
+      </div>
+      <div className="card-value">
+        {formatCurrency(lead.estimated_surplus)}
+      </div>
+      <div className="card-meta">
+        <span className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`}>
+          {lead.data_grade}
+        </span>
+        <span className="confidence-pill">
+          {Math.round((lead.confidence_score || 0) * 100)}%
+        </span>
+        {lead.sale_date && (
+          <span className="sale-date-pill">Sale: {lead.sale_date}</span>
+        )}
+      </div>
+      <div className="card-actions stacked">
+        <Link to="/register" className="decrypt-btn-sota">
+          Sign Up to Unlock
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { user, logout } = useAuth();
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get("preview") === "1" && !user;
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [previewLeads, setPreviewLeads] = useState<PreviewLead[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [county, setCounty] = useState("");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (isPreview) {
+      getPreviewLeads({ county: county || undefined, limit: 100 })
+        .then((res) => setPreviewLeads(res.leads))
+        .catch(() => {})
+        .finally(() => setLoading(false));
+      return;
+    }
     Promise.all([
       getLeads({ county: county || undefined, limit: 100 }),
       getStats(),
@@ -115,7 +159,7 @@ export default function Dashboard() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [county]);
+  }, [county, isPreview]);
 
   // Split leads into buckets
   const actionable = leads.filter(
@@ -150,7 +194,7 @@ export default function Dashboard() {
       </header>
 
       {/* Stats Row */}
-      {stats && (
+      {stats && !isPreview && (
         <div className="stats-row">
           <div className="stat-pill">
             <span className="stat-value">{stats.total_assets}</span>
@@ -183,11 +227,36 @@ export default function Dashboard() {
         </select>
       </div>
 
+      {/* Preview Banner */}
+      {isPreview && (
+        <div className="preview-banner">
+          Viewing Preview — <Link to="/register">Sign Up for Full Access</Link>
+        </div>
+      )}
+
       {loading ? (
         <div className="center-content">
           <div className="loader-ring"></div>
           <p className="processing-text">LOADING INTELLIGENCE...</p>
         </div>
+      ) : isPreview ? (
+        previewLeads.length === 0 ? (
+          <div className="center-content">
+            <p style={{ color: "#64748b" }}>No preview leads available.</p>
+          </div>
+        ) : (
+          <div className="bucket-section">
+            <div className="bucket-header actionable">
+              <h2>PREVIEW — SURPLUS ASSETS</h2>
+              <span className="bucket-count">{previewLeads.length} leads</span>
+            </div>
+            <div className="vault-grid">
+              {previewLeads.map((lead) => (
+                <PreviewCard key={lead.preview_key} lead={lead} />
+              ))}
+            </div>
+          </div>
+        )
       ) : leads.length === 0 ? (
         <div className="center-content">
           <p style={{ color: "#64748b" }}>No leads found for selected filters.</p>

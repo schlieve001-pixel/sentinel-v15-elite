@@ -51,6 +51,12 @@ export default function Landing() {
 
   return (
     <div className="landing">
+      {/* Top Nav */}
+      <div className="landing-topnav">
+        <span className="topnav-brand">VERIFUSE <span className="text-green">// INTELLIGENCE</span></span>
+        <Link to="/login" className="btn-outline-sm">LOGIN</Link>
+      </div>
+
       {/* Hero */}
       <section className="landing-hero">
         <div className="hero-badge">COLORADO SURPLUS INTELLIGENCE</div>
@@ -73,8 +79,8 @@ export default function Landing() {
           <Link to="/register" className="btn-primary">
             START FREE TRIAL
           </Link>
-          <Link to="/dashboard" className="btn-outline">
-            BROWSE ASSETS
+          <Link to="/dashboard?preview=1" className="btn-outline">
+            Preview the Vault
           </Link>
         </div>
 
