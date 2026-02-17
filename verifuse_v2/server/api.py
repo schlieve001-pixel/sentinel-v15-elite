@@ -10,14 +10,21 @@ Gates:
   EXPIRED    → locked, cannot unlock
 
 Atomic: credit deduction uses BEGIN IMMEDIATE.
+
+Sprint 11.5: Preview endpoint, zombie/reject filters, email verification,
+mobile-safe download headers, Stripe guard.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import logging
 import os
+import random
 import sqlite3
+import string
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -42,6 +49,20 @@ if not VERIFUSE_DB_PATH:
 # ── API Key for machine-to-machine auth (admin/scraper endpoints) ────
 VERIFUSE_API_KEY = os.environ.get("VERIFUSE_API_KEY", "")
 
+# ── Stripe guard ─────────────────────────────────────────────────────
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY")
+
+# ── HMAC Secret for preview_key (fail-fast) ─────────────────────────
+_PREVIEW_HMAC_SECRET = os.environ.get("PREVIEW_HMAC_SECRET") or os.environ.get("VERIFUSE_JWT_SECRET")
+if not _PREVIEW_HMAC_SECRET:
+    import sys
+    logging.basicConfig(level=logging.CRITICAL)
+    logging.getLogger(__name__).critical(
+        "FATAL: No PREVIEW_HMAC_SECRET or VERIFUSE_JWT_SECRET set. "
+        "Preview keys will be unstable across deploys."
+    )
+    raise RuntimeError("HMAC secret required — set PREVIEW_HMAC_SECRET or VERIFUSE_JWT_SECRET")
+
 log = logging.getLogger(__name__)
 
 # ── Database connection (strict VERIFUSE_DB_PATH) ───────────────────
@@ -57,19 +78,33 @@ def _get_conn() -> sqlite3.Connection:
 # ── SafeAsset model (NULL-safe: every numeric field is Optional) ────
 
 class SafeAsset(BaseModel):
-    """Public projection. All floats are Optional = None (Black Screen fix)."""
-    id: Optional[str] = None
+    """Public projection. All floats are Optional = None (Black Screen fix).
+
+    Field names MUST match the frontend Lead interface in api.ts.
+    """
+    asset_id: Optional[str] = None
     county: Optional[str] = None
+    state: Optional[str] = "CO"
     case_number: Optional[str] = None
-    status: Optional[str] = None
-    surplus_estimate: Optional[float] = None
+    asset_type: Optional[str] = "FORECLOSURE_SURPLUS"
+    estimated_surplus: Optional[float] = None
+    surplus_verified: Optional[bool] = None
     data_grade: Optional[str] = None
-    confidence_score: Optional[float] = None
+    record_class: Optional[str] = None
     sale_date: Optional[str] = None
     claim_deadline: Optional[str] = None
-    days_remaining: Optional[int] = None
-    city_hint: Optional[str] = None
-    surplus_verified: Optional[bool] = None
+    days_to_claim: Optional[int] = None
+    deadline_passed: Optional[bool] = None
+    # C.R.S. § 38-38-111 restriction period
+    restriction_status: Optional[str] = None
+    restriction_end_date: Optional[str] = None
+    blackout_end_date: Optional[str] = None
+    days_until_actionable: Optional[int] = None
+    address_hint: Optional[str] = None
+    owner_img: Optional[str] = None
+    completeness_score: Optional[float] = None
+    confidence_score: Optional[float] = None
+    data_age_days: Optional[int] = None
 
 
 class FullAsset(SafeAsset):
@@ -78,8 +113,25 @@ class FullAsset(SafeAsset):
     property_address: Optional[str] = None
     winning_bid: Optional[float] = None
     total_debt: Optional[float] = None
+    total_indebtedness: Optional[float] = None
     surplus_amount: Optional[float] = None
     overbid_amount: Optional[float] = None
+    days_remaining: Optional[int] = None
+    statute_window: Optional[str] = None
+    recorder_link: Optional[str] = None
+    motion_pdf: Optional[str] = None
+
+
+class PreviewLead(BaseModel):
+    """Public preview — ZERO PII, ZERO internal IDs. Explicit SELECT (no SELECT *)."""
+    preview_key: str  # HMAC hash for React key ONLY — not usable for lookups
+    county: Optional[str] = None
+    sale_date: Optional[str] = None  # YYYY-MM only (anti-triangulation)
+    data_grade: Optional[str] = None
+    confidence_score: Optional[float] = None
+    estimated_surplus: Optional[float] = None  # COALESCED + ROUND(x,2) — exact to the penny
+    restriction_status: Optional[str] = None
+    days_until_actionable: Optional[int] = None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -158,30 +210,70 @@ def _row_to_safe(row: dict) -> dict:
     debt = _safe_float(row.get("total_debt")) or 0.0
     conf = _safe_float(row.get("confidence_score")) or 0.0
     status = _compute_status(row)
+    today = datetime.now(timezone.utc).date()
 
-    days_left = None
+    # Claim deadline tracking
+    days_to_claim = None
+    deadline_passed = None
     deadline = row.get("claim_deadline")
     if deadline:
         try:
-            days_left = (date.fromisoformat(deadline) - datetime.now(timezone.utc).date()).days
+            dl = date.fromisoformat(deadline)
+            days_to_claim = (dl - today).days
+            deadline_passed = days_to_claim < 0
+        except (ValueError, TypeError):
+            pass
+
+    # Restriction period tracking
+    restriction_end = None
+    days_until_actionable = None
+    blackout_end = None
+    sale = row.get("sale_date")
+    if sale:
+        restriction_end = _compute_restriction_end(sale)
+        if restriction_end:
+            days_until_actionable = (restriction_end - today).days if restriction_end > today else 0
+            # Blackout: 2 years after transfer to State Treasurer (C.R.S. § 38-13-1304)
+            try:
+                blackout_end = restriction_end + timedelta(days=730)
+            except Exception:
+                pass
+
+    # Data age
+    data_age_days = None
+    updated = row.get("updated_at")
+    if updated:
+        try:
+            updated_dt = date.fromisoformat(str(updated)[:10])
+            data_age_days = (today - updated_dt).days
         except (ValueError, TypeError):
             pass
 
     verified = bid > 0 and debt > 0 and conf >= 0.7
 
     return SafeAsset(
-        id=row.get("id"),
+        asset_id=row.get("id"),
         county=row.get("county"),
+        state="CO",
         case_number=row.get("case_number"),
-        status=status,
-        surplus_estimate=_round_surplus(surplus),
-        data_grade=row.get("data_grade"),
-        confidence_score=round(conf, 2) if conf else None,
-        sale_date=row.get("sale_date"),
-        claim_deadline=deadline,
-        days_remaining=days_left,
-        city_hint=_extract_city(row.get("property_address"), row.get("county")),
+        asset_type="FORECLOSURE_SURPLUS",
+        estimated_surplus=_round_surplus(surplus),
         surplus_verified=verified,
+        data_grade=row.get("data_grade"),
+        record_class=row.get("record_class"),
+        sale_date=sale,
+        claim_deadline=deadline,
+        days_to_claim=days_to_claim,
+        deadline_passed=deadline_passed,
+        restriction_status=status,
+        restriction_end_date=restriction_end.isoformat() if restriction_end else None,
+        blackout_end_date=blackout_end.isoformat() if blackout_end else None,
+        days_until_actionable=max(0, days_until_actionable) if days_until_actionable is not None else None,
+        address_hint=_extract_city(row.get("property_address"), row.get("county")),
+        owner_img=None,
+        completeness_score=_safe_float(row.get("completeness_score")),
+        confidence_score=round(conf, 2) if conf else None,
+        data_age_days=data_age_days,
     ).model_dump()
 
 
@@ -193,10 +285,56 @@ def _row_to_full(row: dict) -> dict:
         "property_address": row.get("property_address"),
         "winning_bid": _safe_float(row.get("winning_bid")),
         "total_debt": _safe_float(row.get("total_debt")),
+        "total_indebtedness": _safe_float(row.get("total_debt")),
         "surplus_amount": _safe_float(row.get("surplus_amount")),
         "overbid_amount": _safe_float(row.get("overbid_amount")),
+        "recorder_link": row.get("recorder_link"),
+        "motion_pdf": row.get("motion_pdf"),
     })
     return safe
+
+
+def _row_to_preview(row: dict) -> dict:
+    """Convert a leads row to PreviewLead dict. ZERO PII, ZERO internal IDs."""
+    county = row.get("county")
+    sale_date_raw = row.get("sale_date")
+    data_grade = row.get("data_grade")
+    confidence = _safe_float(row.get("confidence_score"))
+    surplus = _safe_float(row.get("estimated_surplus")) or 0.0
+
+    # Truncate sale_date to YYYY-MM (anti-triangulation)
+    sale_date_display = (sale_date_raw or "")[:7] if sale_date_raw else None
+
+    # HMAC preview_key — canonicalized inputs
+    county_canon = (county or "").upper().strip()
+    sale_canon = (sale_date_raw or "")[:7]
+    surplus_canon = f"{surplus:.2f}"
+    grade_canon = (data_grade or "").upper()
+    conf_canon = "" if confidence is None else f"{confidence:.3f}"
+    hmac_input = f"{county_canon}|{sale_canon}|{surplus_canon}|{grade_canon}|{conf_canon}"
+    preview_key = hmac.new(
+        _PREVIEW_HMAC_SECRET.encode(), hmac_input.encode(), hashlib.sha256
+    ).hexdigest()[:16]
+
+    # Compute status + days
+    status = _compute_status(row)
+    days_until_actionable = None
+    if sale_date_raw:
+        restriction_end = _compute_restriction_end(sale_date_raw)
+        if restriction_end:
+            today = datetime.now(timezone.utc).date()
+            days_until_actionable = max(0, (restriction_end - today).days) if restriction_end > today else 0
+
+    return PreviewLead(
+        preview_key=preview_key,
+        county=county,
+        sale_date=sale_date_display,
+        data_grade=data_grade,
+        confidence_score=round(confidence, 2) if confidence else None,
+        estimated_surplus=round(surplus, 2),
+        restriction_status=status,
+        days_until_actionable=days_until_actionable,
+    ).model_dump()
 
 
 # ── Auth helpers (inline, using VERIFUSE_DB_PATH) ───────────────────
@@ -248,6 +386,28 @@ def _require_api_key(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Invalid or missing API key.")
 
 
+def _require_admin_or_api_key(request: Request) -> None:
+    """Check API key OR JWT admin flag. For admin endpoints that accept either."""
+    # Try API key first
+    key = request.headers.get("x-verifuse-api-key", "")
+    if VERIFUSE_API_KEY and key == VERIFUSE_API_KEY:
+        return
+    # Try JWT admin
+    user = _get_user_from_request(request)
+    if user and _is_admin(user):
+        return
+    raise HTTPException(status_code=403, detail="Admin access required.")
+
+
+def _check_email_verified(user: dict) -> None:
+    """Check email verification. Raises 403 if not verified and not admin."""
+    if not user.get("email_verified") and not _is_admin(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your email before unlocking leads.",
+        )
+
+
 # ── Rate Limiter ────────────────────────────────────────────────────
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
@@ -256,8 +416,8 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
 app = FastAPI(
     title="VeriFuse V2 — Titanium API",
-    version="4.0.0",
-    description="Colorado Surplus Intelligence Platform",
+    version="4.1.0",
+    description="Colorado Surplus Intelligence Platform — Sprint 11.5",
 )
 
 app.state.limiter = limiter
@@ -272,6 +432,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "x-verifuse-api-key"],
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -287,12 +448,20 @@ UNLOCK_DISCLAIMER = (
     "during the six calendar month holding period."
 )
 
+# ── Preview SQL setup (dynamic column detection) ────────────────────
+# Module-level cache — populated at startup
+_LEADS_COLUMNS: set[str] = set()
+_PREVIEW_SELECT = ""
+_EXPIRED_FILTER = ""
+
 
 # ── Startup ─────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup():
-    """Log DB identity on boot. NO migrations — migrations are manual only."""
+    """Log DB identity on boot + detect lead columns for preview SQL."""
+    global _LEADS_COLUMNS, _PREVIEW_SELECT, _EXPIRED_FILTER
+
     db_path = Path(VERIFUSE_DB_PATH)
     inode = "N/A"
     sha = "N/A"
@@ -304,13 +473,40 @@ async def startup():
         conn = _get_conn()
         try:
             rows = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+
+            # Detect columns
+            col_rows = conn.execute("PRAGMA table_info(leads)").fetchall()
+            _LEADS_COLUMNS = {r[1] for r in col_rows}
         finally:
             conn.close()
     except Exception as e:
         log.warning("Startup DB check: %s", e)
+
+    # Build dynamic preview SELECT
+    claim_deadline_expr = "claim_deadline" if "claim_deadline" in _LEADS_COLUMNS else "NULL AS claim_deadline"
+    statute_status_expr = "statute_window_status" if "statute_window_status" in _LEADS_COLUMNS else "NULL AS statute_window_status"
+    _PREVIEW_SELECT = (
+        f"SELECT county, sale_date, data_grade, confidence_score, "
+        f"ROUND(COALESCE(estimated_surplus, surplus_amount, 0), 2) as estimated_surplus, "
+        f"{claim_deadline_expr}, {statute_status_expr} "
+        f"FROM leads"
+    )
+
+    # Build expired filter
+    if "statute_window_status" in _LEADS_COLUMNS:
+        _EXPIRED_FILTER = " AND (statute_window_status IS NULL OR statute_window_status != 'EXPIRED')"
+    elif "claim_deadline" in _LEADS_COLUMNS:
+        _EXPIRED_FILTER = (
+            " AND (claim_deadline IS NULL OR TRIM(claim_deadline) = '' "
+            "OR date(NULLIF(TRIM(claim_deadline), '')) IS NULL "
+            "OR date(NULLIF(TRIM(claim_deadline), '')) >= date('now'))"
+        )
+    else:
+        _EXPIRED_FILTER = ""
+
     log.info(
-        "Titanium API v4 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s",
-        VERIFUSE_DB_PATH, inode, sha, rows,
+        "Titanium API v4.1 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d",
+        VERIFUSE_DB_PATH, inode, sha, rows, len(_LEADS_COLUMNS),
     )
 
 
@@ -330,7 +526,7 @@ async def health():
         scoreboard_rows = conn.execute("""
             SELECT data_grade,
                    COUNT(*) as lead_count,
-                   COALESCE(SUM(surplus_amount), 0) as verified_surplus
+                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as verified_surplus
             FROM leads
             GROUP BY data_grade
             ORDER BY verified_surplus DESC
@@ -355,7 +551,7 @@ async def health():
 
         # Verified total
         verified_total = conn.execute(
-            "SELECT COALESCE(SUM(surplus_amount), 0) FROM leads WHERE surplus_amount > 0"
+            "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0"
         ).fetchone()[0]
 
     finally:
@@ -363,7 +559,7 @@ async def health():
 
     return {
         "status": "ok",
-        "engine": "titanium_api_v4",
+        "engine": "titanium_api_v4.1",
         "db": VERIFUSE_DB_PATH,
         "wal_pages": wal_pages,
         "total_leads": total,
@@ -371,6 +567,58 @@ async def health():
         "quarantined": quarantined,
         "verified_total": round(verified_total, 2),
         "legal_disclaimer": LEGAL_DISCLAIMER,
+    }
+
+
+# ── GET /api/preview/leads — Zero-PII public preview ────────────────
+
+@app.get("/api/preview/leads")
+@limiter.limit("30/minute")
+async def preview_leads(
+    request: Request,
+    county: Optional[str] = Query(None),
+    grade: Optional[str] = Query(None),
+    limit: int = Query(25, ge=1, le=50),
+    offset: int = Query(0, ge=0, le=500),
+):
+    """Public preview — no auth required. ZERO PII, ZERO internal IDs."""
+    conn = _get_conn()
+    try:
+        where = " WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 100"
+        where += " AND data_grade != 'REJECT'"
+        where += _EXPIRED_FILTER
+        params: list = []
+
+        if county:
+            where += " AND county = ?"
+            params.append(county)
+        if grade:
+            where += " AND data_grade = ?"
+            params.append(grade)
+
+        # Total count (independent query for stable pagination)
+        count_q = f"SELECT COUNT(*) FROM leads{where}"
+        total = conn.execute(count_q, params).fetchone()[0]
+
+        # Data query
+        order = " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC"
+        data_q = f"{_PREVIEW_SELECT}{where}{order} LIMIT ? OFFSET ?"
+        rows = conn.execute(data_q, params + [limit, offset]).fetchall()
+    finally:
+        conn.close()
+
+    leads = []
+    for row in rows:
+        try:
+            leads.append(_row_to_preview(dict(row)))
+        except Exception as e:
+            log.warning("Preview projection error: %s", e)
+            continue
+
+    return {
+        "total": total,
+        "count": len(leads),
+        "leads": leads,
     }
 
 
@@ -384,23 +632,33 @@ async def get_leads(
     min_surplus: float = Query(0.0, ge=0),
     grade: Optional[str] = Query(None),
     include_expired: bool = Query(False),
+    include_zombies: bool = Query(False),
+    include_reject: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     """Return paginated leads as SafeAsset. Handles NULLs gracefully.
 
-    EXPIRED leads hidden by default. Pass ?include_expired=true to show them.
+    Zombies (surplus<=100), REJECT, and EXPIRED hidden by default.
     """
+    # Check if user is admin (for reject visibility)
+    user = _get_user_from_request(request)
+    is_admin_user = user and _is_admin(user)
+
     conn = _get_conn()
     try:
         query = "SELECT * FROM leads WHERE 1=1"
         params: list = []
 
+        if not include_zombies:
+            query += " AND COALESCE(estimated_surplus, surplus_amount, 0) > 100"
+        if not include_reject or not is_admin_user:
+            query += " AND data_grade != 'REJECT'"
         if county:
             query += " AND county = ?"
             params.append(county)
         if min_surplus > 0:
-            query += " AND COALESCE(surplus_amount, estimated_surplus, 0) >= ?"
+            query += " AND COALESCE(estimated_surplus, surplus_amount, 0) >= ?"
             params.append(min_surplus)
         if grade:
             query += " AND data_grade = ?"
@@ -410,7 +668,7 @@ async def get_leads(
         count_q = query.replace("SELECT *", "SELECT COUNT(*)")
         total = conn.execute(count_q, params).fetchone()[0]
 
-        query += " ORDER BY COALESCE(surplus_amount, estimated_surplus, 0) DESC LIMIT ? OFFSET ?"
+        query += " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         rows = conn.execute(query, params).fetchall()
@@ -422,7 +680,7 @@ async def get_leads(
         try:
             safe = _row_to_safe(dict(row))
             # Filter out EXPIRED unless explicitly requested
-            if not include_expired and safe.get("status") == "EXPIRED":
+            if not include_expired and safe.get("restriction_status") == "EXPIRED":
                 continue
             leads.append(safe)
         except Exception as e:
@@ -450,6 +708,7 @@ async def unlock_lead(lead_id: str, request: Request):
     EXPIRED: cannot unlock
     """
     user = _require_user(request)
+    _check_email_verified(user)
     now = datetime.now(timezone.utc).isoformat()
 
     # Admin bypass
@@ -461,7 +720,10 @@ async def unlock_lead(lead_id: str, request: Request):
             conn.close()
         if not row:
             raise HTTPException(status_code=404, detail="Lead not found.")
-        return _row_to_full(dict(row))
+        result = _row_to_full(dict(row))
+        result["ok"] = True
+        result["credits_remaining"] = -1
+        return result
 
     # Fetch lead
     conn = _get_conn()
@@ -498,6 +760,7 @@ async def unlock_lead(lead_id: str, request: Request):
 
     # ── Gate 3: Atomic credit deduction (BEGIN IMMEDIATE) ────────
     conn = _get_conn()
+    credits_after = 0
     try:
         conn.execute("BEGIN IMMEDIATE")
 
@@ -508,8 +771,17 @@ async def unlock_lead(lead_id: str, request: Request):
         ).fetchone()
 
         if existing:
+            # Already unlocked — return full asset with current credits
+            credits_row = conn.execute(
+                "SELECT credits_remaining FROM users WHERE user_id = ?",
+                [user["user_id"]],
+            ).fetchone()
+            credits_after = credits_row[0] if credits_row else 0
             conn.execute("COMMIT")
-            return _row_to_full(lead)
+            result = _row_to_full(lead)
+            result["ok"] = True
+            result["credits_remaining"] = credits_after
+            return result
 
         # Check credits
         credits = conn.execute(
@@ -555,6 +827,7 @@ async def unlock_lead(lead_id: str, request: Request):
         ])
 
         conn.execute("COMMIT")
+        credits_after = credits[0] - 1
 
     except HTTPException:
         raise
@@ -568,7 +841,10 @@ async def unlock_lead(lead_id: str, request: Request):
     finally:
         conn.close()
 
-    return _row_to_full(lead)
+    result = _row_to_full(lead)
+    result["ok"] = True
+    result["credits_remaining"] = credits_after
+    return result
 
 
 # ── POST /api/billing/upgrade — Tier upgrade + credit refill ────────
@@ -621,21 +897,38 @@ async def get_stats():
     try:
         total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
         with_surplus = conn.execute(
-            "SELECT COUNT(*) FROM leads WHERE COALESCE(surplus_amount, 0) > 1000"
+            "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 1000"
         ).fetchone()[0]
         gold_count = conn.execute(
             "SELECT COUNT(*) FROM leads WHERE data_grade = 'GOLD'"
         ).fetchone()[0]
         total_surplus = conn.execute(
-            "SELECT COALESCE(SUM(surplus_amount), 0) FROM leads WHERE surplus_amount > 0"
+            "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0"
         ).fetchone()[0]
         counties = conn.execute("""
             SELECT county, COUNT(*) as cnt,
-                   COALESCE(SUM(surplus_amount), 0) as total
+                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
             FROM leads
-            WHERE COALESCE(surplus_amount, 0) > 0
+            WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0
             GROUP BY county ORDER BY total DESC
         """).fetchall()
+
+        # Verified pipeline: GOLD+SILVER+BRONZE, surplus > 100, not expired
+        vp_row = conn.execute(f"""
+            SELECT COUNT(*) as cnt,
+                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
+            FROM leads
+            WHERE data_grade IN ('GOLD', 'SILVER', 'BRONZE')
+              AND COALESCE(estimated_surplus, surplus_amount, 0) > 100
+              {_EXPIRED_FILTER}
+        """).fetchone()
+
+        # Total raw volume: ALL leads
+        raw_row = conn.execute("""
+            SELECT COUNT(*) as cnt,
+                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
+            FROM leads
+        """).fetchone()
     finally:
         conn.close()
 
@@ -647,6 +940,14 @@ async def get_stats():
         "gold_grade": gold_count,
         "total_claimable_surplus": round(total_surplus, 2),
         "counties": [dict(r) for r in counties],
+        "verified_pipeline": {
+            "count": vp_row["cnt"],
+            "total_surplus": round(vp_row["total"], 2),
+        },
+        "total_raw_volume": {
+            "count": raw_row["cnt"],
+            "total_surplus": round(raw_row["total"], 2),
+        },
     }
 
 
@@ -708,7 +1009,101 @@ async def api_me(request: Request):
         "credits_remaining": user["credits_remaining"],
         "attorney_status": user.get("attorney_status", "NONE"),
         "is_admin": bool(user.get("is_admin", 0)),
+        "email_verified": bool(user.get("email_verified", 0)),
     }
+
+
+# ── Email Verification ──────────────────────────────────────────────
+
+@app.post("/api/auth/send-verification")
+@limiter.limit("3/minute")
+async def send_verification(request: Request):
+    """Send a 6-digit verification code to the user's email."""
+    user = _require_user(request)
+
+    code = "".join(random.choices(string.digits, k=6))
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET email_verify_code = ?, email_verify_sent_at = ? WHERE user_id = ?",
+            [code, now, user["user_id"]],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Send via SMTP if configured, otherwise log (dev mode)
+    smtp_host = os.environ.get("SMTP_HOST")
+    if smtp_host:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            msg = MIMEText(f"Your VeriFuse verification code is: {code}\n\nThis code expires in 10 minutes.")
+            msg["Subject"] = "VeriFuse Email Verification"
+            msg["From"] = os.environ.get("SMTP_FROM", "noreply@verifuse.tech")
+            msg["To"] = user["email"]
+            with smtplib.SMTP(smtp_host, int(os.environ.get("SMTP_PORT", 587))) as s:
+                s.starttls()
+                s.login(os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASS", ""))
+                s.send_message(msg)
+            log.info("Verification email sent to %s", user["email"])
+        except Exception as e:
+            log.error("SMTP send failed: %s", e)
+            raise HTTPException(status_code=500, detail="Failed to send verification email.")
+    else:
+        log.info("DEV MODE: Verification code for %s: %s", user["email"], code)
+
+    return {"ok": True, "message": "Verification code sent."}
+
+
+@app.post("/api/auth/verify-email")
+@limiter.limit("10/minute")
+async def verify_email(request: Request):
+    """Verify email with 6-digit code. Code expires after 10 minutes."""
+    user = _require_user(request)
+    body = await request.json()
+    code = body.get("code", "").strip()
+
+    if not code:
+        raise HTTPException(status_code=400, detail="Verification code required.")
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT email_verify_code, email_verify_sent_at FROM users WHERE user_id = ?",
+            [user["user_id"]],
+        ).fetchone()
+
+        if not row or not row[0]:
+            raise HTTPException(status_code=400, detail="No verification code pending. Request a new one.")
+
+        stored_code = row[0]
+        sent_at = row[1]
+
+        # Check expiry (10 minutes)
+        if sent_at:
+            try:
+                sent_dt = datetime.fromisoformat(sent_at)
+                if datetime.now(timezone.utc) - sent_dt > timedelta(minutes=10):
+                    raise HTTPException(status_code=400, detail="Code expired. Request a new one.")
+            except (ValueError, TypeError):
+                pass
+
+        if code != stored_code:
+            raise HTTPException(status_code=400, detail="Invalid code.")
+
+        # Success — verify and clear
+        conn.execute(
+            "UPDATE users SET email_verified = 1, email_verify_code = NULL, email_verify_sent_at = NULL WHERE user_id = ?",
+            [user["user_id"]],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"ok": True, "email_verified": True}
 
 
 # ── GET /api/counties — County breakdown ───────────────────────────
@@ -728,39 +1123,7 @@ async def get_lead_detail(lead_id: str, request: Request):
     if not row:
         raise HTTPException(status_code=404, detail="Lead not found.")
 
-    d = dict(row)
-    safe = _row_to_safe(d)
-    # Map SafeAsset fields to frontend Lead interface
-    surplus = _safe_float(d.get("surplus_amount")) or _safe_float(d.get("estimated_surplus")) or 0.0
-    status = _compute_status(d)
-
-    days_until = None
-    restriction_end = None
-    sale = d.get("sale_date")
-    if sale:
-        end_dt = _compute_restriction_end(sale)
-        if end_dt:
-            restriction_end = end_dt.isoformat()
-            days_until = (end_dt - datetime.now(timezone.utc).date()).days
-
-    return {
-        **safe,
-        "asset_id": d.get("id"),
-        "state": "CO",
-        "asset_type": "Foreclosure Surplus",
-        "estimated_surplus": surplus,
-        "record_class": d.get("data_grade", "BRONZE"),
-        "restriction_status": status,
-        "restriction_end_date": restriction_end,
-        "blackout_end_date": restriction_end,
-        "days_until_actionable": max(0, days_until) if days_until else None,
-        "days_to_claim": safe.get("days_remaining"),
-        "deadline_passed": (safe.get("days_remaining") or 0) < 0 if safe.get("days_remaining") is not None else None,
-        "address_hint": safe.get("city_hint", "CO"),
-        "owner_img": None,
-        "completeness_score": safe.get("confidence_score") or 0.0,
-        "data_age_days": None,
-    }
+    return _row_to_safe(dict(row))
 
 
 # ── POST /api/unlock/{id} — Frontend-compatible unlock ──────────
@@ -783,6 +1146,7 @@ async def unlock_restricted_lead(lead_id: str, request: Request):
     Body: { "disclaimer_accepted": true }
     """
     user = _require_user(request)
+    _check_email_verified(user)
     body = await request.json()
     if not body.get("disclaimer_accepted"):
         raise HTTPException(
@@ -809,11 +1173,11 @@ async def unlock_restricted_lead(lead_id: str, request: Request):
     return result
 
 
-# ── GET /api/dossier/{id} — PDF dossier download ────────────────
+# ── GET /api/dossier/{id} — Text dossier download ────────────────
 
 @app.get("/api/dossier/{lead_id}")
 async def get_dossier(lead_id: str, request: Request):
-    """Generate and serve a PDF dossier for an unlocked lead."""
+    """Generate and serve a text dossier for an unlocked lead."""
     from fastapi.responses import FileResponse
 
     user = _require_user(request)
@@ -845,16 +1209,9 @@ async def get_dossier(lead_id: str, request: Request):
                 detail="You must unlock this lead before downloading the dossier.",
             )
 
-    # Build dossier data and generate PDF
-    import tempfile
-    from pathlib import Path
-
     surplus = _safe_float(lead.get("surplus_amount")) or 0.0
     bid = _safe_float(lead.get("winning_bid")) or 0.0
-    status = _compute_status(lead)
-    is_restricted = status == "RESTRICTED"
 
-    # Generate simple text-based dossier (avoids fpdf dependency issues)
     dossier_dir = Path(__file__).resolve().parent.parent / "data" / "dossiers"
     dossier_dir.mkdir(parents=True, exist_ok=True)
     filename = f"dossier_{lead_id[:12]}.txt"
@@ -884,6 +1241,10 @@ async def get_dossier(lead_id: str, request: Request):
         str(filepath),
         media_type="text/plain",
         filename=filename,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -892,6 +1253,9 @@ async def get_dossier(lead_id: str, request: Request):
 @app.post("/api/billing/checkout")
 async def billing_checkout(request: Request):
     """Create a Stripe checkout session. Frontend calls POST /api/billing/checkout."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Billing not configured. Contact admin.")
+
     user = _require_user(request)
     body = await request.json()
     tier = body.get("tier", "").lower()
@@ -925,11 +1289,11 @@ async def get_counties():
     try:
         rows = conn.execute("""
             SELECT county, COUNT(*) as lead_count,
-                   COALESCE(SUM(surplus_amount), 0) as total_surplus,
-                   COALESCE(AVG(surplus_amount), 0) as avg_surplus,
-                   COALESCE(MAX(surplus_amount), 0) as max_surplus
+                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total_surplus,
+                   COALESCE(AVG(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as avg_surplus,
+                   COALESCE(MAX(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as max_surplus
             FROM leads
-            WHERE COALESCE(surplus_amount, estimated_surplus, 0) > 0
+            WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0
             GROUP BY county ORDER BY total_surplus DESC
         """).fetchall()
     finally:
@@ -941,7 +1305,7 @@ async def get_counties():
     }
 
 
-# ── Admin endpoints (require x-verifuse-api-key) ─────────────────────
+# ── Admin endpoints ──────────────────────────────────────────────────
 
 @app.get("/api/admin/leads")
 async def admin_leads(
@@ -953,7 +1317,7 @@ async def admin_leads(
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT * FROM leads ORDER BY surplus_amount DESC LIMIT ?", [limit]
+            "SELECT * FROM leads ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC LIMIT ?", [limit]
         ).fetchall()
     finally:
         conn.close()
@@ -984,11 +1348,20 @@ async def admin_users(request: Request):
     try:
         rows = conn.execute(
             "SELECT user_id, email, full_name, firm_name, tier, credits_remaining, "
-            "is_admin, is_active, created_at, last_login_at FROM users"
+            "is_admin, is_active, email_verified, created_at, last_login_at FROM users"
         ).fetchall()
     finally:
         conn.close()
     return {"count": len(rows), "users": [dict(r) for r in rows]}
+
+
+@app.get("/api/admin/coverage")
+async def admin_coverage(request: Request):
+    """Scraper coverage report (admin only). Returns JSON array."""
+    _require_admin_or_api_key(request)
+    from verifuse_v2.scripts.coverage_report import generate_report
+    report = generate_report()
+    return {"count": len(report), "counties": report}
 
 
 # ── Attorney Tool Endpoints ───────────────────────────────────────
@@ -1002,7 +1375,6 @@ def _check_lead_unlocked(user: dict, lead_id: str, doc_type: str = "UNKNOWN", re
             ip = request.client.host
 
     if _is_admin(user):
-        # Log admin access
         try:
             conn = _get_conn()
             conn.execute("""
@@ -1064,10 +1436,15 @@ async def get_dossier_docx(lead_id: str, request: Request):
         log.error("Dossier generation failed: %s", e)
         raise HTTPException(status_code=500, detail="Dossier generation failed.")
 
+    fname = Path(filepath).name
     return FileResponse(
         filepath,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=Path(filepath).name,
+        filename=fname,
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -1089,7 +1466,6 @@ async def generate_letter_endpoint(lead_id: str, request: Request):
             status_code=403,
             detail="Rule 7.3 letters require verified attorney status.",
         )
-    # Block Rule 7.3 Letter unless: verified_attorney=1 AND firm_name AND bar_number AND firm_address
     if not _is_admin(user):
         if not user.get("verified_attorney"):
             raise HTTPException(status_code=403, detail="Verified attorney status required for letters.")
@@ -1115,17 +1491,22 @@ async def generate_letter_endpoint(lead_id: str, request: Request):
         log.error("Letter generation failed: %s", e)
         raise HTTPException(status_code=500, detail="Letter generation failed.")
 
+    fname = Path(filepath).name
     return FileResponse(
         filepath,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=Path(filepath).name,
+        filename=fname,
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 
 @app.get("/api/case-packet/{lead_id}")
 async def get_case_packet(lead_id: str, request: Request):
     """Download HTML case packet. Requires VERIFIED attorney + GOLD/SILVER lead."""
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import Response
     from verifuse_v2.attorney.case_packet import generate_case_packet
 
     user = _require_user(request)
@@ -1145,7 +1526,15 @@ async def get_case_packet(lead_id: str, request: Request):
         raise HTTPException(status_code=500, detail="Case packet generation failed.")
 
     html_content = Path(filepath).read_text(encoding="utf-8")
-    return HTMLResponse(content=html_content)
+    fname = f"case_packet_{lead_id[:12]}.html"
+    return Response(
+        content=html_content,
+        media_type="text/html",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/api/leads/attorney-ready")
@@ -1165,7 +1554,7 @@ async def get_attorney_ready_leads(
         rows = conn.execute("""
             SELECT * FROM leads
             WHERE attorney_packet_ready = 1
-            ORDER BY COALESCE(surplus_amount, estimated_surplus, 0) DESC
+            ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC
             LIMIT ? OFFSET ?
         """, [limit, offset]).fetchall()
     finally:
