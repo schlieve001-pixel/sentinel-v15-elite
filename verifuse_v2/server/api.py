@@ -1574,6 +1574,145 @@ async def get_dossier_pdf(lead_id: str, request: Request):
     return await get_dossier(lead_id, request)
 
 
+def _generate_sample_dossier_pdf(lead: dict) -> bytes:
+    """Generate a non-PII sample dossier PDF using fpdf2. Helvetica core font only."""
+    from fpdf import FPDF
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Dark-themed header
+    pdf.set_fill_color(15, 23, 42)
+    pdf.rect(0, 0, 210, 40, "F")
+    pdf.set_text_color(16, 185, 129)
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_xy(10, 10)
+    pdf.cell(0, 10, "VERIFUSE // SAMPLE DOSSIER", ln=True)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(148, 163, 184)
+    pdf.set_x(10)
+    pdf.cell(0, 6, "Colorado Surplus Intelligence Platform", ln=True)
+
+    pdf.ln(15)
+
+    # Available data section
+    pdf.set_text_color(248, 250, 252)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "AVAILABLE DATA", ln=True)
+    pdf.set_draw_color(30, 41, 59)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(226, 232, 240)
+    fields = [
+        ("County", lead.get("county") or "N/A"),
+        ("Sale Date", (lead.get("sale_date") or "N/A")[:7]),
+        ("Data Grade", lead.get("data_grade") or "N/A"),
+        ("Confidence Score", f"{(_safe_float(lead.get('confidence_score')) or 0) * 100:.0f}%"),
+        ("Estimated Surplus", f"${_safe_float(lead.get('estimated_surplus')) or 0:,.2f}"),
+    ]
+    for label, value in fields:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(148, 163, 184)
+        pdf.cell(55, 7, label + ":")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(226, 232, 240)
+        pdf.cell(0, 7, value, ln=True)
+
+    pdf.ln(10)
+
+    # Redacted section
+    pdf.set_text_color(239, 68, 68)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "REDACTED FIELDS (UNLOCK REQUIRED)", ln=True)
+    pdf.set_draw_color(239, 68, 68)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(148, 163, 184)
+    redacted = [
+        "Owner Name", "Property Address", "Case Number",
+        "Winning Bid", "Total Indebtedness", "Recorder Link",
+    ]
+    for field in redacted:
+        pdf.cell(55, 7, field + ":")
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(0, 7, "[LOCKED - UNLOCK TO REVEAL]", ln=True)
+        pdf.set_text_color(148, 163, 184)
+
+    pdf.ln(10)
+
+    # CTA
+    pdf.set_fill_color(16, 185, 129)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 10, "  Unlock full intelligence at verifuse.tech", ln=True, fill=True)
+
+    pdf.ln(8)
+
+    # Disclaimer
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_text_color(100, 116, 139)
+    pdf.multi_cell(0, 4,
+        "DISCLAIMER: This sample dossier contains only publicly available, non-personally "
+        "identifiable information. No PII is included. This platform provides access to public "
+        "foreclosure sale data and does not constitute legal advice. "
+        "C.R.S. 38-38-111 restrictions apply. Consult a licensed Colorado attorney."
+    )
+
+    raw_out = pdf.output(dest="S")
+    pdf_bytes = raw_out if isinstance(raw_out, (bytes, bytearray)) else raw_out.encode("latin-1")
+    return bytes(pdf_bytes)
+
+
+@app.get("/api/dossier/sample/{preview_key}")
+@limiter.limit("30/minute")
+async def get_sample_dossier(preview_key: str, request: Request):
+    """Non-PII sample dossier as PDF. No auth. O(1) lookup."""
+    from fastapi.responses import Response
+
+    # SECURITY ORACLE: Unified 404 — do not reveal which lookup step failed
+    _NOT_FOUND = HTTPException(status_code=404, detail="Not found.")
+
+    lead_id = _PREVIEW_LOOKUP.get(preview_key)
+    if lead_id is None:
+        raise _NOT_FOUND
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            f"SELECT county, sale_date, data_grade, confidence_score, "
+            f"ROUND(COALESCE(estimated_surplus, surplus_amount, 0), 2) as estimated_surplus, "
+            f"{_claim_deadline_expr} "
+            f"FROM leads WHERE id = ?", [lead_id]
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise _NOT_FOUND
+
+    # REQUEST-TIME RE-CHECK: lead data may have changed since startup
+    if not is_preview_eligible(dict(row)):
+        raise _NOT_FOUND
+
+    pdf_bytes = _generate_sample_dossier_pdf(dict(row))
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="sample_dossier_{preview_key[:8]}.pdf"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.post("/api/letter/{lead_id}")
 async def generate_letter_endpoint(lead_id: str, request: Request):
     """Generate a Rule 7.3 solicitation letter. Requires VERIFIED attorney."""
