@@ -1,12 +1,26 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { getLeads, getStats, downloadSecure, getPreviewLeads, sendVerification, verifyEmail, type Lead, type Stats, type PreviewLead } from "../lib/api";
+import { getLeads, getStats, downloadSecure, downloadSample, getPreviewLeads, sendVerification, verifyEmail, API_BASE, type Lead, type Stats, type PreviewLead } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 const COUNTIES = ["", "Denver", "Jefferson", "Arapahoe", "Adams", "El Paso", "Douglas"];
 
 function formatCurrency(n: number): string {
   return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function useHealth() {
+  const [ok, setOk] = useState(false);  // Fail closed: default to false
+  useEffect(() => {
+    const base = API_BASE || "";  // empty = same-origin (production)
+    const check = () => fetch(`${base}/health`)
+      .then(r => setOk(r.ok))
+      .catch(() => setOk(false));
+    check();
+    const id = setInterval(check, 30_000);
+    return () => clearInterval(id);
+  }, []);
+  return ok;
 }
 
 function LeadCard({ lead }: { lead: Lead }) {
@@ -30,7 +44,7 @@ function LeadCard({ lead }: { lead: Lead }) {
       <div className="card-value">
         {formatCurrency(lead.estimated_surplus)}
         {!lead.surplus_verified && (
-          <span className="unverified-badge">UNVERIFIED</span>
+          <span className="unverified-badge">DETECTED</span>
         )}
       </div>
       <div className="card-id">CASE: {lead.case_number || lead.asset_id}</div>
@@ -84,12 +98,21 @@ function LeadCard({ lead }: { lead: Lead }) {
         <Link to={`/lead/${lead.asset_id}`} className="decrypt-btn-sota">
           {isRestricted ? "VIEW DETAILS" : "UNLOCK INTEL"}
         </Link>
-        <button
-          className="btn-outline-sm full-width"
-          onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.txt`)}
-        >
-          FREE DOSSIER
-        </button>
+        {lead.unlocked_by_me ? (
+          <button
+            className="btn-outline-sm full-width"
+            onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.pdf`)}
+          >
+            DOWNLOAD DOSSIER
+          </button>
+        ) : lead.preview_key ? (
+          <button
+            className="btn-outline-sm full-width"
+            onClick={() => downloadSample(lead.preview_key!)}
+          >
+            SAMPLE DOSSIER
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -124,6 +147,12 @@ function PreviewCard({ lead }: { lead: PreviewLead }) {
         <Link to="/register" className="decrypt-btn-sota">
           Sign Up to Unlock
         </Link>
+        {lead.preview_key && (
+          <button className="btn-outline-sm full-width"
+            onClick={() => downloadSample(lead.preview_key)}>
+            SAMPLE DOSSIER
+          </button>
+        )}
       </div>
     </div>
   );
@@ -140,27 +169,44 @@ export default function Dashboard() {
   const [grade, setGrade] = useState("");
   const [sortBy, setSortBy] = useState<"surplus" | "newest" | "grade">("surplus");
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState("");
   const [verifyCode, setVerifyCode] = useState("");
   const [verifySending, setVerifySending] = useState(false);
   const [verifyMsg, setVerifyMsg] = useState("");
+  const [simMode, setSimMode] = useState<string | null>(
+    () => localStorage.getItem("vf_simulate")
+  );
+  const healthOk = useHealth();
+
+  function toggleSimMode() {
+    if (simMode === "user") {
+      localStorage.removeItem("vf_simulate");
+      setSimMode(null);
+    } else {
+      localStorage.setItem("vf_simulate", "user");
+      setSimMode("user");
+    }
+    window.location.reload();
+  }
 
   useEffect(() => {
+    setFetchError("");
     if (isPreview) {
-      getPreviewLeads({ county: county || undefined, limit: 100 })
+      getPreviewLeads({ county: county || undefined, limit: 50 })
         .then((res) => setPreviewLeads(res.leads))
-        .catch(() => {})
+        .catch((err) => setFetchError(err instanceof Error ? err.message : "Failed to load preview"))
         .finally(() => setLoading(false));
       return;
     }
     Promise.all([
-      getLeads({ county: county || undefined, grade: grade || undefined, limit: 100 }),
+      getLeads({ county: county || undefined, grade: grade || undefined, limit: 50 }),
       getStats(),
     ])
       .then(([leadsRes, statsRes]) => {
         setLeads(leadsRes.leads);
         setStats(statsRes);
       })
-      .catch(() => {})
+      .catch((err) => setFetchError(err instanceof Error ? err.message : "Failed to load leads"))
       .finally(() => setLoading(false));
   }, [county, grade, isPreview]);
 
@@ -190,16 +236,20 @@ export default function Dashboard() {
           VERIFUSE <span className="text-green">// INTELLIGENCE</span>
         </Link>
         <div className="dash-status">
-          <span className="blink-dot">●</span>
-          <a href="/health" target="_blank" rel="noopener noreferrer" style={{ color: "inherit", textDecoration: "none" }}>
-            SYSTEM LIVE
-          </a>
+          <span className={`blink-dot ${healthOk ? "health-ok" : "health-err"}`}>●</span>
+          <span>{healthOk ? "SYSTEM LIVE" : "SYSTEM ERROR"}</span>
         </div>
         <div className="dash-user">
           {user ? (
             <>
               <span className="tier-badge">{user.tier.toUpperCase()}</span>
               <span className="credits-badge">{user.credits_remaining} credits</span>
+              {user.is_admin && (
+                <button className={`btn-outline-sm ${simMode === "user" ? "sim-active" : ""}`}
+                  onClick={toggleSimMode}>
+                  {simMode === "user" ? "VIEW: USER" : "VIEW: ADMIN"}
+                </button>
+              )}
               <button className="btn-outline-sm" onClick={logout}>LOGOUT</button>
             </>
           ) : (
@@ -295,6 +345,7 @@ export default function Dashboard() {
           ))}
         </select>
 
+        <span className="grade-filter-label">GRADE</span>
         <div className="grade-filters">
           {["", "GOLD", "SILVER", "BRONZE"].map((g) => (
             <button
@@ -322,6 +373,13 @@ export default function Dashboard() {
       {isPreview && (
         <div className="preview-banner">
           Viewing Preview — <Link to="/register">Sign Up for Full Access</Link>
+        </div>
+      )}
+
+      {/* Error Banner */}
+      {fetchError && (
+        <div className="auth-error" style={{ margin: "12px 20px" }}>
+          {fetchError}
         </div>
       )}
 
@@ -415,7 +473,7 @@ export default function Dashboard() {
         </p>
         <p>
           This data subscription does not constitute legal advice. Surplus amounts marked
-          "UNVERIFIED" have not been independently confirmed against county indebtedness records.
+          "DETECTED" have not been independently confirmed against county indebtedness records.
           No phone numbers, email addresses, or skip-tracing data are provided by this platform.
         </p>
       </div>
