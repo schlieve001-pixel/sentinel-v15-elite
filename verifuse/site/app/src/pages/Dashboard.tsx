@@ -137,6 +137,8 @@ export default function Dashboard() {
   const [previewLeads, setPreviewLeads] = useState<PreviewLead[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [county, setCounty] = useState("");
+  const [grade, setGrade] = useState("");
+  const [sortBy, setSortBy] = useState<"surplus" | "newest" | "grade">("surplus");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -148,7 +150,7 @@ export default function Dashboard() {
       return;
     }
     Promise.all([
-      getLeads({ county: county || undefined, limit: 100 }),
+      getLeads({ county: county || undefined, grade: grade || undefined, limit: 100 }),
       getStats(),
     ])
       .then(([leadsRes, statsRes]) => {
@@ -157,15 +159,25 @@ export default function Dashboard() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [county, isPreview]);
+  }, [county, grade, isPreview]);
+
+  // Client-side sorting
+  const gradeOrder: Record<string, number> = { GOLD: 0, SILVER: 1, BRONZE: 2 };
+  function sortLeads(arr: Lead[]): Lead[] {
+    return [...arr].sort((a, b) => {
+      if (sortBy === "surplus") return b.estimated_surplus - a.estimated_surplus;
+      if (sortBy === "newest") return (b.sale_date || "").localeCompare(a.sale_date || "");
+      return (gradeOrder[a.data_grade] ?? 9) - (gradeOrder[b.data_grade] ?? 9);
+    });
+  }
 
   // Split leads into buckets
-  const actionable = leads.filter(
+  const actionable = sortLeads(leads.filter(
     (l) => l.restriction_status !== "RESTRICTED"
-  );
-  const watchlist = leads.filter(
+  ));
+  const watchlist = sortLeads(leads.filter(
     (l) => l.restriction_status === "RESTRICTED"
-  );
+  ));
 
   return (
     <div className="dashboard">
@@ -222,6 +234,28 @@ export default function Dashboard() {
           {COUNTIES.filter(Boolean).map((c) => (
             <option key={c} value={c}>{c.toUpperCase()}</option>
           ))}
+        </select>
+
+        <div className="grade-filters">
+          {["", "GOLD", "SILVER", "BRONZE"].map((g) => (
+            <button
+              key={g || "ALL"}
+              className={`grade-filter-btn ${grade === g ? "active" : ""}`}
+              onClick={() => { setGrade(g); setLoading(true); }}
+            >
+              {g || "ALL"}
+            </button>
+          ))}
+        </div>
+
+        <select
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value as "surplus" | "newest" | "grade")}
+          className="filter-select"
+        >
+          <option value="surplus">Highest Surplus</option>
+          <option value="newest">Newest Sale</option>
+          <option value="grade">Best Grade</option>
         </select>
       </div>
 

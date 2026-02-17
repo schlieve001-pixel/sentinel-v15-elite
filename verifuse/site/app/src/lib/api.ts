@@ -170,6 +170,8 @@ export interface Stats {
   attorney_ready: number;
   gold_grade: number;
   total_claimable_surplus: number;
+  verified_pipeline: number;
+  total_raw_volume: number;
   counties: { county: string; cnt: number; total: number }[];
 }
 
