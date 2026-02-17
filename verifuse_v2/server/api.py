@@ -408,6 +408,20 @@ def _is_admin(user: dict) -> bool:
     return bool(user.get("is_admin", 0))
 
 
+def _is_simulating_user(request: Request, user: dict) -> bool:
+    if not _is_admin(user):
+        return False
+    return request.headers.get("X-Verifuse-Simulate", "").lower() == "user"
+
+
+def _effective_admin(user: dict, request: Request = None) -> bool:
+    if not _is_admin(user):
+        return False
+    if request and _is_simulating_user(request, user):
+        return False
+    return True
+
+
 def _require_api_key(request: Request) -> None:
     """Check x-verifuse-api-key header for admin/scraper endpoints."""
     if not VERIFUSE_API_KEY:
@@ -430,9 +444,9 @@ def _require_admin_or_api_key(request: Request) -> None:
     raise HTTPException(status_code=403, detail="Admin access required.")
 
 
-def _check_email_verified(user: dict) -> None:
+def _check_email_verified(user: dict, request: Request = None) -> None:
     """Check email verification. Raises 403 if not verified and not admin."""
-    if not user.get("email_verified") and not _is_admin(user):
+    if not user.get("email_verified") and not _effective_admin(user, request):
         raise HTTPException(
             status_code=403,
             detail="Please verify your email before unlocking leads.",
@@ -462,9 +476,22 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "x-verifuse-api-key"],
+    allow_headers=["Authorization", "Content-Type", "x-verifuse-api-key", "X-Verifuse-Simulate"],
     expose_headers=["Content-Disposition"],
 )
+
+
+@app.middleware("http")
+async def add_vary_header(request: Request, call_next):
+    response = await call_next(request)
+    existing = response.headers.get("Vary", "")
+    existing_tokens = {t.strip().lower() for t in existing.split(",") if t.strip()}
+    new_tokens = ["Authorization", "X-Verifuse-Simulate"]
+    to_add = [t for t in new_tokens if t.lower() not in existing_tokens]
+    if to_add:
+        combined = f"{existing}, {', '.join(to_add)}" if existing else ", ".join(to_add)
+        response.headers["Vary"] = combined
+    return response
 
 
 # ── Legal constants ────────────────────────────────────────────────
@@ -780,11 +807,11 @@ async def unlock_lead(lead_id: str, request: Request):
     EXPIRED: cannot unlock
     """
     user = _require_user(request)
-    _check_email_verified(user)
+    _check_email_verified(user, request)
     now = datetime.now(timezone.utc).isoformat()
 
     # Admin bypass
-    if _is_admin(user):
+    if _effective_admin(user, request):
         conn = _get_conn()
         try:
             row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
@@ -1235,7 +1262,7 @@ async def unlock_restricted_lead(lead_id: str, request: Request):
     Body: { "disclaimer_accepted": true }
     """
     user = _require_user(request)
-    _check_email_verified(user)
+    _check_email_verified(user, request)
     body = await request.json()
     if not body.get("disclaimer_accepted"):
         raise HTTPException(
@@ -1244,12 +1271,12 @@ async def unlock_restricted_lead(lead_id: str, request: Request):
         )
 
     # Verify attorney status
-    if not _is_admin(user) and not _is_verified_attorney(user):
+    if not _effective_admin(user, request) and not _is_verified_attorney(user):
         raise HTTPException(
             status_code=403,
             detail="RESTRICTED leads require verified attorney status.",
         )
-    if not _is_admin(user) and user.get("tier") not in ("operator", "sovereign"):
+    if not _effective_admin(user, request) and user.get("tier") not in ("operator", "sovereign"):
         raise HTTPException(
             status_code=403,
             detail="RESTRICTED leads require OPERATOR or SOVEREIGN tier.",
@@ -1283,7 +1310,7 @@ async def get_dossier(lead_id: str, request: Request):
     lead = dict(row)
 
     # Check if user has unlocked this lead (or is admin)
-    if not _is_admin(user):
+    if not _effective_admin(user, request):
         conn = _get_conn()
         try:
             unlock = conn.execute(
@@ -1333,6 +1360,8 @@ async def get_dossier(lead_id: str, request: Request):
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
 
@@ -1463,7 +1492,7 @@ def _check_lead_unlocked(user: dict, lead_id: str, doc_type: str = "UNKNOWN", re
         if not ip and request.client:
             ip = request.client.host
 
-    if _is_admin(user):
+    if _effective_admin(user, request):
         try:
             conn = _get_conn()
             conn.execute("""
@@ -1533,6 +1562,8 @@ async def get_dossier_docx(lead_id: str, request: Request):
         headers={
             "Content-Disposition": f'attachment; filename="{fname}"',
             "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
 
@@ -1550,12 +1581,12 @@ async def generate_letter_endpoint(lead_id: str, request: Request):
     from verifuse_v2.legal.mail_room import generate_letter
 
     user = _require_user(request)
-    if not _is_verified_attorney(user) and not _is_admin(user):
+    if not _is_verified_attorney(user) and not _effective_admin(user, request):
         raise HTTPException(
             status_code=403,
             detail="Rule 7.3 letters require verified attorney status.",
         )
-    if not _is_admin(user):
+    if not _effective_admin(user, request):
         if not user.get("verified_attorney"):
             raise HTTPException(status_code=403, detail="Verified attorney status required for letters.")
         if not user.get("firm_name"):
@@ -1588,6 +1619,8 @@ async def generate_letter_endpoint(lead_id: str, request: Request):
         headers={
             "Content-Disposition": f'attachment; filename="{fname}"',
             "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
 
@@ -1599,7 +1632,7 @@ async def get_case_packet(lead_id: str, request: Request):
     from verifuse_v2.attorney.case_packet import generate_case_packet
 
     user = _require_user(request)
-    if not _is_verified_attorney(user) and not _is_admin(user):
+    if not _is_verified_attorney(user) and not _effective_admin(user, request):
         raise HTTPException(
             status_code=403,
             detail="Case packets require verified attorney status.",
@@ -1622,6 +1655,8 @@ async def get_case_packet(lead_id: str, request: Request):
         headers={
             "Content-Disposition": f'attachment; filename="{fname}"',
             "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
 
