@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { getLeadDetail, unlockLead, unlockRestrictedLead, getDossierUrl, getDossierDocxUrl, getDossierPdfUrl, getCasePacketUrl, generateLetter, type Lead, type UnlockResponse, ApiError } from "../lib/api";
+import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, generateLetter, type Lead, type UnlockResponse, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 function fmt(n: number | null | undefined): string {
@@ -195,14 +195,12 @@ export default function LeadDetail() {
                 )}
 
                 <div className="unlock-actions">
-                  <a
-                    href={getDossierUrl(lead.asset_id)}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
                     className="btn-outline"
+                    onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.txt`)}
                   >
                     DOWNLOAD FREE DOSSIER
-                  </a>
+                  </button>
                   {isRestricted ? (
                     <button
                       className="decrypt-btn-sota"
@@ -298,34 +296,28 @@ export default function LeadDetail() {
 
                 {/* Attorney Tool Downloads */}
                 <div style={{ marginTop: 20, display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  <a
-                    href={getDossierDocxUrl(lead!.asset_id)}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
                     className="btn-outline"
                     style={{ fontSize: "0.85em" }}
+                    onClick={() => downloadSecure(`/api/dossier/${lead!.asset_id}/docx`, `dossier_${lead!.asset_id}.docx`)}
                   >
                     DOWNLOAD DOSSIER (.DOCX)
-                  </a>
-                  <a
-                    href={getDossierPdfUrl(lead!.asset_id)}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  </button>
+                  <button
                     className="btn-outline"
                     style={{ fontSize: "0.85em" }}
+                    onClick={() => downloadSecure(`/api/dossier/${lead!.asset_id}/pdf`, `dossier_${lead!.asset_id}.pdf`)}
                   >
                     DOWNLOAD DOSSIER (.PDF)
-                  </a>
+                  </button>
                   {(lead!.data_grade === "GOLD" || lead!.data_grade === "SILVER") && (
-                    <a
-                      href={getCasePacketUrl(lead!.asset_id)}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <button
                       className="btn-outline"
                       style={{ fontSize: "0.85em" }}
+                      onClick={() => downloadSecure(`/api/case-packet/${lead!.asset_id}`, `case_packet_${lead!.asset_id}.html`)}
                     >
                       CASE PACKET (HTML)
-                    </a>
+                    </button>
                   )}
                   {user?.bar_number && (
                     <button

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { getLeads, getStats, getDossierUrl, getPreviewLeads, type Lead, type Stats, type PreviewLead } from "../lib/api";
+import { getLeads, getStats, downloadSecure, getPreviewLeads, type Lead, type Stats, type PreviewLead } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 const COUNTIES = ["", "Denver", "Jefferson", "Arapahoe", "Adams", "El Paso", "Douglas"];
@@ -84,14 +84,12 @@ function LeadCard({ lead }: { lead: Lead }) {
         <Link to={`/lead/${lead.asset_id}`} className="decrypt-btn-sota">
           {isRestricted ? "VIEW DETAILS" : "UNLOCK INTEL"}
         </Link>
-        <a
-          href={getDossierUrl(lead.asset_id)}
-          target="_blank"
-          rel="noopener noreferrer"
+        <button
           className="btn-outline-sm full-width"
+          onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.txt`)}
         >
           FREE DOSSIER
-        </a>
+        </button>
       </div>
     </div>
   );

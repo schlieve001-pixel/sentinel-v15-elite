@@ -213,18 +213,31 @@ export function unlockRestrictedLead(
   });
 }
 
-// ── Dossier ───────────────────────────────────────────────────────
+// ── Downloads ────────────────────────────────────────────────────
 
-export function getDossierUrl(assetId: string): string {
-  return `${API_BASE}/api/dossier/${assetId}`;
-}
-
-export function getDossierDocxUrl(assetId: string): string {
-  return `${API_BASE}/api/dossier/${assetId}/docx`;
-}
-
-export function getDossierPdfUrl(assetId: string): string {
-  return `${API_BASE}/api/dossier/${assetId}/pdf`;
+export async function downloadSecure(path: string, fallbackFilename: string): Promise<void> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(res.status, body.detail || "Download failed");
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition");
+  let filename = fallbackFilename;
+  if (disposition) {
+    const match = disposition.match(/filename="?([^";\n]+)"?/);
+    if (match) filename = match[1];
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ── Attorney Tools ───────────────────────────────────────────────
@@ -237,10 +250,6 @@ export function generateLetter(assetId: string): Promise<Blob> {
     if (!res.ok) throw new ApiError(res.status, "Letter generation failed");
     return res.blob();
   });
-}
-
-export function getCasePacketUrl(assetId: string): string {
-  return `${API_BASE}/api/case-packet/${assetId}`;
 }
 
 export function getAttorneyReadyLeads(params?: {
