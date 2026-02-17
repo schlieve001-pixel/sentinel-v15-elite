@@ -105,6 +105,8 @@ class SafeAsset(BaseModel):
     completeness_score: Optional[float] = None
     confidence_score: Optional[float] = None
     data_age_days: Optional[int] = None
+    preview_key: Optional[str] = None    # HMAC key for sample dossier (null if not eligible)
+    unlocked_by_me: bool = False         # True if requesting user has unlocked this lead
 
 
 class FullAsset(SafeAsset):
@@ -203,6 +205,38 @@ def _round_surplus(amount: Optional[float]) -> Optional[float]:
     return round(amount / 100) * 100
 
 
+def is_preview_eligible(row: dict) -> bool:
+    """Single source of truth for preview eligibility. Uses only raw DB fields."""
+    surplus = _safe_float(row.get("estimated_surplus")) or _safe_float(row.get("surplus_amount")) or 0.0
+    if surplus <= 100:
+        return False
+    grade = (row.get("data_grade") or "").upper()
+    if grade == "REJECT":
+        return False
+    # Expiration check — string-safe, FAIL-CLOSED on non-NULL unparseable
+    deadline = row.get("claim_deadline")
+    if deadline is not None:
+        s = str(deadline).strip()
+        if not s:
+            return False  # Empty string/whitespace = unparseable = ineligible
+        try:
+            s = s.split("T")[0].split(" ")[0]  # Strip timestamps safely
+            if datetime.now(timezone.utc).date() > date.fromisoformat(s):
+                return False
+        except (ValueError, TypeError):
+            return False  # FAIL-CLOSED: unparseable = ineligible
+    # NULL deadline = pending (eligible) — consistent with _EXPIRED_FILTER
+    return True
+
+
+def _compute_preview_key(row: dict) -> str:
+    """HMAC-SHA256 preview key. Uses ONLY leads.id + secret. Stable across re-grading. 24 hex chars (96-bit)."""
+    lead_id = row.get("id") or ""
+    return hmac.new(
+        _PREVIEW_HMAC_SECRET.encode(), lead_id.encode(), hashlib.sha256
+    ).hexdigest()[:24]
+
+
 def _row_to_safe(row: dict) -> dict:
     """Convert a leads row to SafeAsset dict. NULL-safe."""
     surplus = _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus")) or 0.0
@@ -251,6 +285,8 @@ def _row_to_safe(row: dict) -> dict:
 
     verified = bid > 0 and debt > 0 and conf >= 0.7
 
+    pk = _compute_preview_key(row) if is_preview_eligible(row) else None
+
     return SafeAsset(
         asset_id=row.get("id"),
         county=row.get("county"),
@@ -274,6 +310,7 @@ def _row_to_safe(row: dict) -> dict:
         completeness_score=_safe_float(row.get("completeness_score")),
         confidence_score=round(conf, 2) if conf else None,
         data_age_days=data_age_days,
+        preview_key=pk,
     ).model_dump()
 
 
@@ -305,16 +342,10 @@ def _row_to_preview(row: dict) -> dict:
     # Truncate sale_date to YYYY-MM (anti-triangulation)
     sale_date_display = (sale_date_raw or "")[:7] if sale_date_raw else None
 
-    # HMAC preview_key — canonicalized inputs
-    county_canon = (county or "").upper().strip()
-    sale_canon = (sale_date_raw or "")[:7]
-    surplus_canon = f"{surplus:.2f}"
-    grade_canon = (data_grade or "").upper()
-    conf_canon = "" if confidence is None else f"{confidence:.3f}"
-    hmac_input = f"{county_canon}|{sale_canon}|{surplus_canon}|{grade_canon}|{conf_canon}"
-    preview_key = hmac.new(
-        _PREVIEW_HMAC_SECRET.encode(), hmac_input.encode(), hashlib.sha256
-    ).hexdigest()[:16]
+    # HMAC preview_key — stable, id-only salt (24 hex chars)
+    preview_key = _compute_preview_key(row)
+    # Pop id so it's not in output
+    row.pop("id", None)
 
     # Compute status + days
     status = _compute_status(row)
@@ -377,6 +408,20 @@ def _is_admin(user: dict) -> bool:
     return bool(user.get("is_admin", 0))
 
 
+def _is_simulating_user(request: Request, user: dict) -> bool:
+    if not _is_admin(user):
+        return False
+    return request.headers.get("X-Verifuse-Simulate", "").lower() == "user"
+
+
+def _effective_admin(user: dict, request: Request = None) -> bool:
+    if not _is_admin(user):
+        return False
+    if request and _is_simulating_user(request, user):
+        return False
+    return True
+
+
 def _require_api_key(request: Request) -> None:
     """Check x-verifuse-api-key header for admin/scraper endpoints."""
     if not VERIFUSE_API_KEY:
@@ -399,9 +444,9 @@ def _require_admin_or_api_key(request: Request) -> None:
     raise HTTPException(status_code=403, detail="Admin access required.")
 
 
-def _check_email_verified(user: dict) -> None:
+def _check_email_verified(user: dict, request: Request = None) -> None:
     """Check email verification. Raises 403 if not verified and not admin."""
-    if not user.get("email_verified") and not _is_admin(user):
+    if not user.get("email_verified") and not _effective_admin(user, request):
         raise HTTPException(
             status_code=403,
             detail="Please verify your email before unlocking leads.",
@@ -431,9 +476,22 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "x-verifuse-api-key"],
+    allow_headers=["Authorization", "Content-Type", "x-verifuse-api-key", "X-Verifuse-Simulate"],
     expose_headers=["Content-Disposition"],
 )
+
+
+@app.middleware("http")
+async def add_vary_header(request: Request, call_next):
+    response = await call_next(request)
+    existing = response.headers.get("Vary", "")
+    existing_tokens = {t.strip().lower() for t in existing.split(",") if t.strip()}
+    new_tokens = ["Authorization", "X-Verifuse-Simulate"]
+    to_add = [t for t in new_tokens if t.lower() not in existing_tokens]
+    if to_add:
+        combined = f"{existing}, {', '.join(to_add)}" if existing else ", ".join(to_add)
+        response.headers["Vary"] = combined
+    return response
 
 
 # ── Legal constants ────────────────────────────────────────────────
@@ -453,14 +511,16 @@ UNLOCK_DISCLAIMER = (
 _LEADS_COLUMNS: set[str] = set()
 _PREVIEW_SELECT = ""
 _EXPIRED_FILTER = ""
+_PREVIEW_LOOKUP: dict[str, str] = {}  # preview_key -> leads.id
+_claim_deadline_expr = "NULL AS claim_deadline"  # Set at startup
 
 
 # ── Startup ─────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup():
-    """Log DB identity on boot + detect lead columns for preview SQL."""
-    global _LEADS_COLUMNS, _PREVIEW_SELECT, _EXPIRED_FILTER
+    """Log DB identity on boot + detect lead columns for preview SQL + build preview lookup."""
+    global _LEADS_COLUMNS, _PREVIEW_SELECT, _EXPIRED_FILTER, _PREVIEW_LOOKUP, _claim_deadline_expr
 
     db_path = Path(VERIFUSE_DB_PATH)
     inode = "N/A"
@@ -484,9 +544,10 @@ async def startup():
 
     # Build dynamic preview SELECT
     claim_deadline_expr = "claim_deadline" if "claim_deadline" in _LEADS_COLUMNS else "NULL AS claim_deadline"
+    _claim_deadline_expr = claim_deadline_expr
     statute_status_expr = "statute_window_status" if "statute_window_status" in _LEADS_COLUMNS else "NULL AS statute_window_status"
     _PREVIEW_SELECT = (
-        f"SELECT county, sale_date, data_grade, confidence_score, "
+        f"SELECT id, county, sale_date, data_grade, confidence_score, "
         f"ROUND(COALESCE(estimated_surplus, surplus_amount, 0), 2) as estimated_surplus, "
         f"{claim_deadline_expr}, {statute_status_expr} "
         f"FROM leads"
@@ -503,6 +564,27 @@ async def startup():
         )
     else:
         _EXPIRED_FILTER = ""
+
+    # Build preview lookup — O(1) preview_key -> leads.id
+    _PREVIEW_LOOKUP = {}
+    try:
+        conn = _get_conn()
+        try:
+            q = ("SELECT id, "
+                 "ROUND(COALESCE(estimated_surplus, surplus_amount, 0), 2) as estimated_surplus, "
+                 f"data_grade, {claim_deadline_expr} "
+                 "FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 100 "
+                 f"AND data_grade != 'REJECT' {_EXPIRED_FILTER}")
+            for row in conn.execute(q).fetchall():
+                r = dict(row)
+                if is_preview_eligible(r):  # STRICT gate — single source of truth
+                    pk = _compute_preview_key(r)
+                    _PREVIEW_LOOKUP[pk] = r["id"]
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("Preview lookup build failed: %s", e)
+    log.info("Preview lookup built: %d entries", len(_PREVIEW_LOOKUP))
 
     log.info(
         "Titanium API v4.1 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d",
@@ -647,27 +729,27 @@ async def get_leads(
 
     conn = _get_conn()
     try:
-        query = "SELECT * FROM leads WHERE 1=1"
+        where = " WHERE 1=1"
         params: list = []
 
         if not include_zombies:
-            query += " AND COALESCE(estimated_surplus, surplus_amount, 0) > 100"
+            where += " AND COALESCE(estimated_surplus, surplus_amount, 0) > 100"
         if not include_reject or not is_admin_user:
-            query += " AND data_grade != 'REJECT'"
+            where += " AND data_grade != 'REJECT'"
         if county:
-            query += " AND county = ?"
+            where += " AND county = ?"
             params.append(county)
         if min_surplus > 0:
-            query += " AND COALESCE(estimated_surplus, surplus_amount, 0) >= ?"
+            where += " AND COALESCE(estimated_surplus, surplus_amount, 0) >= ?"
             params.append(min_surplus)
         if grade:
-            query += " AND data_grade = ?"
+            where += " AND data_grade = ?"
             params.append(grade)
 
         # Count for pagination
-        count_q = query.replace("SELECT *", "SELECT COUNT(*)")
-        total = conn.execute(count_q, params).fetchone()[0]
+        total = conn.execute(f"SELECT COUNT(*) FROM leads{where}", params).fetchone()[0]
 
+        query = f"SELECT *, {_claim_deadline_expr} FROM leads{where}"
         query += " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
@@ -675,10 +757,27 @@ async def get_leads(
     finally:
         conn.close()
 
+    # Determine which leads the current user has unlocked (paginated set only)
+    lead_ids = [dict(row)["id"] for row in rows]
+    unlocked_ids: set[str] = set()
+    if user and lead_ids:
+        placeholders = ",".join(["?"] * len(lead_ids))
+        conn2 = _get_conn()
+        try:
+            u_rows = conn2.execute(
+                f"SELECT lead_id FROM lead_unlocks WHERE user_id = ? AND lead_id IN ({placeholders})",
+                [user["user_id"]] + lead_ids
+            ).fetchall()
+            unlocked_ids = {r["lead_id"] for r in u_rows}
+        finally:
+            conn2.close()
+
     leads = []
     for row in rows:
         try:
-            safe = _row_to_safe(dict(row))
+            r = dict(row)
+            safe = _row_to_safe(r)
+            safe["unlocked_by_me"] = r["id"] in unlocked_ids
             # Filter out EXPIRED unless explicitly requested
             if not include_expired and safe.get("restriction_status") == "EXPIRED":
                 continue
@@ -708,11 +807,11 @@ async def unlock_lead(lead_id: str, request: Request):
     EXPIRED: cannot unlock
     """
     user = _require_user(request)
-    _check_email_verified(user)
+    _check_email_verified(user, request)
     now = datetime.now(timezone.utc).isoformat()
 
     # Admin bypass
-    if _is_admin(user):
+    if _effective_admin(user, request):
         conn = _get_conn()
         try:
             row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
@@ -1116,14 +1215,31 @@ async def get_lead_detail(lead_id: str, request: Request):
     """Return a single lead as SafeAsset. Frontend calls GET /api/lead/{id}."""
     conn = _get_conn()
     try:
-        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+        row = conn.execute(f"SELECT *, {_claim_deadline_expr} FROM leads WHERE id = ?", [lead_id]).fetchone()
     finally:
         conn.close()
 
     if not row:
         raise HTTPException(status_code=404, detail="Lead not found.")
 
-    return _row_to_safe(dict(row))
+    result = _row_to_safe(dict(row))
+
+    # Check if current user has unlocked this lead
+    user = _get_user_from_request(request)
+    is_unlocked = False
+    if user:
+        conn2 = _get_conn()
+        try:
+            u_row = conn2.execute(
+                "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
+                [user["user_id"], lead_id]
+            ).fetchone()
+            is_unlocked = bool(u_row)
+        finally:
+            conn2.close()
+    result["unlocked_by_me"] = is_unlocked
+
+    return result
 
 
 # ── POST /api/unlock/{id} — Frontend-compatible unlock ──────────
@@ -1146,7 +1262,7 @@ async def unlock_restricted_lead(lead_id: str, request: Request):
     Body: { "disclaimer_accepted": true }
     """
     user = _require_user(request)
-    _check_email_verified(user)
+    _check_email_verified(user, request)
     body = await request.json()
     if not body.get("disclaimer_accepted"):
         raise HTTPException(
@@ -1155,12 +1271,12 @@ async def unlock_restricted_lead(lead_id: str, request: Request):
         )
 
     # Verify attorney status
-    if not _is_admin(user) and not _is_verified_attorney(user):
+    if not _effective_admin(user, request) and not _is_verified_attorney(user):
         raise HTTPException(
             status_code=403,
             detail="RESTRICTED leads require verified attorney status.",
         )
-    if not _is_admin(user) and user.get("tier") not in ("operator", "sovereign"):
+    if not _effective_admin(user, request) and user.get("tier") not in ("operator", "sovereign"):
         raise HTTPException(
             status_code=403,
             detail="RESTRICTED leads require OPERATOR or SOVEREIGN tier.",
@@ -1194,7 +1310,7 @@ async def get_dossier(lead_id: str, request: Request):
     lead = dict(row)
 
     # Check if user has unlocked this lead (or is admin)
-    if not _is_admin(user):
+    if not _effective_admin(user, request):
         conn = _get_conn()
         try:
             unlock = conn.execute(
@@ -1244,6 +1360,8 @@ async def get_dossier(lead_id: str, request: Request):
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
 
@@ -1374,7 +1492,7 @@ def _check_lead_unlocked(user: dict, lead_id: str, doc_type: str = "UNKNOWN", re
         if not ip and request.client:
             ip = request.client.host
 
-    if _is_admin(user):
+    if _effective_admin(user, request):
         try:
             conn = _get_conn()
             conn.execute("""
@@ -1444,6 +1562,8 @@ async def get_dossier_docx(lead_id: str, request: Request):
         headers={
             "Content-Disposition": f'attachment; filename="{fname}"',
             "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
 
@@ -1454,6 +1574,145 @@ async def get_dossier_pdf(lead_id: str, request: Request):
     return await get_dossier(lead_id, request)
 
 
+def _generate_sample_dossier_pdf(lead: dict) -> bytes:
+    """Generate a non-PII sample dossier PDF using fpdf2. Helvetica core font only."""
+    from fpdf import FPDF
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Dark-themed header
+    pdf.set_fill_color(15, 23, 42)
+    pdf.rect(0, 0, 210, 40, "F")
+    pdf.set_text_color(16, 185, 129)
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_xy(10, 10)
+    pdf.cell(0, 10, "VERIFUSE // SAMPLE DOSSIER", ln=True)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(148, 163, 184)
+    pdf.set_x(10)
+    pdf.cell(0, 6, "Colorado Surplus Intelligence Platform", ln=True)
+
+    pdf.ln(15)
+
+    # Available data section
+    pdf.set_text_color(248, 250, 252)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "AVAILABLE DATA", ln=True)
+    pdf.set_draw_color(30, 41, 59)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(226, 232, 240)
+    fields = [
+        ("County", lead.get("county") or "N/A"),
+        ("Sale Date", (lead.get("sale_date") or "N/A")[:7]),
+        ("Data Grade", lead.get("data_grade") or "N/A"),
+        ("Confidence Score", f"{(_safe_float(lead.get('confidence_score')) or 0) * 100:.0f}%"),
+        ("Estimated Surplus", f"${_safe_float(lead.get('estimated_surplus')) or 0:,.2f}"),
+    ]
+    for label, value in fields:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(148, 163, 184)
+        pdf.cell(55, 7, label + ":")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(226, 232, 240)
+        pdf.cell(0, 7, value, ln=True)
+
+    pdf.ln(10)
+
+    # Redacted section
+    pdf.set_text_color(239, 68, 68)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "REDACTED FIELDS (UNLOCK REQUIRED)", ln=True)
+    pdf.set_draw_color(239, 68, 68)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(148, 163, 184)
+    redacted = [
+        "Owner Name", "Property Address", "Case Number",
+        "Winning Bid", "Total Indebtedness", "Recorder Link",
+    ]
+    for field in redacted:
+        pdf.cell(55, 7, field + ":")
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(0, 7, "[LOCKED - UNLOCK TO REVEAL]", ln=True)
+        pdf.set_text_color(148, 163, 184)
+
+    pdf.ln(10)
+
+    # CTA
+    pdf.set_fill_color(16, 185, 129)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 10, "  Unlock full intelligence at verifuse.tech", ln=True, fill=True)
+
+    pdf.ln(8)
+
+    # Disclaimer
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_text_color(100, 116, 139)
+    pdf.multi_cell(0, 4,
+        "DISCLAIMER: This sample dossier contains only publicly available, non-personally "
+        "identifiable information. No PII is included. This platform provides access to public "
+        "foreclosure sale data and does not constitute legal advice. "
+        "C.R.S. 38-38-111 restrictions apply. Consult a licensed Colorado attorney."
+    )
+
+    raw_out = pdf.output(dest="S")
+    pdf_bytes = raw_out if isinstance(raw_out, (bytes, bytearray)) else raw_out.encode("latin-1")
+    return bytes(pdf_bytes)
+
+
+@app.get("/api/dossier/sample/{preview_key}")
+@limiter.limit("30/minute")
+async def get_sample_dossier(preview_key: str, request: Request):
+    """Non-PII sample dossier as PDF. No auth. O(1) lookup."""
+    from fastapi.responses import Response
+
+    # SECURITY ORACLE: Unified 404 — do not reveal which lookup step failed
+    _NOT_FOUND = HTTPException(status_code=404, detail="Not found.")
+
+    lead_id = _PREVIEW_LOOKUP.get(preview_key)
+    if lead_id is None:
+        raise _NOT_FOUND
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            f"SELECT county, sale_date, data_grade, confidence_score, "
+            f"ROUND(COALESCE(estimated_surplus, surplus_amount, 0), 2) as estimated_surplus, "
+            f"{_claim_deadline_expr} "
+            f"FROM leads WHERE id = ?", [lead_id]
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise _NOT_FOUND
+
+    # REQUEST-TIME RE-CHECK: lead data may have changed since startup
+    if not is_preview_eligible(dict(row)):
+        raise _NOT_FOUND
+
+    pdf_bytes = _generate_sample_dossier_pdf(dict(row))
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="sample_dossier_{preview_key[:8]}.pdf"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.post("/api/letter/{lead_id}")
 async def generate_letter_endpoint(lead_id: str, request: Request):
     """Generate a Rule 7.3 solicitation letter. Requires VERIFIED attorney."""
@@ -1461,12 +1720,12 @@ async def generate_letter_endpoint(lead_id: str, request: Request):
     from verifuse_v2.legal.mail_room import generate_letter
 
     user = _require_user(request)
-    if not _is_verified_attorney(user) and not _is_admin(user):
+    if not _is_verified_attorney(user) and not _effective_admin(user, request):
         raise HTTPException(
             status_code=403,
             detail="Rule 7.3 letters require verified attorney status.",
         )
-    if not _is_admin(user):
+    if not _effective_admin(user, request):
         if not user.get("verified_attorney"):
             raise HTTPException(status_code=403, detail="Verified attorney status required for letters.")
         if not user.get("firm_name"):
@@ -1499,6 +1758,8 @@ async def generate_letter_endpoint(lead_id: str, request: Request):
         headers={
             "Content-Disposition": f'attachment; filename="{fname}"',
             "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
 
@@ -1510,7 +1771,7 @@ async def get_case_packet(lead_id: str, request: Request):
     from verifuse_v2.attorney.case_packet import generate_case_packet
 
     user = _require_user(request)
-    if not _is_verified_attorney(user) and not _is_admin(user):
+    if not _is_verified_attorney(user) and not _effective_admin(user, request):
         raise HTTPException(
             status_code=403,
             detail="Case packets require verified attorney status.",
@@ -1533,6 +1794,8 @@ async def get_case_packet(lead_id: str, request: Request):
         headers={
             "Content-Disposition": f'attachment; filename="{fname}"',
             "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
 

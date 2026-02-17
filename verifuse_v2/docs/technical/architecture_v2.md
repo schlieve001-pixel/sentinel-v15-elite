@@ -1,4 +1,4 @@
-# Architecture V2 — Sprint 11.5
+# Architecture V2 — Sprint 11.5 + Hardening PR
 
 ## System Overview
 
@@ -46,6 +46,7 @@ The API serves 30+ routes organized into groups:
 |-------|--------|------|
 | Health | `/health` | None |
 | Preview | `/api/preview/leads` | None (HMAC-signed keys) |
+| Sample Dossier | `/api/dossier/sample/{preview_key}` | None (O(1) lookup, rate-limited) |
 | Leads | `/api/leads`, `/api/lead/{id}`, `/api/counties` | None (public listing) |
 | Stats | `/api/stats` | None |
 | Auth | `/api/auth/register`, `/api/auth/login`, `/api/auth/me` | JWT |
@@ -58,9 +59,21 @@ The API serves 30+ routes organized into groups:
 
 ### Preview Endpoint
 
-The preview endpoint returns leads with HMAC-signed `preview_key` values. No PII is exposed — specifically excludes `asset_id`, `case_number`, `owner_name`, `property_address`, and `owner_img`.
+The preview endpoint returns leads with HMAC-signed `preview_key` values (24 hex chars, id-salted). No PII is exposed — specifically excludes `asset_id`, `case_number`, `owner_name`, `property_address`, and `owner_img`.
 
-HMAC fallback chain: `PREVIEW_HMAC_SECRET` env var → JWT secret → random fallback with warning log.
+HMAC key stability: Uses ONLY `leads.id` + secret. No mutable fields (surplus, grade). Re-grading does not change keys. Eligibility gate: `is_preview_eligible()` — single source of truth used at startup, in `_row_to_safe`, and at request-time in the sample dossier endpoint.
+
+### Sample Dossier
+
+`GET /api/dossier/sample/{preview_key}` returns a non-PII PDF dossier. No auth required. O(1) lookup via `_PREVIEW_LOOKUP` dict (built at startup). Request-time re-check via `is_preview_eligible()` ensures stale entries are rejected. Unified 404 (security oracle — does not reveal which lookup step failed). Rate-limited to 30/minute.
+
+### Admin Simulation
+
+Admins can send `X-Verifuse-Simulate: user` header to strip admin privileges. `_effective_admin(user, request)` replaces `_is_admin(user)` in all gate functions. Frontend only injects the header if `vf_is_admin === "1"` in localStorage.
+
+### Vary Header
+
+Middleware appends `Authorization` and `X-Verifuse-Simulate` to the `Vary` header on all responses, with deduplication to prevent repeated tokens.
 
 ### Authentication Flow
 
@@ -83,7 +96,9 @@ Credit deduction is atomic via `BEGIN IMMEDIATE` transaction. Re-unlocking retur
 
 All file download endpoints return:
 - `Content-Disposition: attachment; filename="..."` — triggers download on mobile
-- CORS `expose_headers` includes `Content-Disposition` — allows JS blob pattern
+- `Cache-Control: no-store` — prevents sensitive document caching
+- `X-Content-Type-Options: nosniff` — prevents MIME type sniffing
+- `Access-Control-Expose-Headers: Content-Disposition` — allows JS blob pattern
 
 ## Frontend (React + TypeScript + Vite)
 
@@ -104,17 +119,35 @@ When `?preview=1` is in the URL and user is not authenticated:
 - Hides stats row
 - Shows "Viewing Preview" banner
 
-### Download Pattern (`downloadSecure`)
+### Error Boundary
 
-All document downloads use `downloadSecure(path, fallbackFilename)`:
-1. Fetch with auth headers
+React `ErrorBoundary` class component wraps Dashboard and LeadDetail routes. Catches runtime render errors and displays "SYSTEM ERROR" banner instead of white screen. Includes retry button.
+
+### Download Patterns
+
+**`downloadSecure(path, fallbackFilename)`** — Authenticated downloads:
+1. Fetch with auth headers (includes sim header if admin)
+2. 401 check → clear localStorage + redirect to /login
+3. Read response as blob
+4. Extract filename from `Content-Disposition` header
+5. Create temporary `<a>` element with `blob:` URL
+6. Trigger click + revoke object URL
+
+**`downloadSample(previewKey)`** — Unauthenticated sample PDF:
+1. Fetch `/api/dossier/sample/{previewKey}` (no auth)
 2. Read response as blob
-3. Extract filename from `Content-Disposition` header
-4. Create temporary `<a>` element with `blob:` URL
-5. Trigger click download
-6. Revoke object URL
+3. Trigger download as `sample_dossier_{key}.pdf`
 
-This pattern works on iOS Safari, Android Chrome, and desktop browsers.
+### Auth Hardening
+
+- 401 handler in `request()` and `downloadSecure()`: clears `vf_token`, `vf_simulate`, `vf_is_admin` and redirects via `window.location.replace("/login")` (prevents Back-button into cached protected views)
+- `authHeaders()`: only injects `X-Verifuse-Simulate` if `vf_is_admin === "1"`
+- `logout()`: clears all localStorage keys + redirect
+- `handleAuth()`: sets `vf_is_admin` on login, auto-clears `vf_simulate` for non-admins
+
+### Health Monitoring
+
+`useHealth()` hook polls `/health` every 30 seconds. Defaults to `false` (fail closed). Empty `API_BASE` = relative `/health` (production same-origin). Dashboard shows green dot when healthy, red dot when error.
 
 ### Email Verification UI
 

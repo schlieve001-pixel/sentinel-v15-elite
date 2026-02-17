@@ -103,14 +103,22 @@ verifuse/site/app/             # Frontend (React 19 + TypeScript + Vite)
 └── .env                       # API URL config
 ```
 
-## Key Features (Sprint 11.5)
+## Key Features (Sprint 11.5 + Hardening PR)
 
 - **Preview Mode**: Unauthenticated users can preview leads (county, surplus, grade, confidence) without PII exposure
+- **Sample Dossier**: Non-PII PDF dossier via O(1) preview_key lookup (no auth required)
+- **Stable HMAC Keys**: Preview keys use only `leads.id` + secret (stable across re-grading)
 - **Mobile-Safe Downloads**: Auth blob downloads work on iOS/Android (replaces `<a href>` pattern)
 - **Grade Filters + Sorting**: Filter by GOLD/SILVER/BRONZE, sort by surplus/date/grade
 - **Email Verification**: Non-blocking banner + 403 gate on unlock endpoints
 - **Credit Tracking**: `credits_remaining` returned on every unlock response
 - **Stripe Guard**: 503 if Stripe not configured (prevents silent billing failures)
+- **Admin Simulation**: `X-Verifuse-Simulate: user` header strips admin privileges for testing
+- **Error Boundary**: React ErrorBoundary wraps Dashboard + LeadDetail (no white screens)
+- **Health Poll**: Dashboard polls `/health` every 30s with green/red indicator (fail closed)
+- **401 Auto-Redirect**: Expired tokens trigger localStorage cleanup + redirect to /login
+- **Vary Deduplication**: Middleware ensures Vary header includes Authorization + X-Verifuse-Simulate
+- **Unlock Tracking**: `unlocked_by_me` field on leads (scalable IN-query on paginated IDs)
 
 ## API Endpoints
 
@@ -128,6 +136,7 @@ verifuse/site/app/             # Frontend (React 19 + TypeScript + Vite)
 | POST | `/api/auth/verify-email` | Verify email with code |
 | POST | `/api/unlock/{id}` | Unlock lead (1 credit) |
 | POST | `/api/unlock-restricted/{id}` | Unlock restricted lead (attorney only) |
+| GET | `/api/dossier/sample/{key}` | Sample dossier PDF (no auth) |
 | GET | `/api/dossier/{id}` | Download dossier (text) |
 | GET | `/api/dossier/{id}/docx` | Download dossier (DOCX) |
 | GET | `/api/dossier/{id}/pdf` | Download dossier (PDF) |

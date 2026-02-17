@@ -28,7 +28,11 @@ export default function Register() {
       await register(form);
       navigate("/dashboard");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Registration failed");
+      if (err instanceof ApiError && err.status === 409) {
+        setError("Account already exists. Please log in.");
+      } else {
+        setError(err instanceof ApiError ? err.message : "Registration failed");
+      }
     } finally {
       setLoading(false);
     }
@@ -46,7 +50,14 @@ export default function Register() {
           <p className="auth-sub">Start with 5 free credits on the Recon tier.</p>
         </div>
 
-        {error && <div className="auth-error">{error}</div>}
+        {error && (
+          <div className="auth-error">
+            {error}
+            {error.includes("already exists") && (
+              <> <Link to="/login" style={{ color: "var(--green)" }}>Log in here</Link></>
+            )}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit}>
           <div className="input-group">

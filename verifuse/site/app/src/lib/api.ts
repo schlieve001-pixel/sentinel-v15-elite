@@ -1,8 +1,14 @@
-const API_BASE = import.meta.env.VITE_API_URL || "";
+export const API_BASE = import.meta.env.VITE_API_URL || "";
 
 function authHeaders(): Record<string, string> {
   const token = localStorage.getItem("vf_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  // Only inject sim header if admin (set by auth context)
+  const sim = localStorage.getItem("vf_simulate");
+  const isAdmin = localStorage.getItem("vf_is_admin") === "1";
+  if (sim && token && isAdmin) headers["X-Verifuse-Simulate"] = sim;
+  return headers;
 }
 
 async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
@@ -14,6 +20,13 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
       ...(opts.headers || {}),
     },
   });
+  if (res.status === 401) {
+    localStorage.removeItem("vf_token");
+    localStorage.removeItem("vf_simulate");
+    localStorage.removeItem("vf_is_admin");
+    window.location.replace("/login");
+    throw new ApiError(401, "Session expired");
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new ApiError(res.status, body.detail || "Request failed");
@@ -145,6 +158,8 @@ export interface Lead {
   completeness_score: number;
   confidence_score: number;
   data_age_days: number | null;
+  preview_key?: string;        // null if not preview-eligible
+  unlocked_by_me?: boolean;    // true if current user unlocked
 }
 
 export interface LeadsResponse {
@@ -234,6 +249,13 @@ export async function downloadSecure(path: string, fallbackFilename: string): Pr
   const res = await fetch(`${API_BASE}${path}`, {
     headers: authHeaders(),
   });
+  if (res.status === 401) {
+    localStorage.removeItem("vf_token");
+    localStorage.removeItem("vf_simulate");
+    localStorage.removeItem("vf_is_admin");
+    window.location.replace("/login");
+    throw new ApiError(401, "Session expired");
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new ApiError(res.status, body.detail || "Download failed");
@@ -249,6 +271,23 @@ export async function downloadSecure(path: string, fallbackFilename: string): Pr
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadSample(previewKey: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/dossier/sample/${previewKey}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(res.status, body.detail || "Download failed");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `sample_dossier_${previewKey.slice(0, 8)}.pdf`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
