@@ -191,7 +191,9 @@ export default function Dashboard() {
         </Link>
         <div className="dash-status">
           <span className="blink-dot">●</span>
-          SYSTEM LIVE
+          <a href="/health" target="_blank" rel="noopener noreferrer" style={{ color: "inherit", textDecoration: "none" }}>
+            SYSTEM LIVE
+          </a>
         </div>
         <div className="dash-user">
           {user ? (

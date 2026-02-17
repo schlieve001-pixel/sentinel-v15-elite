@@ -255,13 +255,18 @@ export default function LeadDetail() {
                       {unlocking ? "VERIFYING..." : "ATTORNEY ACCESS ONLY (1 CREDIT)"}
                     </button>
                   ) : (
-                    <button
-                      className="decrypt-btn-sota"
-                      onClick={handleUnlock}
-                      disabled={unlocking || (user && !user.email_verified)}
-                    >
-                      {unlocking ? "DECRYPTING..." : "UNLOCK FULL INTEL (1 CREDIT)"}
-                    </button>
+                    <div className="unlock-cta-expanded">
+                      <button
+                        className="decrypt-btn-sota decrypt-btn-lg"
+                        onClick={handleUnlock}
+                        disabled={unlocking || (user && !user.email_verified)}
+                      >
+                        {unlocking ? "DECRYPTING..." : "UNLOCK FULL INTEL (1 CREDIT)"}
+                      </button>
+                      <p className="unlock-cta-details">
+                        You'll get: Owner name, full address, recorder link, court-ready dossier
+                      </p>
+                    </div>
                   )}
                 </div>
 

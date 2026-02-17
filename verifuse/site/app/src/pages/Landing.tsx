@@ -110,6 +110,25 @@ export default function Landing() {
         )}
       </section>
 
+      {/* What You Get */}
+      <section className="landing-section landing-value-props">
+        <h2>What You Get</h2>
+        <div className="steps-grid">
+          <div className="step-card">
+            <h3>Exact surplus amounts — down to the penny</h3>
+          </div>
+          <div className="step-card">
+            <h3>County, sale date, grade, confidence — free to preview</h3>
+          </div>
+          <div className="step-card">
+            <h3>Owner name, address, case number — unlock with 1 credit</h3>
+          </div>
+          <div className="step-card">
+            <h3>Court-ready dossiers, case packets, Rule 7.3 letters</h3>
+          </div>
+        </div>
+      </section>
+
       {/* How It Works */}
       <section className="landing-section">
         <h2>How It Works</h2>
