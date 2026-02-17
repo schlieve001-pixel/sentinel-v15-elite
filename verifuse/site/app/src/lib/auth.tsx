@@ -38,6 +38,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   function handleAuth(res: AuthResponse) {
     localStorage.setItem("vf_token", res.token);
+    if (res.user.is_admin) {
+      localStorage.setItem("vf_is_admin", "1");
+    } else {
+      localStorage.removeItem("vf_is_admin");
+      localStorage.removeItem("vf_simulate");  // Auto-clear for non-admins
+    }
     setToken(res.token);
     setUser(res.user);
   }
@@ -60,8 +66,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   function logout() {
     localStorage.removeItem("vf_token");
+    localStorage.removeItem("vf_simulate");
+    localStorage.removeItem("vf_is_admin");
     setToken(null);
     setUser(null);
+    window.location.replace("/login");
   }
 
   return (
