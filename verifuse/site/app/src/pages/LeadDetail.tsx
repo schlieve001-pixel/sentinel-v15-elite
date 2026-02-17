@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, generateLetter, type Lead, type UnlockResponse, ApiError } from "../lib/api";
+import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, generateLetter, sendVerification, verifyEmail, type Lead, type UnlockResponse, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
+
+function isVerifyEmailError(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403 &&
+    /verify/i.test(err.message) && /email/i.test(err.message);
+}
 
 function fmt(n: number | null | undefined): string {
   if (n == null) return "\u2014";
@@ -17,6 +22,10 @@ export default function LeadDetail() {
   const [loading, setLoading] = useState(true);
   const [unlocking, setUnlocking] = useState(false);
   const [error, setError] = useState("");
+  const [showVerifyPrompt, setShowVerifyPrompt] = useState(false);
+  const [verifyCode, setVerifyCode] = useState("");
+  const [verifySending, setVerifySending] = useState(false);
+  const [verifyMsg, setVerifyMsg] = useState("");
 
   useEffect(() => {
     if (!assetId) return;
@@ -25,6 +34,15 @@ export default function LeadDetail() {
       .catch((err) => setError(err instanceof ApiError ? err.message : "Failed to load"))
       .finally(() => setLoading(false));
   }, [assetId]);
+
+  function handleUnlockError(err: unknown) {
+    if (isVerifyEmailError(err)) {
+      setShowVerifyPrompt(true);
+      setError("");
+    } else {
+      setError(err instanceof ApiError ? err.message : "Unlock failed");
+    }
+  }
 
   async function handleUnlock() {
     if (!assetId) return;
@@ -38,7 +56,7 @@ export default function LeadDetail() {
       const res = await unlockLead(assetId);
       setUnlocked(res);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Unlock failed");
+      handleUnlockError(err);
     } finally {
       setUnlocking(false);
     }
@@ -227,12 +245,12 @@ export default function LeadDetail() {
                           const res = await unlockRestrictedLead(assetId, true);
                           setUnlocked(res);
                         } catch (err) {
-                          setError(err instanceof ApiError ? err.message : "Unlock failed");
+                          handleUnlockError(err);
                         } finally {
                           setUnlocking(false);
                         }
                       }}
-                      disabled={unlocking}
+                      disabled={unlocking || (user && !user.email_verified)}
                     >
                       {unlocking ? "VERIFYING..." : "ATTORNEY ACCESS ONLY (1 CREDIT)"}
                     </button>
@@ -240,7 +258,7 @@ export default function LeadDetail() {
                     <button
                       className="decrypt-btn-sota"
                       onClick={handleUnlock}
-                      disabled={unlocking}
+                      disabled={unlocking || (user && !user.email_verified)}
                     >
                       {unlocking ? "DECRYPTING..." : "UNLOCK FULL INTEL (1 CREDIT)"}
                     </button>
@@ -248,6 +266,60 @@ export default function LeadDetail() {
                 </div>
 
                 {error && <p className="auth-error" style={{ marginTop: 12 }}>{error}</p>}
+
+                {/* Email Verification Prompt */}
+                {(showVerifyPrompt || (user && !user.email_verified)) && (
+                  <div className="verify-banner" style={{ marginTop: 16 }}>
+                    <strong>Verify your email to unlock leads</strong>
+                    <div className="verify-row">
+                      <input
+                        type="text"
+                        placeholder="Enter verification code"
+                        value={verifyCode}
+                        onChange={(e) => setVerifyCode(e.target.value)}
+                        className="verify-input"
+                      />
+                      <button
+                        className="btn-outline-sm"
+                        disabled={!verifyCode || verifySending}
+                        onClick={async () => {
+                          setVerifySending(true);
+                          setVerifyMsg("");
+                          try {
+                            await verifyEmail(verifyCode);
+                            setVerifyMsg("Email verified!");
+                            window.location.reload();
+                          } catch {
+                            setVerifyMsg("Invalid code. Try again.");
+                          } finally {
+                            setVerifySending(false);
+                          }
+                        }}
+                      >
+                        VERIFY
+                      </button>
+                      <button
+                        className="btn-outline-sm"
+                        disabled={verifySending}
+                        onClick={async () => {
+                          setVerifySending(true);
+                          setVerifyMsg("");
+                          try {
+                            await sendVerification();
+                            setVerifyMsg("Verification email sent!");
+                          } catch {
+                            setVerifyMsg("Failed to send. Try again.");
+                          } finally {
+                            setVerifySending(false);
+                          }
+                        }}
+                      >
+                        RESEND CODE
+                      </button>
+                    </div>
+                    {verifyMsg && <p className="verify-msg">{verifyMsg}</p>}
+                  </div>
+                )}
               </div>
             )}
 

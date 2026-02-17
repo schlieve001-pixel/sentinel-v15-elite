@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { getLeads, getStats, downloadSecure, getPreviewLeads, type Lead, type Stats, type PreviewLead } from "../lib/api";
+import { getLeads, getStats, downloadSecure, getPreviewLeads, sendVerification, verifyEmail, type Lead, type Stats, type PreviewLead } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 const COUNTIES = ["", "Denver", "Jefferson", "Arapahoe", "Adams", "El Paso", "Douglas"];
@@ -140,6 +140,9 @@ export default function Dashboard() {
   const [grade, setGrade] = useState("");
   const [sortBy, setSortBy] = useState<"surplus" | "newest" | "grade">("surplus");
   const [loading, setLoading] = useState(true);
+  const [verifyCode, setVerifyCode] = useState("");
+  const [verifySending, setVerifySending] = useState(false);
+  const [verifyMsg, setVerifyMsg] = useState("");
 
   useEffect(() => {
     if (isPreview) {
@@ -202,6 +205,60 @@ export default function Dashboard() {
           )}
         </div>
       </header>
+
+      {/* Email Verification Banner */}
+      {user && !user.email_verified && (
+        <div className="verify-banner">
+          <strong>Verify your email to unlock leads</strong>
+          <div className="verify-row">
+            <input
+              type="text"
+              placeholder="Enter verification code"
+              value={verifyCode}
+              onChange={(e) => setVerifyCode(e.target.value)}
+              className="verify-input"
+            />
+            <button
+              className="btn-outline-sm"
+              disabled={!verifyCode || verifySending}
+              onClick={async () => {
+                setVerifySending(true);
+                setVerifyMsg("");
+                try {
+                  await verifyEmail(verifyCode);
+                  setVerifyMsg("Email verified!");
+                  window.location.reload();
+                } catch {
+                  setVerifyMsg("Invalid code. Try again.");
+                } finally {
+                  setVerifySending(false);
+                }
+              }}
+            >
+              VERIFY
+            </button>
+            <button
+              className="btn-outline-sm"
+              disabled={verifySending}
+              onClick={async () => {
+                setVerifySending(true);
+                setVerifyMsg("");
+                try {
+                  await sendVerification();
+                  setVerifyMsg("Verification email sent!");
+                } catch {
+                  setVerifyMsg("Failed to send. Try again.");
+                } finally {
+                  setVerifySending(false);
+                }
+              }}
+            >
+              RESEND CODE
+            </button>
+          </div>
+          {verifyMsg && <p className="verify-msg">{verifyMsg}</p>}
+        </div>
+      )}
 
       {/* Stats Row */}
       {stats && !isPreview && (

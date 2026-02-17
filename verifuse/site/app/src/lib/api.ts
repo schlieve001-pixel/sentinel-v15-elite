@@ -42,6 +42,7 @@ export interface AuthUser {
   unlocked_assets?: number;
   is_active?: boolean;
   is_admin?: boolean;
+  email_verified?: boolean;
 }
 
 export interface AuthResponse {
@@ -72,6 +73,17 @@ export function login(email: string, password: string): Promise<AuthResponse> {
 
 export function getMe(): Promise<AuthUser> {
   return request("/api/auth/me");
+}
+
+export function sendVerification(): Promise<{ status: string }> {
+  return request("/api/auth/send-verification", { method: "POST" });
+}
+
+export function verifyEmail(code: string): Promise<{ status: string }> {
+  return request("/api/auth/verify-email", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
 }
 
 // ── Preview ──────────────────────────────────────────────────────
