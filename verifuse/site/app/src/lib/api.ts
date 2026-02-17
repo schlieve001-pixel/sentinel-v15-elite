@@ -136,7 +136,7 @@ export interface Lead {
   asset_id: string;
   county: string;
   state: string;
-  case_number: string;
+  case_number: string | null;
   asset_type: string;
   estimated_surplus: number;
   surplus_verified: boolean;

@@ -49,8 +49,16 @@ if not VERIFUSE_DB_PATH:
 # ── API Key for machine-to-machine auth (admin/scraper endpoints) ────
 VERIFUSE_API_KEY = os.environ.get("VERIFUSE_API_KEY", "")
 
-# ── Stripe guard ─────────────────────────────────────────────────────
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY")
+# ── Stripe guard (mode-aware key selection) ──────────────────────────
+STRIPE_MODE = (os.environ.get("STRIPE_MODE") or "test").lower()
+if STRIPE_MODE == "live":
+    STRIPE_SECRET_KEY = os.environ.get("STRIPE_LIVE_SECRET_KEY") or os.environ.get("STRIPE_SECRET_KEY")
+    STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_LIVE_PUBLISHABLE_KEY") or ""
+    STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_LIVE_WEBHOOK_SECRET") or os.environ.get("STRIPE_WEBHOOK_SECRET")
+else:
+    STRIPE_SECRET_KEY = os.environ.get("STRIPE_TEST_SECRET_KEY") or os.environ.get("STRIPE_SECRET_KEY")
+    STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_TEST_PUBLISHABLE_KEY") or ""
+    STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_TEST_WEBHOOK_SECRET") or os.environ.get("STRIPE_WEBHOOK_SECRET")
 
 # ── HMAC Secret for preview_key (fail-fast) ─────────────────────────
 _PREVIEW_HMAC_SECRET = os.environ.get("PREVIEW_HMAC_SECRET") or os.environ.get("VERIFUSE_JWT_SECRET")
@@ -64,6 +72,18 @@ if not _PREVIEW_HMAC_SECRET:
     raise RuntimeError("HMAC secret required — set PREVIEW_HMAC_SECRET or VERIFUSE_JWT_SECRET")
 
 log = logging.getLogger(__name__)
+
+# ── Build ID (git short hash at import time) ─────────────────────────
+_BUILD_ID = "dev"
+try:
+    import subprocess
+    _BUILD_ID = subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        stderr=subprocess.DEVNULL,
+    ).decode().strip() or "dev"
+except Exception:
+    pass
 
 # ── Database connection (strict VERIFUSE_DB_PATH) ───────────────────
 
@@ -586,9 +606,16 @@ async def startup():
         log.warning("Preview lookup build failed: %s", e)
     log.info("Preview lookup built: %d entries", len(_PREVIEW_LOOKUP))
 
+    # SMTP status
+    smtp_configured = bool(os.environ.get("SMTP_HOST"))
+    log.info("SMTP configured: %s", "yes" if smtp_configured else "no (dev mode — codes logged to console)")
+
+    # Stripe status
+    log.info("Stripe mode: %s | secret_key: %s", STRIPE_MODE, "set" if STRIPE_SECRET_KEY else "NOT SET")
+
     log.info(
-        "Titanium API v4.1 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d",
-        VERIFUSE_DB_PATH, inode, sha, rows, len(_LEADS_COLUMNS),
+        "Titanium API v4.1 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d | build: %s",
+        VERIFUSE_DB_PATH, inode, sha, rows, len(_LEADS_COLUMNS), _BUILD_ID,
     )
 
 
@@ -650,6 +677,21 @@ async def health():
         "verified_total": round(verified_total, 2),
         "legal_disclaimer": LEGAL_DISCLAIMER,
     }
+
+
+# ── GET /api/public-config — Runtime configuration (no auth) ─────────
+
+@app.get("/api/public-config")
+async def public_config():
+    """Public runtime config. No auth. No secrets. Cache-Control: no-store."""
+    return JSONResponse(
+        content={
+            "stripe_mode": STRIPE_MODE,
+            "stripe_publishable_key": STRIPE_PUBLISHABLE_KEY,
+            "build_id": _BUILD_ID,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ── GET /api/preview/leads — Zero-PII public preview ────────────────
@@ -772,12 +814,18 @@ async def get_leads(
         finally:
             conn2.close()
 
+    is_eff_admin = user and _effective_admin(user, request)
     leads = []
     for row in rows:
         try:
             r = dict(row)
             safe = _row_to_safe(r)
-            safe["unlocked_by_me"] = r["id"] in unlocked_ids
+            is_unlocked = r["id"] in unlocked_ids
+            safe["unlocked_by_me"] = is_unlocked
+            # Mask PII for non-unlocked, non-admin users
+            # SafeAsset only has case_number; owner_name/property_address/recorder_link are in FullAsset
+            if not is_unlocked and not is_eff_admin:
+                safe["case_number"] = None
             # Filter out EXPIRED unless explicitly requested
             if not include_expired and safe.get("restriction_status") == "EXPIRED":
                 continue
@@ -1238,6 +1286,11 @@ async def get_lead_detail(lead_id: str, request: Request):
         finally:
             conn2.close()
     result["unlocked_by_me"] = is_unlocked
+
+    # Mask PII for non-unlocked, non-admin users
+    # SafeAsset only has case_number; owner_name/property_address/recorder_link are in FullAsset
+    if not is_unlocked and not (user and _effective_admin(user, request)):
+        result["case_number"] = None
 
     return result
 
