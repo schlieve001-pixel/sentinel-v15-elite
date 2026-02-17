@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useLocation, useNavigate } from "react-router-dom";
 import { getLeads, getStats, downloadSecure, downloadSample, getPreviewLeads, sendVerification, verifyEmail, API_BASE, type Lead, type Stats, type PreviewLead } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
@@ -159,9 +159,19 @@ function PreviewCard({ lead }: { lead: PreviewLead }) {
 }
 
 export default function Dashboard() {
-  const { user, logout } = useAuth();
+  const { user, loading: authLoading, logout } = useAuth();
   const [searchParams] = useSearchParams();
-  const isPreview = searchParams.get("preview") === "1" && !user;
+  const location = useLocation();
+  const navigate = useNavigate();
+  const isPreviewRoute = location.pathname === "/preview";
+  const isPreview = isPreviewRoute || (searchParams.get("preview") === "1" && !user);
+
+  // Dashboard guard: redirect unauthenticated users to /preview
+  useEffect(() => {
+    if (!authLoading && !user && !isPreviewRoute && location.pathname === "/dashboard") {
+      navigate("/preview", { replace: true });
+    }
+  }, [authLoading, user, isPreviewRoute, location.pathname, navigate]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [previewLeads, setPreviewLeads] = useState<PreviewLead[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -232,7 +242,7 @@ export default function Dashboard() {
     <div className="dashboard">
       {/* Top Bar */}
       <header className="dash-header">
-        <Link to="/" className="dash-logo">
+        <Link to={user ? "/dashboard" : "/preview"} className="dash-logo">
           VERIFUSE <span className="text-green">// INTELLIGENCE</span>
         </Link>
         <div className="dash-status">

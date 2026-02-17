@@ -79,7 +79,7 @@ export default function Landing() {
           <Link to="/register" className="btn-primary">
             START FREE TRIAL
           </Link>
-          <Link to="/dashboard?preview=1" className="btn-outline">
+          <Link to="/preview" className="btn-outline">
             Preview the Vault
           </Link>
         </div>
@@ -208,7 +208,7 @@ export default function Landing() {
       <footer className="landing-footer">
         <div>VERIFUSE <span className="text-green">// INTELLIGENCE</span></div>
         <div className="footer-links">
-          <Link to="/dashboard">Dashboard</Link>
+          <Link to="/preview">Preview Vault</Link>
           <a href="#pricing">Pricing</a>
           <Link to="/login">Login</Link>
         </div>

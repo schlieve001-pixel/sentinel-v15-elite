@@ -92,7 +92,7 @@ export default function LeadDetail() {
   return (
     <div className="detail-page">
       <header className="dash-header">
-        <Link to="/dashboard" className="dash-logo">
+        <Link to={user ? "/dashboard" : "/preview"} className="dash-logo">
           VERIFUSE <span className="text-green">// INTELLIGENCE</span>
         </Link>
         <div className="dash-status">
@@ -259,7 +259,7 @@ export default function LeadDetail() {
                           setUnlocking(false);
                         }
                       }}
-                      disabled={unlocking || (user && !user.email_verified)}
+                      disabled={unlocking || (user ? !user.email_verified : false)}
                     >
                       {unlocking ? "VERIFYING..." : "ATTORNEY ACCESS ONLY (1 CREDIT)"}
                     </button>
@@ -268,7 +268,7 @@ export default function LeadDetail() {
                       <button
                         className="decrypt-btn-sota decrypt-btn-lg"
                         onClick={handleUnlock}
-                        disabled={unlocking || (user && !user.email_verified)}
+                        disabled={unlocking || (user ? !user.email_verified : false)}
                       >
                         {unlocking ? "DECRYPTING..." : "UNLOCK FULL INTEL (1 CREDIT)"}
                       </button>
@@ -356,7 +356,7 @@ export default function LeadDetail() {
                   </div>
                   <div className="detail-field">
                     <label>Total Indebtedness</label>
-                    <span>{unlocked.total_indebtedness ? fmt(unlocked.total_indebtedness) : "UNVERIFIED"}</span>
+                    <span>{unlocked.total_indebtedness ? fmt(unlocked.total_indebtedness) : "DETECTED"}</span>
                   </div>
                   <div className="detail-field">
                     <label>Overbid Amount</label>
@@ -448,7 +448,7 @@ export default function LeadDetail() {
           </p>
           <p>
             This is not legal advice. Consult a licensed Colorado attorney before
-            filing any claim. Surplus amounts labeled "UNVERIFIED" lack independent
+            filing any claim. Surplus amounts labeled "DETECTED" lack independent
             indebtedness confirmation.
           </p>
         </div>
