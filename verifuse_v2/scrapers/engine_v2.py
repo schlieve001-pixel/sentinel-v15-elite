@@ -424,6 +424,11 @@ def process_all(dry_run: bool = False, verbose: bool = False) -> dict:
         if conn:
             conn.close()
 
+    # Add alias keys for runner integration
+    stats["parsed_records"] = stats["records_extracted"]
+    stats["leads_inserted"] = stats["inserted"]
+    stats["rejects"] = stats["anomaly"]
+
     return stats
 
 

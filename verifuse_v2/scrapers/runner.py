@@ -16,10 +16,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sqlite3
 import sys
+import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -93,12 +96,36 @@ class ScraperRunner:
             log.info("Running: %s (%s via %s)", name, code, platform)
             log.info("=" * 50)
 
+            start_time = time.time()
             try:
                 with adapter_cls(county_cfg) as adapter:
                     result = adapter.run(dry_run=dry_run)
+                    duration_sec = round(time.time() - start_time, 1)
                     self.results.append(result)
+
+                    # Build consolidated stats
+                    stats = {
+                        "pdfs_found": result.get("pdfs_discovered", 0),
+                        "pdfs_downloaded": result.get("pdfs_downloaded", 0),
+                        "parsed_records": result.get("html_records", 0),
+                        "leads_inserted": result.get("leads_inserted", 0),
+                        "rejects": result.get("rejects", 0),
+                        "duration_sec": duration_sec,
+                    }
+
+                    # Merge engine_v2 stats if available
+                    engine_stats = result.get("engine_stats")
+                    if engine_stats and isinstance(engine_stats, dict):
+                        stats["parsed_records"] = engine_stats.get("parsed_records", stats["parsed_records"])
+                        stats["leads_inserted"] = engine_stats.get("leads_inserted", stats["leads_inserted"])
+                        stats["rejects"] = engine_stats.get("rejects", stats["rejects"])
+
+                    self._log_consolidated_event(code, name, platform, stats, result.get("errors"))
+                    # Also keep legacy log for backward compat
                     self._log_result(result)
+
             except Exception as e:
+                duration_sec = round(time.time() - start_time, 1)
                 log.error("FATAL error for %s: %s", name, e)
                 self.results.append({
                     "county": name,
@@ -107,6 +134,7 @@ class ScraperRunner:
                     "errors": [str(e)],
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
+                self._log_error_event(code, name, platform, e, duration_sec)
 
         return self.results
 
@@ -117,8 +145,71 @@ class ScraperRunner:
             return results[0]
         return {"error": f"County '{county_code}' not found in config"}
 
+    def _log_consolidated_event(self, code: str, name: str, platform: str,
+                                 stats: dict, errors: list | None) -> None:
+        """Log ONE consolidated COUNTY_SCRAPE_RESULT event per county run."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("PRAGMA journal_mode=WAL")
+            now = datetime.now(timezone.utc).isoformat()
+
+            reason = (
+                f"{stats.get('pdfs_found', 0)} PDFs found, "
+                f"{stats.get('pdfs_downloaded', 0)} downloaded, "
+                f"{stats.get('parsed_records', 0)} parsed, "
+                f"{stats.get('leads_inserted', 0)} inserted, "
+                f"{stats.get('rejects', 0)} rejected"
+            )
+            if errors:
+                reason += f" (errors: {errors[:2]})"
+
+            conn.execute("""
+                INSERT INTO pipeline_events
+                (asset_id, event_type, old_value, new_value, actor, reason, metadata_json, created_at)
+                VALUES (?, 'COUNTY_SCRAPE_RESULT', NULL, ?, ?, ?, ?, ?)
+            """, [
+                f"SCRAPER:{code}",
+                f"county={name}",
+                f"runner:{platform}",
+                reason,
+                json.dumps(stats),
+                now,
+            ])
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.warning("Could not log consolidated event: %s", e)
+
+    def _log_error_event(self, code: str, name: str, platform: str,
+                          error: Exception, duration_sec: float) -> None:
+        """Log COUNTY_SCRAPE_ERROR event with traceback."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("PRAGMA journal_mode=WAL")
+            now = datetime.now(timezone.utc).isoformat()
+
+            tb = traceback.format_exc()
+            stats = {"duration_sec": duration_sec, "error": str(error)}
+
+            conn.execute("""
+                INSERT INTO pipeline_events
+                (asset_id, event_type, old_value, new_value, actor, reason, metadata_json, created_at)
+                VALUES (?, 'COUNTY_SCRAPE_ERROR', NULL, ?, ?, ?, ?, ?)
+            """, [
+                f"SCRAPER:{code}",
+                f"county={name}",
+                f"runner:{platform}",
+                f"FATAL: {str(error)[:500]}\n{tb[:500]}",
+                json.dumps(stats),
+                now,
+            ])
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.warning("Could not log error event: %s", e)
+
     def _log_result(self, result: dict):
-        """Log scraper result to pipeline_events."""
+        """Log legacy SCRAPER_SUCCESS/ERROR event to pipeline_events."""
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.execute("PRAGMA journal_mode=WAL")
