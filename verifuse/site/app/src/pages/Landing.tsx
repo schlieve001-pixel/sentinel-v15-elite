@@ -4,40 +4,44 @@ import { getStats, type Stats } from "../lib/api";
 
 const TIERS = [
   {
-    name: "Recon",
-    price: "$199",
-    credits: 5,
+    name: "Scout",
+    price: "$49",
+    credits: 25,
+    perCredit: "$1.96",
     features: [
-      "5 asset unlocks / month",
-      "50 lead views / day",
-      "Denver Metro coverage",
+      "25 lead unlocks / month",
+      "100 lead views / day",
+      "All Colorado counties",
       "Dossier PDF downloads",
       "Single-session access",
     ],
   },
   {
     name: "Operator",
-    price: "$399",
-    credits: 25,
+    price: "$149",
+    credits: 100,
+    perCredit: "$1.49",
     popular: true,
     features: [
-      "25 asset unlocks / month",
-      "200 lead views / day",
-      "All CO counties",
+      "100 lead unlocks / month",
+      "500 lead views / day",
+      "All Colorado counties",
       "Court motion PDF generation",
       "2 concurrent sessions",
     ],
   },
   {
     name: "Sovereign",
-    price: "$699",
-    credits: 100,
+    price: "$499",
+    credits: 500,
+    perCredit: "$0.99",
+    bestValue: true,
     features: [
-      "100 asset unlocks / month",
-      "500 lead views / day",
+      "500 lead unlocks / month",
+      "Unlimited lead views",
       "Priority new-lead alerts",
       "Motion + dossier generation",
-      "3 concurrent sessions",
+      "5 concurrent sessions",
     ],
   },
 ];
@@ -163,7 +167,13 @@ export default function Landing() {
 
       {/* Pricing */}
       <section className="landing-section" id="pricing">
-        <h2>Pricing</h2>
+        <h2>Founding Member Pricing</h2>
+        <p style={{ textAlign: "center", color: "#94a3b8", marginBottom: "0.5rem" }}>
+          Lock in introductory rates. Cancel anytime. No contract.
+        </p>
+        <p style={{ textAlign: "center", color: "#10b981", fontSize: "0.9rem", marginBottom: "2rem" }}>
+          First 100 subscribers get these rates locked for 12 months.
+        </p>
         <div className="pricing-grid">
           {TIERS.map((tier) => (
             <div
@@ -171,10 +181,17 @@ export default function Landing() {
               className={`plan-card ${tier.popular ? "sovereign" : ""}`}
             >
               {tier.popular && <div className="best-value">MOST POPULAR</div>}
+              {tier.bestValue && <div className="best-value" style={{ background: "#0ea5e9" }}>BEST VALUE</div>}
               <h3>{tier.name}</h3>
               <div className="price">
                 {tier.price}
                 <span>/mo</span>
+              </div>
+              <div style={{ color: "#10b981", fontSize: "0.85rem", marginBottom: "0.25rem" }}>
+                {tier.perCredit} per credit
+              </div>
+              <div style={{ color: "#64748b", fontSize: "0.8rem", marginBottom: "1rem" }}>
+                {tier.credits} credits included
               </div>
               <ul>
                 {tier.features.map((f) => (
@@ -186,6 +203,14 @@ export default function Landing() {
               </Link>
             </div>
           ))}
+        </div>
+        <div style={{
+          display: "flex", justifyContent: "center", gap: "2rem",
+          marginTop: "2rem", flexWrap: "wrap", color: "#94a3b8", fontSize: "0.85rem"
+        }}>
+          <span>Cancel anytime — no contract</span>
+          <span>Unused credits roll over 30 days</span>
+          <span>Founding member rates locked in</span>
         </div>
       </section>
 

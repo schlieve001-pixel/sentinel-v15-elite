@@ -32,37 +32,41 @@ WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 BASE_URL = os.getenv("VERIFUSE_BASE_URL", "https://verifuse.tech")
 
 # Stripe Price IDs — create these in your Stripe Dashboard:
-#   1. Product: "VeriFuse Recon" → Price: $199/month (recurring)
-#   2. Product: "VeriFuse Operator" → Price: $399/month (recurring)
-#   3. Product: "VeriFuse Sovereign" → Price: $699/month (recurring)
+#   1. Product: "VeriFuse Scout" → Price: $49/month (recurring)
+#   2. Product: "VeriFuse Operator" → Price: $149/month (recurring)
+#   3. Product: "VeriFuse Sovereign" → Price: $499/month (recurring)
 # Then paste the price_xxx IDs here or set via env vars.
+# Supports STRIPE_MODE-aware env vars (STRIPE_TEST_PRICE_* / STRIPE_LIVE_PRICE_*)
+
+_stripe_mode = (os.getenv("STRIPE_MODE") or "test").lower()
+_price_prefix = "STRIPE_LIVE_PRICE_" if _stripe_mode == "live" else "STRIPE_TEST_PRICE_"
 
 TIER_TO_PRICE: dict[str, str] = {
-    "recon": os.getenv("STRIPE_PRICE_RECON", ""),
-    "operator": os.getenv("STRIPE_PRICE_OPERATOR", ""),
-    "sovereign": os.getenv("STRIPE_PRICE_SOVEREIGN", ""),
+    "scout": os.getenv(f"{_price_prefix}SCOUT", "") or os.getenv("STRIPE_PRICE_SCOUT", ""),
+    "operator": os.getenv(f"{_price_prefix}OPERATOR", "") or os.getenv("STRIPE_PRICE_OPERATOR", ""),
+    "sovereign": os.getenv(f"{_price_prefix}SOVEREIGN", "") or os.getenv("STRIPE_PRICE_SOVEREIGN", ""),
 }
 
 PRICE_TO_TIER: dict[str, str] = {v: k for k, v in TIER_TO_PRICE.items() if v}
 
 TIER_CREDITS: dict[str, int] = {
-    "recon": 5,
-    "operator": 25,
-    "sovereign": 100,
+    "scout": 25,
+    "operator": 100,
+    "sovereign": 500,
 }
 
 # Anti-scraping: daily API request limits per tier (leads endpoint)
 TIER_DAILY_API_LIMIT: dict[str, int] = {
-    "recon": 50,       # 50 lead views/day
-    "operator": 200,   # 200 lead views/day
-    "sovereign": 500,  # 500 lead views/day
+    "scout": 100,          # 100 lead views/day
+    "operator": 500,       # 500 lead views/day
+    "sovereign": 999999,   # Unlimited
 }
 
 # Anti-scraping: concurrent session limit
 TIER_SESSION_LIMIT: dict[str, int] = {
-    "recon": 1,
+    "scout": 1,
     "operator": 2,
-    "sovereign": 3,
+    "sovereign": 5,
 }
 
 

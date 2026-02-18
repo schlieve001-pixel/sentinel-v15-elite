@@ -957,7 +957,7 @@ async def unlock_lead(lead_id: str, request: Request):
         conn.execute("""
             INSERT INTO lead_unlocks (user_id, lead_id, unlocked_at, ip_address, plan_tier)
             VALUES (?, ?, ?, ?, ?)
-        """, [user["user_id"], lead_id, now, ip, user.get("tier", "recon")])
+        """, [user["user_id"], lead_id, now, ip, user.get("tier", "scout")])
 
         # Audit trail
         conn.execute("""
@@ -1004,9 +1004,9 @@ async def billing_upgrade(request: Request):
     new_tier = body.get("tier", "").lower()
 
     valid_tiers = {
-        "recon": 5,
-        "operator": 25,
-        "sovereign": 100,
+        "scout": 25,
+        "operator": 100,
+        "sovereign": 500,
     }
 
     if new_tier not in valid_tiers:
@@ -1117,7 +1117,7 @@ async def api_register(request: Request):
         full_name=body.get("full_name", ""),
         firm_name=body.get("firm_name", ""),
         bar_number=body.get("bar_number", ""),
-        tier=body.get("tier", "recon"),
+        tier=body.get("tier", "scout"),
     )
     return {"token": token, "user": {
         "user_id": user["user_id"], "email": user["email"],
@@ -1431,10 +1431,10 @@ async def billing_checkout(request: Request):
     body = await request.json()
     tier = body.get("tier", "").lower()
 
-    if tier not in ("recon", "operator", "sovereign"):
+    if tier not in ("scout", "operator", "sovereign"):
         raise HTTPException(
             status_code=400,
-            detail="Invalid tier. Choose from: recon, operator, sovereign",
+            detail="Invalid tier. Choose from: scout, operator, sovereign",
         )
 
     try:
