@@ -23,7 +23,7 @@ function useHealth() {
   return ok;
 }
 
-function LeadCard({ lead }: { lead: Lead }) {
+function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) => void }) {
   const isRestricted = lead.restriction_status === "RESTRICTED";
 
   return (
@@ -95,9 +95,9 @@ function LeadCard({ lead }: { lead: Lead }) {
       )}
 
       <div className="card-actions stacked">
-        <Link to={`/lead/${lead.asset_id}`} className="decrypt-btn-sota">
+        <button className="decrypt-btn-sota" onClick={() => onNavigate(lead.asset_id!)}>
           {isRestricted ? "VIEW DETAILS" : "UNLOCK INTEL"}
-        </Link>
+        </button>
         {lead.unlocked_by_me ? (
           <button
             className="btn-outline-sm full-width"
@@ -186,7 +186,25 @@ export default function Dashboard() {
   const [simMode, setSimMode] = useState<string | null>(
     () => localStorage.getItem("vf_simulate")
   );
+  const [legalOpen, setLegalOpen] = useState(false);
   const healthOk = useHealth();
+
+  // Scroll preservation
+  useEffect(() => {
+    const y = Number(sessionStorage.getItem("leadsScrollY") || 0);
+    if (y > 0) requestAnimationFrame(() => window.scrollTo(0, y));
+    return () => {
+      sessionStorage.setItem("leadsScrollY", String(window.scrollY));
+    };
+  }, []);
+
+  // Smart navigation to lead detail
+  function navigateToLead(id: string) {
+    const fromUrl = location.pathname + location.search;
+    sessionStorage.setItem("lastLeadsUrl", fromUrl);
+    sessionStorage.setItem("leadsScrollY", String(window.scrollY));
+    navigate(`/lead/${id}`, { state: { from: fromUrl } });
+  }
 
   function toggleSimMode() {
     if (simMode === "user") {
@@ -267,6 +285,14 @@ export default function Dashboard() {
           )}
         </div>
       </header>
+
+      {/* Admin / Simulation banners */}
+      {user?.is_admin && simMode !== "user" && (
+        <div className="admin-banner">ADMIN MODE</div>
+      )}
+      {user?.is_admin && simMode === "user" && (
+        <div className="sim-banner">SIMULATING USER VIEW (READ ONLY)</div>
+      )}
 
       {/* Email Verification Banner */}
       {user && !user.email_verified && (
@@ -435,7 +461,7 @@ export default function Dashboard() {
               </div>
               <div className="vault-grid">
                 {actionable.map((lead) => (
-                  <LeadCard key={lead.asset_id} lead={lead} />
+                  <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
                 ))}
               </div>
             </div>
@@ -454,7 +480,7 @@ export default function Dashboard() {
               </div>
               <div className="vault-grid">
                 {watchlist.map((lead) => (
-                  <LeadCard key={lead.asset_id} lead={lead} />
+                  <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
                 ))}
               </div>
             </div>
@@ -462,30 +488,34 @@ export default function Dashboard() {
         </>
       )}
 
-      {/* Legal Shield Disclaimer */}
+      {/* Legal Shield Disclaimer (Collapsible) */}
       <div className="dash-disclaimer legal-shield">
-        <strong>LEGAL NOTICE</strong>
-        <p>
-          This platform provides access to publicly available foreclosure sale data compiled
-          from county public records. This platform does not provide finder services, does not
-          contact homeowners, and does not assist in the recovery of overbid or surplus funds.
-        </p>
-        <p>
-          Colorado law (C.R.S. § 38-38-111) prohibits agreements to pay compensation to recover
-          or assist in recovering overbid amounts from the public trustee. Colorado law (C.R.S.
-          § 38-13-1304) restricts agreements to recover unclaimed overbids held by the State
-          Treasurer for at least two years after transfer, and caps compensation at 20-30%.
-        </p>
-        <p>
-          Subscribers acknowledge that inducing or attempting to induce a person to enter into a
-          compensation agreement that violates C.R.S. § 38-38-111 or § 38-13-1304 is a class 2
-          misdemeanor and a deceptive trade practice under the Colorado Consumer Protection Act.
-        </p>
-        <p>
-          This data subscription does not constitute legal advice. Surplus amounts marked
-          "DETECTED" have not been independently confirmed against county indebtedness records.
-          No phone numbers, email addresses, or skip-tracing data are provided by this platform.
-        </p>
+        <strong onClick={() => setLegalOpen(!legalOpen)} style={{ cursor: "pointer" }}>
+          LEGAL NOTICE {legalOpen ? "\u25B4" : "\u25BE"}
+        </strong>
+        {legalOpen && (<>
+          <p>
+            This platform provides access to publicly available foreclosure sale data compiled
+            from county public records. This platform does not provide finder services, does not
+            contact homeowners, and does not assist in the recovery of overbid or surplus funds.
+          </p>
+          <p>
+            Colorado law (C.R.S. § 38-38-111) prohibits agreements to pay compensation to recover
+            or assist in recovering overbid amounts from the public trustee. Colorado law (C.R.S.
+            § 38-13-1304) restricts agreements to recover unclaimed overbids held by the State
+            Treasurer for at least two years after transfer, and caps compensation at 20-30%.
+          </p>
+          <p>
+            Subscribers acknowledge that inducing or attempting to induce a person to enter into a
+            compensation agreement that violates C.R.S. § 38-38-111 or § 38-13-1304 is a class 2
+            misdemeanor and a deceptive trade practice under the Colorado Consumer Protection Act.
+          </p>
+          <p>
+            This data subscription does not constitute legal advice. Surplus amounts marked
+            "DETECTED" have not been independently confirmed against county indebtedness records.
+            No phone numbers, email addresses, or skip-tracing data are provided by this platform.
+          </p>
+        </>)}
       </div>
     </div>
   );

@@ -73,6 +73,35 @@ if not _PREVIEW_HMAC_SECRET:
 
 log = logging.getLogger(__name__)
 
+# ── Stripe PRICE_MAP (mode-aware) ────────────────────────────────────
+_price_prefix = "STRIPE_LIVE_PRICE_" if STRIPE_MODE == "live" else "STRIPE_TEST_PRICE_"
+
+STARTER_CREDITS = 10
+STARTER_PRICE = 1900  # $19.00 in cents
+EXPECTED_CURRENCY = "usd"
+EXPECTED_LIVEMODE = STRIPE_MODE == "live"
+FOUNDERS_MAX_SLOTS = int(os.environ.get("FOUNDERS_MAX_SLOTS", "100"))
+
+# Map Stripe price_id → {tier, monthly_credits, kind}
+# Built dynamically from env vars
+_PRICE_MAP: dict[str, dict] = {}
+
+def _build_price_map() -> None:
+    """Build PRICE_MAP from environment. Called at startup."""
+    global _PRICE_MAP
+    _PRICE_MAP = {}
+    tiers = {
+        "SCOUT": {"tier": "scout", "monthly_credits": 25, "kind": "subscription"},
+        "OPERATOR": {"tier": "operator", "monthly_credits": 100, "kind": "subscription"},
+        "SOVEREIGN": {"tier": "sovereign", "monthly_credits": 500, "kind": "subscription"},
+        "STARTER": {"tier": "starter", "monthly_credits": STARTER_CREDITS, "kind": "starter"},
+    }
+    for name, info in tiers.items():
+        price_id = os.environ.get(f"{_price_prefix}{name}", "")
+        if price_id and price_id != "price_PLACEHOLDER":
+            _PRICE_MAP[price_id] = info
+    log.info("PRICE_MAP built: %d entries (mode=%s)", len(_PRICE_MAP), STRIPE_MODE)
+
 # ── Build ID (git short hash at import time) ─────────────────────────
 _BUILD_ID = "dev"
 try:
@@ -92,7 +121,105 @@ def _get_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+# ── Wallet helpers ──────────────────────────────────────────────────
+
+def get_or_create_wallet(user_id: str, conn: sqlite3.Connection = None) -> dict:
+    """Ensure wallet row exists. Returns wallet dict. Uses provided conn or creates one."""
+    close_conn = False
+    if conn is None:
+        conn = _get_conn()
+        close_conn = True
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO wallet (user_id, subscription_credits, purchased_credits, tier, updated_at) "
+            "VALUES (?, 0, 0, 'scout', datetime('now'))",
+            [user_id],
+        )
+        row = conn.execute(
+            "SELECT user_id, subscription_credits, purchased_credits, tier, updated_at FROM wallet WHERE user_id = ?",
+            [user_id],
+        ).fetchone()
+        if close_conn:
+            conn.commit()
+        return dict(row) if row else {"user_id": user_id, "subscription_credits": 0, "purchased_credits": 0, "tier": "scout"}
+    finally:
+        if close_conn:
+            conn.close()
+
+
+def _wallet_total(wallet: dict) -> int:
+    """Total available credits (subscription + purchased)."""
+    return (wallet.get("subscription_credits") or 0) + (wallet.get("purchased_credits") or 0)
+
+
+def _audit_log(conn: sqlite3.Connection, user_id: str, action: str, meta: dict = None, ip: str = "") -> None:
+    """Insert an audit log entry. Never logs PII/tokens/passwords."""
+    import uuid
+    meta_json = json.dumps(meta) if meta else None
+    conn.execute(
+        "INSERT INTO audit_log (id, user_id, action, meta_json, created_at, ip) "
+        "VALUES (?, ?, ?, ?, datetime('now'), ?)",
+        [str(uuid.uuid4()), user_id, action, meta_json, ip],
+    )
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract client IP from X-Forwarded-For or direct connection."""
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if not ip and request.client:
+        ip = request.client.host
+    return ip
+
+
+def _purge_stale_rate_limits() -> None:
+    """Purge rate_limits entries older than 24 hours. Called periodically."""
+    try:
+        conn = _get_conn()
+        conn.execute("DELETE FROM rate_limits WHERE ts < (strftime('%s','now') - 86400)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _try_founders_redemption(user_id: str) -> bool:
+    """Race-safe founders pricing redemption. Returns True if slot claimed."""
+    conn = _get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        count = conn.execute("SELECT COUNT(*) FROM founders_redemptions").fetchone()[0]
+        if count >= FOUNDERS_MAX_SLOTS:
+            conn.execute("ROLLBACK")
+            return False
+        # Check if already redeemed
+        existing = conn.execute(
+            "SELECT 1 FROM founders_redemptions WHERE user_id = ?", [user_id]
+        ).fetchone()
+        if existing:
+            conn.execute("ROLLBACK")
+            return True  # Already has it
+        conn.execute(
+            "INSERT INTO founders_redemptions (user_id, redeemed_at) VALUES (?, datetime('now'))",
+            [user_id],
+        )
+        conn.execute(
+            "UPDATE users SET founders_pricing = 1 WHERE user_id = ?", [user_id]
+        )
+        conn.execute("COMMIT")
+        log.info("Founders slot claimed: user=%s (slot %d/%d)", user_id, count + 1, FOUNDERS_MAX_SLOTS)
+        return True
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        return False
+    finally:
+        conn.close()
 
 
 # ── SafeAsset model (NULL-safe: every numeric field is Optional) ────
@@ -606,6 +733,9 @@ async def startup():
         log.warning("Preview lookup build failed: %s", e)
     log.info("Preview lookup built: %d entries", len(_PREVIEW_LOOKUP))
 
+    # Build PRICE_MAP
+    _build_price_map()
+
     # SMTP status
     smtp_configured = bool(os.environ.get("SMTP_HOST"))
     log.info("SMTP configured: %s", "yes" if smtp_configured else "no (dev mode — codes logged to console)")
@@ -613,8 +743,17 @@ async def startup():
     # Stripe status
     log.info("Stripe mode: %s | secret_key: %s", STRIPE_MODE, "set" if STRIPE_SECRET_KEY else "NOT SET")
 
+    # Founders status
+    try:
+        conn2 = _get_conn()
+        founders_count = conn2.execute("SELECT COUNT(*) FROM founders_redemptions").fetchone()[0]
+        conn2.close()
+        log.info("Founders: %d/%d slots claimed", founders_count, FOUNDERS_MAX_SLOTS)
+    except Exception:
+        pass
+
     log.info(
-        "Titanium API v4.1 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d | build: %s",
+        "Omega v4.7 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d | build: %s",
         VERIFUSE_DB_PATH, inode, sha, rows, len(_LEADS_COLUMNS), _BUILD_ID,
     )
 
@@ -846,19 +985,21 @@ async def get_leads(
 # ── POST /api/leads/{id}/unlock — Double Gate + Atomic Credits ──────
 
 @app.post("/api/leads/{lead_id}/unlock")
-@limiter.limit("10/minute")
+@limiter.limit("30/minute")
 async def unlock_lead(lead_id: str, request: Request):
-    """Unlock a lead with Double Gate enforcement.
+    """Unlock a lead with Double Gate enforcement + wallet-based credits.
 
     RESTRICTED: requires is_verified_attorney + (OPERATOR or SOVEREIGN tier)
-    ACTIONABLE: any paid user with credits >= 1
+    ACTIONABLE: any paid user with credits >= cost
     EXPIRED: cannot unlock
+    Spend order: subscription_credits first, then purchased_credits.
     """
     user = _require_user(request)
     _check_email_verified(user, request)
     now = datetime.now(timezone.utc).isoformat()
+    ip = _get_client_ip(request)
 
-    # Admin bypass
+    # Admin bypass (not simulating)
     if _effective_admin(user, request):
         conn = _get_conn()
         try:
@@ -905,11 +1046,24 @@ async def unlock_lead(lead_id: str, request: Request):
                 detail="RESTRICTED lead requires OPERATOR or SOVEREIGN tier.",
             )
 
-    # ── Gate 3: Atomic credit deduction (BEGIN IMMEDIATE) ────────
+    # Determine credit cost (dynamic pricing from scoring engine)
+    cost = 1
+    try:
+        from verifuse_v2.core.scoring import OpportunityEngine
+        cost = OpportunityEngine.get_credit_cost(
+            int(lead.get("confidence_score") or 50)
+        )
+    except Exception:
+        pass  # Default to 1 if scoring unavailable
+
+    # ── Gate 3: Atomic wallet deduction (BEGIN IMMEDIATE) ────────
     conn = _get_conn()
     credits_after = 0
     try:
         conn.execute("BEGIN IMMEDIATE")
+
+        # Ensure wallet exists
+        get_or_create_wallet(user["user_id"], conn)
 
         # Check if already unlocked
         existing = conn.execute(
@@ -918,63 +1072,84 @@ async def unlock_lead(lead_id: str, request: Request):
         ).fetchone()
 
         if existing:
-            # Already unlocked — return full asset with current credits
-            credits_row = conn.execute(
-                "SELECT credits_remaining FROM users WHERE user_id = ?",
+            # Already unlocked — return full asset, cost 0
+            w = conn.execute(
+                "SELECT subscription_credits, purchased_credits FROM wallet WHERE user_id = ?",
                 [user["user_id"]],
             ).fetchone()
-            credits_after = credits_row[0] if credits_row else 0
+            credits_after = (w["subscription_credits"] + w["purchased_credits"]) if w else 0
             conn.execute("COMMIT")
             result = _row_to_full(lead)
             result["ok"] = True
             result["credits_remaining"] = credits_after
+            result["credits_spent"] = 0
             return result
 
-        # Check credits
-        credits = conn.execute(
-            "SELECT credits_remaining FROM users WHERE user_id = ?",
+        # Check wallet balance
+        w = conn.execute(
+            "SELECT subscription_credits, purchased_credits FROM wallet WHERE user_id = ?",
             [user["user_id"]],
         ).fetchone()
+        sub_credits = w["subscription_credits"] if w else 0
+        pur_credits = w["purchased_credits"] if w else 0
+        total = sub_credits + pur_credits
 
-        if not credits or credits[0] <= 0:
+        if total < cost:
             conn.execute("ROLLBACK")
             raise HTTPException(
                 status_code=402,
-                detail="Insufficient credits. Upgrade your plan.",
+                detail=f"Insufficient credits. Need {cost}, have {total}. Upgrade your plan.",
             )
 
-        # Deduct 1 credit
+        # Spend order: subscription first, then purchased
+        sub_spend = min(cost, sub_credits)
+        pur_spend = cost - sub_spend
+
         conn.execute(
-            "UPDATE users SET credits_remaining = credits_remaining - 1 WHERE user_id = ?",
-            [user["user_id"]],
+            "UPDATE wallet SET subscription_credits = subscription_credits - ?, "
+            "purchased_credits = purchased_credits - ?, updated_at = ? WHERE user_id = ?",
+            [sub_spend, pur_spend, now, user["user_id"]],
         )
 
-        # Record unlock
-        ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        if not ip and request.client:
-            ip = request.client.host
+        # Also update users.credits_remaining for backward compat
+        conn.execute(
+            "UPDATE users SET credits_remaining = MAX(credits_remaining - ?, 0) WHERE user_id = ?",
+            [cost, user["user_id"]],
+        )
 
-        conn.execute("""
-            INSERT INTO lead_unlocks (user_id, lead_id, unlocked_at, ip_address, plan_tier)
-            VALUES (?, ?, ?, ?, ?)
-        """, [user["user_id"], lead_id, now, ip, user.get("tier", "scout")])
+        # Record unlock (IntegrityError caught = idempotent)
+        try:
+            conn.execute(
+                "INSERT INTO lead_unlocks (user_id, lead_id, unlocked_at, ip_address, plan_tier) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [user["user_id"], lead_id, now, ip, user.get("tier", "scout")],
+            )
+        except sqlite3.IntegrityError:
+            # Concurrent unlock — already exists, rollback spend
+            conn.execute("ROLLBACK")
+            result = _row_to_full(lead)
+            result["ok"] = True
+            result["credits_remaining"] = total
+            result["credits_spent"] = 0
+            return result
 
-        # Audit trail
-        conn.execute("""
-            INSERT INTO pipeline_events
-            (asset_id, event_type, old_value, new_value, actor, reason, created_at)
-            VALUES (?, 'LEAD_UNLOCK', ?, ?, ?, ?, ?)
-        """, [
-            lead_id,
-            f"credits={credits[0]}",
-            f"credits={credits[0] - 1}",
-            user["user_id"],
-            f"tier={user.get('tier')} status={status}",
-            now,
-        ])
+        # Transaction record
+        import uuid
+        conn.execute(
+            "INSERT INTO transactions (id, user_id, type, amount, credits, balance_after, idempotency_key, created_at) "
+            "VALUES (?, ?, 'unlock', 0, ?, ?, ?, ?)",
+            [str(uuid.uuid4()), user["user_id"], -cost, total - cost,
+             f"unlock:{user['user_id']}:{lead_id}", now],
+        )
+
+        # Audit log
+        _audit_log(conn, user["user_id"], "lead_unlock", {
+            "lead_id": lead_id, "cost": cost, "balance_after": total - cost,
+            "tier": user.get("tier"), "status": status,
+        }, ip)
 
         conn.execute("COMMIT")
-        credits_after = credits[0] - 1
+        credits_after = total - cost
 
     except HTTPException:
         raise
@@ -991,6 +1166,7 @@ async def unlock_lead(lead_id: str, request: Request):
     result = _row_to_full(lead)
     result["ok"] = True
     result["credits_remaining"] = credits_after
+    result["credits_spent"] = cost
     return result
 
 
@@ -1119,9 +1295,14 @@ async def api_register(request: Request):
         bar_number=body.get("bar_number", ""),
         tier=body.get("tier", "scout"),
     )
+    # Create wallet for new user
+    get_or_create_wallet(user["user_id"])
+    # Founders cap check
+    _try_founders_redemption(user["user_id"])
+    wallet = get_or_create_wallet(user["user_id"])
     return {"token": token, "user": {
         "user_id": user["user_id"], "email": user["email"],
-        "tier": user["tier"], "credits_remaining": user["credits_remaining"],
+        "tier": user["tier"], "credits_remaining": _wallet_total(wallet),
     }}
 
 
@@ -1138,6 +1319,8 @@ async def api_login(request: Request):
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password required.")
     user, token = login_user(email=email, password=password)
+    # Ensure wallet exists on login
+    wallet = get_or_create_wallet(user["user_id"])
     return {"token": token, "user": {
         "user_id": user["user_id"], "email": user["email"],
         "tier": user["tier"], "credits_remaining": user["credits_remaining"],
@@ -1147,16 +1330,20 @@ async def api_login(request: Request):
 @app.get("/api/auth/me")
 async def api_me(request: Request):
     user = _require_user(request)
+    wallet = get_or_create_wallet(user["user_id"])
     return {
         "user_id": user["user_id"],
         "email": user["email"],
         "full_name": user.get("full_name", ""),
         "firm_name": user.get("firm_name", ""),
         "tier": user["tier"],
-        "credits_remaining": user["credits_remaining"],
+        "credits_remaining": _wallet_total(wallet),
+        "subscription_credits": wallet.get("subscription_credits", 0),
+        "purchased_credits": wallet.get("purchased_credits", 0),
         "attorney_status": user.get("attorney_status", "NONE"),
         "is_admin": bool(user.get("is_admin", 0)),
         "email_verified": bool(user.get("email_verified", 0)),
+        "founders_pricing": bool(user.get("founders_pricing", 0)),
     }
 
 
@@ -1286,6 +1473,37 @@ async def get_lead_detail(lead_id: str, request: Request):
         finally:
             conn2.close()
     result["unlocked_by_me"] = is_unlocked
+
+    # ── Unique view limiting (per tier) ──────────────────────────
+    if user and not is_unlocked and not _effective_admin(user, request):
+        from verifuse_v2.server.billing import TIER_DAILY_API_LIMIT
+        tier = user.get("tier", "scout")
+        daily_limit = TIER_DAILY_API_LIMIT.get(tier, 100)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        conn3 = _get_conn()
+        try:
+            # Record this view (ignore duplicate)
+            try:
+                conn3.execute(
+                    "INSERT INTO user_daily_lead_views (user_id, day, lead_id) VALUES (?, ?, ?)",
+                    [user["user_id"], today, lead_id],
+                )
+                conn3.commit()
+            except sqlite3.IntegrityError:
+                pass  # Already viewed today
+            # Count unique views today
+            count_row = conn3.execute(
+                "SELECT COUNT(*) FROM user_daily_lead_views WHERE user_id = ? AND day = ?",
+                [user["user_id"], today],
+            ).fetchone()
+            view_count = count_row[0] if count_row else 0
+            if view_count > daily_limit:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Daily view limit reached ({daily_limit} unique leads/day for {tier} tier). Upgrade to view more.",
+                )
+        finally:
+            conn3.close()
 
     # Mask PII for non-unlocked, non-admin users
     # SafeAsset only has case_number; owner_name/property_address/recorder_link are in FullAsset
@@ -1452,6 +1670,336 @@ async def billing_checkout(request: Request):
         raise HTTPException(status_code=503, detail="Billing service unavailable.")
 
 
+# ── POST /api/billing/starter — Starter Pack one-time purchase ──────
+
+@app.post("/api/billing/starter")
+async def billing_starter(request: Request):
+    """Create a Stripe checkout session for the $19 Starter Pack (10 credits)."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Billing not configured.")
+
+    user = _require_user(request)
+
+    starter_price_id = os.environ.get(f"{_price_prefix}STARTER", "")
+    if not starter_price_id or starter_price_id == "price_PLACEHOLDER":
+        raise HTTPException(status_code=503, detail="Starter pack not configured.")
+
+    try:
+        import stripe
+        stripe.api_key = STRIPE_SECRET_KEY
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            customer_email=user["email"],
+            client_reference_id=user["user_id"],
+            metadata={
+                "sku": "starter_pack",
+                "user_id": user["user_id"],
+                "price_id": starter_price_id,
+                "credits": str(STARTER_CREDITS),
+            },
+            line_items=[{"price": starter_price_id, "quantity": 1}],
+            success_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/dashboard?starter=success",
+            cancel_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/pricing",
+        )
+        return {"checkout_url": session.url}
+    except Exception as e:
+        log.error("Starter checkout failed: %s", e)
+        raise HTTPException(status_code=503, detail="Billing service unavailable.")
+
+
+# ── POST /api/webhook — Stripe webhook (belt + suspenders) ──────────
+
+@app.post("/api/webhook")
+async def stripe_webhook(request: Request):
+    """Stripe webhook handler with idempotency and strict validation.
+
+    Handles:
+      - checkout.session.completed (starter pack crediting)
+      - invoice.payment_succeeded (subscription cycle/create)
+      - customer.subscription.deleted (cancellation)
+    """
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+
+    # Verify signature
+    if STRIPE_WEBHOOK_SECRET:
+        try:
+            import stripe
+            event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid signature.")
+    else:
+        event = json.loads(payload)
+
+    event_id = event.get("id", "")
+    event_type = event.get("type", "")
+    data_obj = event.get("data", {}).get("object", {})
+
+    # Idempotency: check if we've already processed this event
+    conn = _get_conn()
+    try:
+        existing = conn.execute(
+            "SELECT 1 FROM stripe_events WHERE event_id = ?", [event_id]
+        ).fetchone()
+        if existing:
+            return {"status": "already_processed"}
+        conn.execute(
+            "INSERT INTO stripe_events (event_id, type, received_at) VALUES (?, ?, datetime('now'))",
+            [event_id, event_type],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if event_type == "checkout.session.completed":
+        _handle_checkout_session(data_obj)
+    elif event_type == "invoice.payment_succeeded":
+        _handle_invoice_payment(data_obj)
+    elif event_type == "customer.subscription.deleted":
+        _handle_subscription_cancelled(data_obj)
+    else:
+        log.debug("Unhandled Stripe event: %s", event_type)
+
+    return {"status": "ok"}
+
+
+def _handle_checkout_session(session: dict) -> None:
+    """Handle checkout.session.completed — starter pack crediting."""
+    metadata = session.get("metadata", {})
+    sku = metadata.get("sku", "")
+
+    if sku == "starter_pack":
+        # Starter pack validation — ALL must pass
+        if session.get("mode") != "payment":
+            log.warning("Starter: mode != payment")
+            return
+        if session.get("payment_status") != "paid":
+            log.warning("Starter: payment_status != paid")
+            return
+        user_id = metadata.get("user_id", "")
+        if not user_id:
+            log.warning("Starter: no user_id in metadata")
+            return
+        if session.get("client_reference_id") != user_id:
+            log.warning("Starter: client_reference_id mismatch")
+            return
+        credits_str = metadata.get("credits", "")
+        if credits_str != str(STARTER_CREDITS):
+            log.warning("Starter: credits mismatch (got %s, expected %s)", credits_str, STARTER_CREDITS)
+            return
+        amount_total = session.get("amount_total", 0)
+        if amount_total <= 0:
+            log.warning("Starter: amount_total <= 0")
+            return
+        currency = (session.get("currency") or "").lower()
+        if currency != EXPECTED_CURRENCY:
+            log.warning("Starter: currency mismatch (got %s)", currency)
+            return
+
+        # Credit the starter pack
+        conn = _get_conn()
+        try:
+            get_or_create_wallet(user_id, conn)
+            conn.execute(
+                "UPDATE wallet SET purchased_credits = purchased_credits + ?, updated_at = datetime('now') "
+                "WHERE user_id = ?",
+                [STARTER_CREDITS, user_id],
+            )
+            conn.execute(
+                "UPDATE users SET credits_remaining = credits_remaining + ? WHERE user_id = ?",
+                [STARTER_CREDITS, user_id],
+            )
+            _audit_log(conn, user_id, "starter_pack_credited", {
+                "credits": STARTER_CREDITS, "amount_total": amount_total,
+                "session_id": session.get("id", ""),
+            })
+            conn.commit()
+            log.info("Starter pack credited: user=%s credits=%d", user_id, STARTER_CREDITS)
+        finally:
+            conn.close()
+    else:
+        # Subscription checkout — activate subscription
+        user_id = metadata.get("user_id", "")
+        tier = metadata.get("tier", "scout")
+        customer_id = session.get("customer", "")
+        subscription_id = session.get("subscription", "")
+
+        if not user_id:
+            log.warning("Subscription checkout: no user_id")
+            return
+
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "UPDATE users SET stripe_customer_id = ?, stripe_subscription_id = ?, "
+                "subscription_status = 'active', tier = ? WHERE user_id = ?",
+                [customer_id, subscription_id, tier, user_id],
+            )
+            get_or_create_wallet(user_id, conn)
+            from verifuse_v2.server.billing import TIER_CREDITS
+            monthly = TIER_CREDITS.get(tier, 25)
+            conn.execute(
+                "UPDATE wallet SET tier = ?, subscription_credits = ?, updated_at = datetime('now') "
+                "WHERE user_id = ?",
+                [tier, monthly, user_id],
+            )
+            _audit_log(conn, user_id, "subscription_activated", {
+                "tier": tier, "customer_id": customer_id,
+            })
+            conn.commit()
+            log.info("Subscription activated: user=%s tier=%s", user_id, tier)
+        finally:
+            conn.close()
+
+
+def _handle_invoice_payment(invoice: dict) -> None:
+    """Handle invoice.payment_succeeded — subscription cycle crediting.
+
+    STRICTEST validation: all checks must pass before crediting.
+    """
+    # Basic invoice validation
+    if not invoice.get("paid"):
+        return
+    if invoice.get("status") != "paid":
+        return
+    amount_paid = invoice.get("amount_paid", 0)
+    if amount_paid <= 0:
+        return
+    amount_due = invoice.get("amount_due", 0)
+    if amount_paid < amount_due:
+        return
+    customer_id = invoice.get("customer", "")
+    subscription_id = invoice.get("subscription", "")
+    if not customer_id or not subscription_id:
+        return
+    currency = (invoice.get("currency") or "").lower()
+    if currency != EXPECTED_CURRENCY:
+        log.warning("Invoice: currency mismatch (got %s)", currency)
+        return
+
+    # Map invoice → user
+    conn = _get_conn()
+    try:
+        user_row = conn.execute(
+            "SELECT user_id, stripe_subscription_id, tier FROM users WHERE stripe_customer_id = ?",
+            [customer_id],
+        ).fetchone()
+        if not user_row:
+            _audit_log(conn, "", "unknown_customer", {"customer_id": customer_id})
+            conn.commit()
+            log.warning("Invoice: unknown customer %s", customer_id)
+            return
+
+        user_id = user_row["user_id"]
+        existing_sub = user_row["stripe_subscription_id"]
+
+        # Subscription ID validation
+        if existing_sub and existing_sub != subscription_id:
+            _audit_log(conn, user_id, "subscription_mismatch", {
+                "expected": existing_sub, "got": subscription_id,
+            })
+            conn.commit()
+            log.warning("Invoice: subscription mismatch for user %s", user_id)
+            return
+        if not existing_sub:
+            conn.execute(
+                "UPDATE users SET stripe_subscription_id = ? WHERE user_id = ?",
+                [subscription_id, user_id],
+            )
+
+        # Line-item extraction — find valid subscription line
+        lines = invoice.get("lines", {}).get("data", [])
+        valid_line = None
+        for line in lines:
+            price_id = line.get("price", {}).get("id", "")
+            if price_id not in _PRICE_MAP:
+                continue
+            if _PRICE_MAP[price_id]["kind"] != "subscription":
+                continue
+            if line.get("proration", False):
+                continue
+            if line.get("amount", 0) <= 0:
+                continue
+            valid_line = line
+            break
+
+        if not valid_line:
+            _audit_log(conn, user_id, "no_valid_subscription_line", {
+                "line_count": len(lines),
+            })
+            conn.commit()
+            log.warning("Invoice: no valid subscription line for user %s", user_id)
+            return
+
+        price_id = valid_line["price"]["id"]
+        price_info = _PRICE_MAP[price_id]
+        billing_reason = invoice.get("billing_reason", "")
+
+        if billing_reason == "subscription_update":
+            # Tier sync only — NO credits
+            conn.execute(
+                "UPDATE users SET tier = ?, subscription_status = 'active' WHERE user_id = ?",
+                [price_info["tier"], user_id],
+            )
+            get_or_create_wallet(user_id, conn)
+            conn.execute(
+                "UPDATE wallet SET tier = ?, updated_at = datetime('now') WHERE user_id = ?",
+                [price_info["tier"], user_id],
+            )
+            _audit_log(conn, user_id, "subscription_tier_sync", {"tier": price_info["tier"]})
+        elif billing_reason in ("subscription_cycle", "subscription_create"):
+            # GRANT credits with 2x cap
+            monthly = price_info["monthly_credits"]
+            get_or_create_wallet(user_id, conn)
+            conn.execute(
+                "UPDATE wallet SET subscription_credits = MIN(subscription_credits + ?, ? * 2), "
+                "tier = ?, updated_at = datetime('now') WHERE user_id = ?",
+                [monthly, monthly, price_info["tier"], user_id],
+            )
+            conn.execute(
+                "UPDATE users SET tier = ?, subscription_status = 'active', "
+                "credits_remaining = credits_remaining + ? WHERE user_id = ?",
+                [price_info["tier"], monthly, user_id],
+            )
+            _audit_log(conn, user_id, "subscription_credits_granted", {
+                "tier": price_info["tier"], "credits": monthly, "reason": billing_reason,
+            })
+            log.info("Credits granted: user=%s tier=%s credits=%d reason=%s",
+                     user_id, price_info["tier"], monthly, billing_reason)
+        else:
+            log.debug("Invoice: unhandled billing_reason=%s for user %s", billing_reason, user_id)
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _handle_subscription_cancelled(subscription: dict) -> None:
+    """Handle customer.subscription.deleted — cancel subscription."""
+    customer_id = subscription.get("customer", "")
+    if not customer_id:
+        return
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET subscription_status = 'canceled' WHERE stripe_customer_id = ?",
+            [customer_id],
+        )
+        user_row = conn.execute(
+            "SELECT user_id FROM users WHERE stripe_customer_id = ?", [customer_id]
+        ).fetchone()
+        if user_row:
+            _audit_log(conn, user_row["user_id"], "subscription_cancelled", {
+                "customer_id": customer_id,
+            })
+        conn.commit()
+        log.info("Subscription cancelled: customer=%s", customer_id)
+    finally:
+        conn.close()
+
+
 # ── GET /api/counties — County breakdown ───────────────────────────
 
 @app.get("/api/counties")
@@ -1473,6 +2021,37 @@ async def get_counties():
     return {
         "count": len(rows),
         "counties": [dict(r) for r in rows],
+    }
+
+
+# ── GET /api/inventory_health — Vault status ──────────────────────
+
+@app.get("/api/inventory_health")
+async def inventory_health():
+    """Public inventory health summary for dashboard."""
+    conn = _get_conn()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+        active = conn.execute(
+            "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 100 "
+            f"AND data_grade != 'REJECT' {_EXPIRED_FILTER}"
+        ).fetchone()[0]
+        new_7d = conn.execute(
+            "SELECT COUNT(*) FROM leads WHERE sale_date >= date('now', '-7 days')"
+        ).fetchone()[0]
+        # Completeness: leads with surplus > 0 and non-null owner_name
+        complete = conn.execute(
+            "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0 "
+            "AND owner_name IS NOT NULL AND TRIM(owner_name) != ''"
+        ).fetchone()[0]
+        completeness_pct = round(complete / total * 100, 1) if total > 0 else 0
+    finally:
+        conn.close()
+    return {
+        "active_leads": active,
+        "total_leads": total,
+        "new_last_7d": new_7d,
+        "completeness_pct": completeness_pct,
     }
 
 
@@ -1533,6 +2112,64 @@ async def admin_coverage(request: Request):
     from verifuse_v2.scripts.coverage_report import generate_report
     report = generate_report()
     return {"count": len(report), "counties": report}
+
+
+# ── Attorney Verification Endpoints ──────────────────────────────
+
+@app.post("/api/attorney/verify")
+@limiter.limit("5/minute")
+async def attorney_verify(request: Request):
+    """Submit attorney verification (bar number + state). Sets status to 'pending'."""
+    user = _require_user(request)
+    body = await request.json()
+    bar_number = (body.get("bar_number") or "").strip()
+    bar_state = (body.get("bar_state") or "CO").strip().upper()
+
+    if not bar_number:
+        raise HTTPException(status_code=400, detail="Bar number required.")
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET bar_number = ?, bar_state = ?, attorney_status = 'PENDING' WHERE user_id = ?",
+            [bar_number, bar_state, user["user_id"]],
+        )
+        _audit_log(conn, user["user_id"], "attorney_verify_submitted", {
+            "bar_number": bar_number, "bar_state": bar_state,
+        }, _get_client_ip(request))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "attorney_status": "PENDING"}
+
+
+@app.post("/api/admin/attorney/approve")
+async def admin_attorney_approve(request: Request):
+    """Admin: approve attorney verification. Sets status to 'VERIFIED'."""
+    admin = _require_user(request)
+    if not _is_admin(admin):
+        raise HTTPException(status_code=403, detail="Admin only.")
+    body = await request.json()
+    user_id = body.get("user_id", "")
+    verification_url = body.get("verification_url", "")
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required.")
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET attorney_status = 'VERIFIED', verified_attorney = 1, "
+            "bar_verified_at = datetime('now'), verification_url = ? WHERE user_id = ?",
+            [verification_url, user_id],
+        )
+        _audit_log(conn, user_id, "attorney_approved", {
+            "approved_by": admin["user_id"],
+        })
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "attorney_status": "VERIFIED"}
 
 
 # ── Attorney Tool Endpoints ───────────────────────────────────────
