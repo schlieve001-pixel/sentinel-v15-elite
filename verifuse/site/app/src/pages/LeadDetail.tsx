@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
 import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, type Lead, type UnlockResponse, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
@@ -17,6 +17,16 @@ export default function LeadDetail() {
   const { assetId } = useParams<{ assetId: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Smart back navigation
+  const backUrl = (location.state as { from?: string })?.from
+    || sessionStorage.getItem("lastLeadsUrl")
+    || (user ? "/dashboard" : "/preview");
+
+  function goBack() {
+    navigate(backUrl, { replace: true });
+  }
   const [lead, setLead] = useState<Lead | null>(null);
   const [unlocked, setUnlocked] = useState<UnlockResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -78,9 +88,9 @@ export default function LeadDetail() {
       <div className="detail-page">
         <div className="center-content">
           <p className="auth-error">{error}</p>
-          <Link to="/dashboard" className="btn-outline" style={{ marginTop: 20 }}>
-            BACK TO DASHBOARD
-          </Link>
+          <button className="btn-outline" style={{ marginTop: 20 }} onClick={goBack}>
+            BACK TO VAULT
+          </button>
         </div>
       </div>
     );
@@ -102,7 +112,7 @@ export default function LeadDetail() {
       </header>
 
       <div className="detail-container">
-        <Link to="/dashboard" className="back-link">&larr; Back to Dashboard</Link>
+        <button className="back-link" onClick={goBack} style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}>&larr; Back to Vault</button>
 
         {lead && (
           <div className="detail-card">

@@ -802,6 +802,26 @@ a:hover { text-decoration: underline; }
   background: rgba(245, 158, 11, 0.1);
 }
 
+.admin-banner {
+  background: #1e40af;
+  color: #fff;
+  text-align: center;
+  padding: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+}
+
+.sim-banner {
+  background: #b45309;
+  color: #fff;
+  text-align: center;
+  padding: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+}
+
 .grade-filter-label {
   font-size: 0.65rem;
   font-weight: 700;

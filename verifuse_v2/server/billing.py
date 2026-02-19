@@ -148,7 +148,7 @@ async def handle_stripe_webhook(request: Request) -> dict:
 def _handle_checkout_completed(session: dict) -> None:
     """Activate subscription after successful checkout."""
     user_id = session.get("metadata", {}).get("user_id")
-    tier = session.get("metadata", {}).get("tier", "recon")
+    tier = session.get("metadata", {}).get("tier", "scout")
     customer_id = session.get("customer", "")
     subscription_id = session.get("subscription", "")
 
@@ -188,7 +188,8 @@ def _handle_subscription_deleted(subscription: dict) -> None:
     customer_id = subscription.get("customer", "")
     with db.get_db() as conn:
         conn.execute(
-            "UPDATE users SET is_active = 0, tier = 'recon', credits_remaining = 0 "
+            "UPDATE users SET is_active = 0, tier = 'scout', credits_remaining = 0, "
+            "subscription_status = 'canceled' "
             "WHERE stripe_customer_id = ?",
             [customer_id],
         )
