@@ -73,34 +73,21 @@ if not _PREVIEW_HMAC_SECRET:
 
 log = logging.getLogger(__name__)
 
-# ── Stripe PRICE_MAP (mode-aware) ────────────────────────────────────
-_price_prefix = "STRIPE_LIVE_PRICE_" if STRIPE_MODE == "live" else "STRIPE_TEST_PRICE_"
+# ── Pricing & entitlements (canonical source) ─────────────────────────
+from verifuse_v2.server.pricing import (
+    FOUNDERS_MAX_SLOTS,
+    STARTER_PACK,
+    build_price_map,
+    get_monthly_credits,
+    get_daily_limit,
+)
 
-STARTER_CREDITS = 10
-STARTER_PRICE = 1900  # $19.00 in cents
 EXPECTED_CURRENCY = "usd"
 EXPECTED_LIVEMODE = STRIPE_MODE == "live"
-FOUNDERS_MAX_SLOTS = int(os.environ.get("FOUNDERS_MAX_SLOTS", "100"))
 
 # Map Stripe price_id → {tier, monthly_credits, kind}
-# Built dynamically from env vars
+# Built at startup via build_price_map()
 _PRICE_MAP: dict[str, dict] = {}
-
-def _build_price_map() -> None:
-    """Build PRICE_MAP from environment. Called at startup."""
-    global _PRICE_MAP
-    _PRICE_MAP = {}
-    tiers = {
-        "SCOUT": {"tier": "scout", "monthly_credits": 25, "kind": "subscription"},
-        "OPERATOR": {"tier": "operator", "monthly_credits": 100, "kind": "subscription"},
-        "SOVEREIGN": {"tier": "sovereign", "monthly_credits": 500, "kind": "subscription"},
-        "STARTER": {"tier": "starter", "monthly_credits": STARTER_CREDITS, "kind": "starter"},
-    }
-    for name, info in tiers.items():
-        price_id = os.environ.get(f"{_price_prefix}{name}", "")
-        if price_id and price_id != "price_PLACEHOLDER":
-            _PRICE_MAP[price_id] = info
-    log.info("PRICE_MAP built: %d entries (mode=%s)", len(_PRICE_MAP), STRIPE_MODE)
 
 # ── Build ID (git short hash at import time) ─────────────────────────
 _BUILD_ID = "dev"
@@ -734,7 +721,9 @@ async def startup():
     log.info("Preview lookup built: %d entries", len(_PREVIEW_LOOKUP))
 
     # Build PRICE_MAP
-    _build_price_map()
+    global _PRICE_MAP
+    _PRICE_MAP = build_price_map(STRIPE_MODE)
+    log.info("PRICE_MAP built: %d entries (mode=%s)", len(_PRICE_MAP), STRIPE_MODE)
 
     # SMTP status
     smtp_configured = bool(os.environ.get("SMTP_HOST"))
@@ -1179,19 +1168,16 @@ async def billing_upgrade(request: Request):
     body = await request.json()
     new_tier = body.get("tier", "").lower()
 
-    valid_tiers = {
-        "scout": 25,
-        "operator": 100,
-        "sovereign": 500,
-    }
+    from verifuse_v2.server.pricing import TIERS
+    valid_tiers = list(TIERS.keys())
 
     if new_tier not in valid_tiers:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid tier. Choose from: {list(valid_tiers.keys())}",
+            detail=f"Invalid tier. Choose from: {valid_tiers}",
         )
 
-    credits = valid_tiers[new_tier]
+    credits = get_monthly_credits(new_tier)
     now = datetime.now(timezone.utc).isoformat()
 
     conn = _get_conn()
@@ -1476,9 +1462,8 @@ async def get_lead_detail(lead_id: str, request: Request):
 
     # ── Unique view limiting (per tier) ──────────────────────────
     if user and not is_unlocked and not _effective_admin(user, request):
-        from verifuse_v2.server.billing import TIER_DAILY_API_LIMIT
         tier = user.get("tier", "scout")
-        daily_limit = TIER_DAILY_API_LIMIT.get(tier, 100)
+        daily_limit = get_daily_limit(tier) or 100
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         conn3 = _get_conn()
         try:
@@ -1696,7 +1681,7 @@ async def billing_starter(request: Request):
                 "sku": "starter_pack",
                 "user_id": user["user_id"],
                 "price_id": starter_price_id,
-                "credits": str(STARTER_CREDITS),
+                "credits": str(STARTER_PACK["credits"]),
             },
             line_items=[{"price": starter_price_id, "quantity": 1}],
             success_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/dashboard?starter=success",
@@ -1785,8 +1770,8 @@ def _handle_checkout_session(session: dict) -> None:
             log.warning("Starter: client_reference_id mismatch")
             return
         credits_str = metadata.get("credits", "")
-        if credits_str != str(STARTER_CREDITS):
-            log.warning("Starter: credits mismatch (got %s, expected %s)", credits_str, STARTER_CREDITS)
+        if credits_str != str(STARTER_PACK["credits"]):
+            log.warning("Starter: credits mismatch (got %s, expected %s)", credits_str, STARTER_PACK["credits"])
             return
         amount_total = session.get("amount_total", 0)
         if amount_total <= 0:
@@ -1804,18 +1789,18 @@ def _handle_checkout_session(session: dict) -> None:
             conn.execute(
                 "UPDATE wallet SET purchased_credits = purchased_credits + ?, updated_at = datetime('now') "
                 "WHERE user_id = ?",
-                [STARTER_CREDITS, user_id],
+                [STARTER_PACK["credits"], user_id],
             )
             conn.execute(
                 "UPDATE users SET credits_remaining = credits_remaining + ? WHERE user_id = ?",
-                [STARTER_CREDITS, user_id],
+                [STARTER_PACK["credits"], user_id],
             )
             _audit_log(conn, user_id, "starter_pack_credited", {
-                "credits": STARTER_CREDITS, "amount_total": amount_total,
+                "credits": STARTER_PACK["credits"], "amount_total": amount_total,
                 "session_id": session.get("id", ""),
             })
             conn.commit()
-            log.info("Starter pack credited: user=%s credits=%d", user_id, STARTER_CREDITS)
+            log.info("Starter pack credited: user=%s credits=%d", user_id, STARTER_PACK["credits"])
         finally:
             conn.close()
     else:
@@ -1837,8 +1822,7 @@ def _handle_checkout_session(session: dict) -> None:
                 [customer_id, subscription_id, tier, user_id],
             )
             get_or_create_wallet(user_id, conn)
-            from verifuse_v2.server.billing import TIER_CREDITS
-            monthly = TIER_CREDITS.get(tier, 25)
+            monthly = get_monthly_credits(tier)
             conn.execute(
                 "UPDATE wallet SET tier = ?, subscription_credits = ?, updated_at = datetime('now') "
                 "WHERE user_id = ?",

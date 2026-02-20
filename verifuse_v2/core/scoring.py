@@ -22,6 +22,8 @@ import sqlite3
 from datetime import date, datetime, timezone
 from typing import Optional
 
+from verifuse_v2.server.pricing import get_credit_cost as _pricing_get_credit_cost
+
 
 class OpportunityEngine:
     """Compute the 3-Score Intelligence Index for leads.
@@ -43,7 +45,7 @@ class OpportunityEngine:
         "market_velocity": 0.15,
     }
 
-    # ── Dynamic pricing thresholds ──────────────────────────────────
+    # ── Dynamic pricing thresholds (canonical values live in pricing.py) ──
     TIER_ELITE = 85       # score >= 85 → 3 credits
     TIER_VERIFIED = 70    # score >= 70 → 2 credits
     # score < 70 → 1 credit
@@ -269,15 +271,13 @@ class OpportunityEngine:
     def get_credit_cost(cls, score: int) -> int:
         """Return credit cost based on opportunity score.
 
-        85+  → 3 credits (Elite Opportunity)
+        Delegates to pricing.get_credit_cost — canonical thresholds live there.
+
+        85+   → 3 credits (Elite Opportunity)
         70-84 → 2 credits (Verified Lead)
         0-69  → 1 credit  (Standard)
         """
-        if score >= cls.TIER_ELITE:
-            return 3
-        if score >= cls.TIER_VERIFIED:
-            return 2
-        return 1
+        return _pricing_get_credit_cost(score)
 
     # ── Freshness Decay ─────────────────────────────────────────────
 
