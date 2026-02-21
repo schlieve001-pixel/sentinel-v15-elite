@@ -84,6 +84,7 @@ from verifuse_v2.server.pricing import (
 
 EXPECTED_CURRENCY = "usd"
 EXPECTED_LIVEMODE = STRIPE_MODE == "live"
+_price_prefix = "STRIPE_LIVE_PRICE_" if STRIPE_MODE == "live" else "STRIPE_TEST_PRICE_"
 
 # Map Stripe price_id → {tier, monthly_credits, kind}
 # Built at startup via build_price_map()
@@ -112,35 +113,77 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-# ── Wallet helpers ──────────────────────────────────────────────────
+# ── Module-level compat flags (set at startup) ────────────────────────
+# True once asset_unlocks / lead_unlocks tables are confirmed present.
+_USE_ASSET_UNLOCKS_FOR_LOOKUP: bool = False
+_HAS_LEAD_UNLOCKS: bool = False
 
-def get_or_create_wallet(user_id: str, conn: sqlite3.Connection = None) -> dict:
-    """Ensure wallet row exists. Returns wallet dict. Uses provided conn or creates one."""
-    close_conn = False
-    if conn is None:
-        conn = _get_conn()
-        close_conn = True
-    try:
+
+# ── Epoch + FIFO ledger helpers ──────────────────────────────────────
+
+def _epoch_now() -> int:
+    """Current UTC time as a Unix epoch integer."""
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _ledger_balance(conn: sqlite3.Connection, user_id: str) -> int:
+    """Sum qty_remaining of all non-expired ledger entries for user."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(qty_remaining), 0) FROM unlock_ledger_entries "
+        "WHERE user_id = ? AND (expires_ts IS NULL OR expires_ts > ?)",
+        [user_id, _epoch_now()],
+    ).fetchone()
+    return int(row[0])
+
+
+def _fifo_spend(
+    conn: sqlite3.Connection,
+    user_id: str,
+    cost: int,
+) -> list[dict] | None:
+    """Deduct `cost` credits using FIFO ordering (expires soonest first).
+
+    SAFETY: checks total with SUM() BEFORE any UPDATE.
+    Never partially decrements — atomic or returns None.
+
+    SQLite compat: ORDER BY (expires_ts IS NULL) ASC places NULLs last
+    without relying on NULLS LAST (unsupported in older SQLite).
+
+    Returns: list of {entry_id, spent} dicts on success, None if insufficient.
+    """
+    now = _epoch_now()
+
+    # Pre-flight: verify total before touching any rows
+    total_row = conn.execute(
+        "SELECT COALESCE(SUM(qty_remaining), 0) FROM unlock_ledger_entries "
+        "WHERE user_id = ? AND qty_remaining > 0 AND (expires_ts IS NULL OR expires_ts > ?)",
+        [user_id, now],
+    ).fetchone()
+    if int(total_row[0]) < cost:
+        return None  # Insufficient — no writes made
+
+    # Fetch ordered entries (expires soonest, NULLs last, oldest purchase within bucket)
+    entries = conn.execute(
+        "SELECT id, qty_remaining FROM unlock_ledger_entries "
+        "WHERE user_id = ? AND qty_remaining > 0 AND (expires_ts IS NULL OR expires_ts > ?) "
+        "ORDER BY (expires_ts IS NULL) ASC, expires_ts ASC, purchased_ts ASC",
+        [user_id, now],
+    ).fetchall()
+
+    # Deduct — total pre-verified so loop always succeeds
+    debits: list[dict] = []
+    remaining = cost
+    for e in entries:
+        if remaining <= 0:
+            break
+        spend = min(e["qty_remaining"], remaining)
         conn.execute(
-            "INSERT OR IGNORE INTO wallet (user_id, subscription_credits, purchased_credits, tier, updated_at) "
-            "VALUES (?, 0, 0, 'scout', datetime('now'))",
-            [user_id],
+            "UPDATE unlock_ledger_entries SET qty_remaining = qty_remaining - ? WHERE id = ?",
+            [spend, e["id"]],
         )
-        row = conn.execute(
-            "SELECT user_id, subscription_credits, purchased_credits, tier, updated_at FROM wallet WHERE user_id = ?",
-            [user_id],
-        ).fetchone()
-        if close_conn:
-            conn.commit()
-        return dict(row) if row else {"user_id": user_id, "subscription_credits": 0, "purchased_credits": 0, "tier": "scout"}
-    finally:
-        if close_conn:
-            conn.close()
-
-
-def _wallet_total(wallet: dict) -> int:
-    """Total available credits (subscription + purchased)."""
-    return (wallet.get("subscription_credits") or 0) + (wallet.get("purchased_credits") or 0)
+        debits.append({"entry_id": e["id"], "spent": spend})
+        remaining -= spend
+    return debits
 
 
 def _audit_log(conn: sqlite3.Connection, user_id: str, action: str, meta: dict = None, ip: str = "") -> None:
@@ -207,6 +250,61 @@ def _try_founders_redemption(user_id: str) -> bool:
         return False
     finally:
         conn.close()
+
+
+def _send_email(to: str, subject: str, body: str) -> None:
+    """Send email via SES → SMTP → log fallback.
+
+    Reads VERIFUSE_EMAIL_MODE env var:
+      ses  — AWS SES (primary); falls through to SMTP on failure
+      smtp — SMTP directly; falls through to log on failure
+      log  — log only (default / dev)
+
+    Always sends from support@verifuse.tech in us-west-2.
+    """
+    FROM = "support@verifuse.tech"
+    REGION = os.environ.get("AWS_REGION", "us-west-2")
+    mode = os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower()
+
+    if mode == "ses":
+        try:
+            import boto3
+            boto3.client("ses", region_name=REGION).send_email(
+                Source=FROM,
+                Destination={"ToAddresses": [to]},
+                Message={
+                    "Subject": {"Data": subject},
+                    "Body": {"Text": {"Data": body}},
+                },
+            )
+            return
+        except Exception as e:
+            log.error("SES send failed: %s — falling back to SMTP", e)
+
+    if mode in ("ses", "smtp"):
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            msg = MIMEText(body)
+            msg["Subject"] = subject
+            msg["From"] = FROM
+            msg["To"] = to
+            smtp_host = os.environ.get("SMTP_HOST", "")
+            smtp_port = int(os.environ.get("SMTP_PORT", 587))
+            smtp_user = os.environ.get("SMTP_USER", "")
+            smtp_pass = os.environ.get("SMTP_PASS", "")
+            if not smtp_host:
+                raise RuntimeError("SMTP_HOST not configured")
+            with smtplib.SMTP(smtp_host, smtp_port) as s:
+                s.starttls()
+                if smtp_user:
+                    s.login(smtp_user, smtp_pass)
+                s.send_message(msg)
+            return
+        except Exception as e:
+            log.error("SMTP send failed: %s — falling back to log", e)
+
+    log.info("EMAIL [%s → %s] %s | %s", FROM, to, subject, body[:300])
 
 
 # ── SafeAsset model (NULL-safe: every numeric field is Optional) ────
@@ -655,6 +753,7 @@ _claim_deadline_expr = "NULL AS claim_deadline"  # Set at startup
 async def startup():
     """Log DB identity on boot + detect lead columns for preview SQL + build preview lookup."""
     global _LEADS_COLUMNS, _PREVIEW_SELECT, _EXPIRED_FILTER, _PREVIEW_LOOKUP, _claim_deadline_expr
+    global _USE_ASSET_UNLOCKS_FOR_LOOKUP, _HAS_LEAD_UNLOCKS
 
     db_path = Path(VERIFUSE_DB_PATH)
     inode = "N/A"
@@ -725,9 +824,34 @@ async def startup():
     _PRICE_MAP = build_price_map(STRIPE_MODE)
     log.info("PRICE_MAP built: %d entries (mode=%s)", len(_PRICE_MAP), STRIPE_MODE)
 
-    # SMTP status
-    smtp_configured = bool(os.environ.get("SMTP_HOST"))
-    log.info("SMTP configured: %s", "yes" if smtp_configured else "no (dev mode — codes logged to console)")
+    # Detect vNEXT tables for compat flags
+    try:
+        chk = _get_conn()
+        try:
+            def _tbl(name: str) -> bool:
+                return bool(chk.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [name]
+                ).fetchone())
+            _USE_ASSET_UNLOCKS_FOR_LOOKUP = _tbl("asset_unlocks")
+            _HAS_LEAD_UNLOCKS = _tbl("lead_unlocks")
+            ledger_count = chk.execute(
+                "SELECT COUNT(*) FROM unlock_ledger_entries"
+            ).fetchone()[0] if _tbl("unlock_ledger_entries") else 0
+            registry_count = chk.execute(
+                "SELECT COUNT(*) FROM asset_registry"
+            ).fetchone()[0] if _tbl("asset_registry") else 0
+            log.info(
+                "vNEXT tables: asset_unlocks=%s lead_unlocks=%s ledger_entries=%d registry=%d",
+                _USE_ASSET_UNLOCKS_FOR_LOOKUP, _HAS_LEAD_UNLOCKS, ledger_count, registry_count,
+            )
+        finally:
+            chk.close()
+    except Exception as e:
+        log.warning("vNEXT table detection failed: %s", e)
+
+    # Email mode
+    email_mode = os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower()
+    log.info("Email mode: %s", email_mode)
 
     # Stripe status
     log.info("Stripe mode: %s | secret_key: %s", STRIPE_MODE, "set" if STRIPE_SECRET_KEY else "NOT SET")
@@ -971,24 +1095,39 @@ async def get_leads(
     }
 
 
-# ── POST /api/leads/{id}/unlock — Double Gate + Atomic Credits ──────
+# ── POST /api/leads/{id}/unlock — FIFO Ledger + Double-Spend Safe ───
 
 @app.post("/api/leads/{lead_id}/unlock")
 @limiter.limit("30/minute")
 async def unlock_lead(lead_id: str, request: Request):
-    """Unlock a lead with Double Gate enforcement + wallet-based credits.
+    """Unlock a lead using the FIFO unlock ledger.
 
-    RESTRICTED: requires is_verified_attorney + (OPERATOR or SOVEREIGN tier)
-    ACTIONABLE: any paid user with credits >= cost
-    EXPIRED: cannot unlock
-    Spend order: subscription_credits first, then purchased_credits.
+    Gates:
+      EXPIRED    → 410
+      role gate  → 403 if not approved_attorney and not admin
+      RESTRICTED → requires approved_attorney + OPERATOR/SOVEREIGN tier
+    Credit accounting:
+      Phase 0: cost = 1 (hardcoded; get_credit_cost reserved for Phase 1)
+      Double-spend guard: INSERT OR IGNORE asset_unlocks, check rowcount
+      FIFO: spend soonest-expiring entries first (NULLs = never-expire last)
+      Dispute proof: unlock_spend_journal row per ledger entry consumed
+      Compat dual-write: lead_unlocks table (if present)
     """
+    import uuid as _uuid_mod
     user = _require_user(request)
     _check_email_verified(user, request)
-    now = datetime.now(timezone.utc).isoformat()
     ip = _get_client_ip(request)
+    user_id = user["user_id"]
 
-    # Admin bypass (not simulating)
+    # ── Role gate ────────────────────────────────────────────────
+    role = user.get("role", "public")
+    if role not in ("approved_attorney", "admin") and not _effective_admin(user, request):
+        raise HTTPException(
+            status_code=403,
+            detail="Only verified attorneys can unlock leads.",
+        )
+
+    # ── Admin bypass (records unlock for audit, no credit spend) ─
     if _effective_admin(user, request):
         conn = _get_conn()
         try:
@@ -997,32 +1136,64 @@ async def unlock_lead(lead_id: str, request: Request):
             conn.close()
         if not row:
             raise HTTPException(status_code=404, detail="Lead not found.")
+
+        conn2 = _get_conn()
+        try:
+            conn2.execute("BEGIN IMMEDIATE")
+            unlock_id = str(_uuid_mod.uuid4())
+            now_epoch = _epoch_now()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            conn2.execute(
+                "INSERT OR IGNORE INTO asset_unlocks "
+                "(id, user_id, asset_id, credits_spent, unlocked_at, ip_address, tier_at_unlock) "
+                "VALUES (?, ?, ?, 0, ?, ?, ?)",
+                [unlock_id, user_id, lead_id, now_epoch, ip, user.get("tier")],
+            )
+            if _HAS_LEAD_UNLOCKS:
+                try:
+                    conn2.execute(
+                        "INSERT OR IGNORE INTO lead_unlocks "
+                        "(user_id, lead_id, unlocked_at, ip_address, plan_tier) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [user_id, lead_id, now_iso, ip, user.get("tier")],
+                    )
+                except sqlite3.IntegrityError:
+                    pass
+            _audit_log(conn2, user_id, "admin_unlock_bypass", {"lead_id": lead_id}, ip)
+            conn2.execute("COMMIT")
+        except Exception as e:
+            try:
+                conn2.execute("ROLLBACK")
+            except Exception:
+                pass
+            log.warning("Admin unlock audit write failed: %s", e)
+        finally:
+            conn2.close()
+
         result = _row_to_full(dict(row))
         result["ok"] = True
         result["credits_remaining"] = -1
+        result["credits_spent"] = 0
         return result
 
-    # Fetch lead
+    # ── Fetch lead ───────────────────────────────────────────────
     conn = _get_conn()
     try:
         row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
     finally:
         conn.close()
-
     if not row:
         raise HTTPException(status_code=404, detail="Lead not found.")
 
     lead = dict(row)
     status = _compute_status(lead)
 
-    # ── Gate 1: EXPIRED check ────────────────────────────────────
     if status == "EXPIRED":
         raise HTTPException(
             status_code=410,
             detail="This lead has expired. Claim deadline has passed.",
         )
 
-    # ── Gate 2: RESTRICTED — Double Gate ─────────────────────────
     if status == "RESTRICTED":
         if not _is_verified_attorney(user):
             raise HTTPException(
@@ -1035,110 +1206,89 @@ async def unlock_lead(lead_id: str, request: Request):
                 detail="RESTRICTED lead requires OPERATOR or SOVEREIGN tier.",
             )
 
-    # Determine credit cost (dynamic pricing from scoring engine)
+    # Phase 0: cost is always 1 (get_credit_cost reserved for Phase 1)
     cost = 1
-    try:
-        from verifuse_v2.core.scoring import OpportunityEngine
-        cost = OpportunityEngine.get_credit_cost(
-            int(lead.get("confidence_score") or 50)
-        )
-    except Exception:
-        pass  # Default to 1 if scoring unavailable
+    now_epoch = _epoch_now()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-    # ── Gate 3: Atomic wallet deduction (BEGIN IMMEDIATE) ────────
     conn = _get_conn()
     credits_after = 0
     try:
         conn.execute("BEGIN IMMEDIATE")
 
-        # Ensure wallet exists
-        get_or_create_wallet(user["user_id"], conn)
+        # ── Step 1: INSERT OR IGNORE asset_unlocks — double-spend guard ──
+        unlock_id = str(_uuid_mod.uuid4())
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO asset_unlocks "
+            "(id, user_id, asset_id, credits_spent, unlocked_at, ip_address, tier_at_unlock) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [unlock_id, user_id, lead_id, cost, now_epoch, ip, user.get("tier")],
+        )
 
-        # Check if already unlocked
-        existing = conn.execute(
-            "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
-            [user["user_id"], lead_id],
-        ).fetchone()
-
-        if existing:
-            # Already unlocked — return full asset, cost 0
-            w = conn.execute(
-                "SELECT subscription_credits, purchased_credits FROM wallet WHERE user_id = ?",
-                [user["user_id"]],
-            ).fetchone()
-            credits_after = (w["subscription_credits"] + w["purchased_credits"]) if w else 0
+        if cursor.rowcount == 0:
+            # Already unlocked — return full asset, no credit spend
+            balance = _ledger_balance(conn, user_id)
             conn.execute("COMMIT")
             result = _row_to_full(lead)
             result["ok"] = True
-            result["credits_remaining"] = credits_after
+            result["credits_remaining"] = balance
             result["credits_spent"] = 0
             return result
 
-        # Check wallet balance
-        w = conn.execute(
-            "SELECT subscription_credits, purchased_credits FROM wallet WHERE user_id = ?",
-            [user["user_id"]],
-        ).fetchone()
-        sub_credits = w["subscription_credits"] if w else 0
-        pur_credits = w["purchased_credits"] if w else 0
-        total = sub_credits + pur_credits
-
-        if total < cost:
+        # ── Step 2: FIFO spend — safe pre-checked ──────────────────────
+        balance = _ledger_balance(conn, user_id)
+        if balance < cost:
             conn.execute("ROLLBACK")
             raise HTTPException(
                 status_code=402,
-                detail=f"Insufficient credits. Need {cost}, have {total}. Upgrade your plan.",
+                detail=f"Insufficient credits. Need {cost}, have {balance}. Upgrade your plan.",
             )
 
-        # Spend order: subscription first, then purchased
-        sub_spend = min(cost, sub_credits)
-        pur_spend = cost - sub_spend
-
-        conn.execute(
-            "UPDATE wallet SET subscription_credits = subscription_credits - ?, "
-            "purchased_credits = purchased_credits - ?, updated_at = ? WHERE user_id = ?",
-            [sub_spend, pur_spend, now, user["user_id"]],
-        )
-
-        # Also update users.credits_remaining for backward compat
-        conn.execute(
-            "UPDATE users SET credits_remaining = MAX(credits_remaining - ?, 0) WHERE user_id = ?",
-            [cost, user["user_id"]],
-        )
-
-        # Record unlock (IntegrityError caught = idempotent)
-        try:
-            conn.execute(
-                "INSERT INTO lead_unlocks (user_id, lead_id, unlocked_at, ip_address, plan_tier) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [user["user_id"], lead_id, now, ip, user.get("tier", "scout")],
-            )
-        except sqlite3.IntegrityError:
-            # Concurrent unlock — already exists, rollback spend
+        debits = _fifo_spend(conn, user_id, cost)
+        if debits is None:
             conn.execute("ROLLBACK")
-            result = _row_to_full(lead)
-            result["ok"] = True
-            result["credits_remaining"] = total
-            result["credits_spent"] = 0
-            return result
+            raise HTTPException(
+                status_code=402,
+                detail=f"Insufficient credits. Need {cost}, have {balance}. Upgrade your plan.",
+            )
 
-        # Transaction record
-        import uuid
+        # ── Step 3: Spend journal (dispute-proof) ──────────────────────
+        for d in debits:
+            conn.execute(
+                "INSERT INTO unlock_spend_journal "
+                "(id, unlock_id, ledger_entry_id, credits_consumed) "
+                "VALUES (?, ?, ?, ?)",
+                [str(_uuid_mod.uuid4()), unlock_id, d["entry_id"], d["spent"]],
+            )
+
+        # ── Step 4: Compat dual-write to lead_unlocks ──────────────────
+        if _HAS_LEAD_UNLOCKS:
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO lead_unlocks "
+                    "(user_id, lead_id, unlocked_at, ip_address, plan_tier) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [user_id, lead_id, now_iso, ip, user.get("tier")],
+                )
+            except sqlite3.IntegrityError:
+                pass
+
+        # ── Step 5: Transaction record ──────────────────────────────────
         conn.execute(
-            "INSERT INTO transactions (id, user_id, type, amount, credits, balance_after, idempotency_key, created_at) "
+            "INSERT INTO transactions "
+            "(id, user_id, type, amount, credits, balance_after, idempotency_key, created_at) "
             "VALUES (?, ?, 'unlock', 0, ?, ?, ?, ?)",
-            [str(uuid.uuid4()), user["user_id"], -cost, total - cost,
-             f"unlock:{user['user_id']}:{lead_id}", now],
+            [str(_uuid_mod.uuid4()), user_id, -cost, balance - cost,
+             f"unlock:{user_id}:{lead_id}", now_iso],
         )
 
-        # Audit log
-        _audit_log(conn, user["user_id"], "lead_unlock", {
-            "lead_id": lead_id, "cost": cost, "balance_after": total - cost,
+        # ── Step 6: Audit log + commit ──────────────────────────────────
+        _audit_log(conn, user_id, "lead_unlock", {
+            "lead_id": lead_id, "cost": cost, "balance_after": balance - cost,
             "tier": user.get("tier"), "status": status,
         }, ip)
-
         conn.execute("COMMIT")
-        credits_after = total - cost
+        credits_after = balance - cost
 
     except HTTPException:
         raise
@@ -1281,14 +1431,19 @@ async def api_register(request: Request):
         bar_number=body.get("bar_number", ""),
         tier=body.get("tier", "scout"),
     )
-    # Create wallet for new user
-    get_or_create_wallet(user["user_id"])
     # Founders cap check
     _try_founders_redemption(user["user_id"])
-    wallet = get_or_create_wallet(user["user_id"])
+    conn = _get_conn()
+    try:
+        balance = _ledger_balance(conn, user["user_id"])
+    finally:
+        conn.close()
     return {"token": token, "user": {
         "user_id": user["user_id"], "email": user["email"],
-        "tier": user["tier"], "credits_remaining": _wallet_total(wallet),
+        "tier": user["tier"],
+        "credits_remaining": balance,
+        "ledger_balance": balance,
+        "role": user.get("role", "public"),
     }}
 
 
@@ -1305,27 +1460,37 @@ async def api_login(request: Request):
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password required.")
     user, token = login_user(email=email, password=password)
-    # Ensure wallet exists on login
-    wallet = get_or_create_wallet(user["user_id"])
+    conn = _get_conn()
+    try:
+        balance = _ledger_balance(conn, user["user_id"])
+    finally:
+        conn.close()
     return {"token": token, "user": {
         "user_id": user["user_id"], "email": user["email"],
-        "tier": user["tier"], "credits_remaining": user["credits_remaining"],
+        "tier": user["tier"],
+        "credits_remaining": balance,
+        "ledger_balance": balance,
+        "role": user.get("role", "public"),
     }}
 
 
 @app.get("/api/auth/me")
 async def api_me(request: Request):
     user = _require_user(request)
-    wallet = get_or_create_wallet(user["user_id"])
+    conn = _get_conn()
+    try:
+        balance = _ledger_balance(conn, user["user_id"])
+    finally:
+        conn.close()
     return {
         "user_id": user["user_id"],
         "email": user["email"],
         "full_name": user.get("full_name", ""),
         "firm_name": user.get("firm_name", ""),
         "tier": user["tier"],
-        "credits_remaining": _wallet_total(wallet),
-        "subscription_credits": wallet.get("subscription_credits", 0),
-        "purchased_credits": wallet.get("purchased_credits", 0),
+        "credits_remaining": balance,
+        "ledger_balance": balance,
+        "role": user.get("role", "public"),
         "attorney_status": user.get("attorney_status", "NONE"),
         "is_admin": bool(user.get("is_admin", 0)),
         "email_verified": bool(user.get("email_verified", 0)),
@@ -1354,26 +1519,12 @@ async def send_verification(request: Request):
     finally:
         conn.close()
 
-    # Send via SMTP if configured, otherwise log (dev mode)
-    smtp_host = os.environ.get("SMTP_HOST")
-    if smtp_host:
-        try:
-            import smtplib
-            from email.mime.text import MIMEText
-            msg = MIMEText(f"Your VeriFuse verification code is: {code}\n\nThis code expires in 10 minutes.")
-            msg["Subject"] = "VeriFuse Email Verification"
-            msg["From"] = os.environ.get("SMTP_FROM", "noreply@verifuse.tech")
-            msg["To"] = user["email"]
-            with smtplib.SMTP(smtp_host, int(os.environ.get("SMTP_PORT", 587))) as s:
-                s.starttls()
-                s.login(os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASS", ""))
-                s.send_message(msg)
-            log.info("Verification email sent to %s", user["email"])
-        except Exception as e:
-            log.error("SMTP send failed: %s", e)
-            raise HTTPException(status_code=500, detail="Failed to send verification email.")
-    else:
-        log.info("DEV MODE: Verification code for %s: %s", user["email"], code)
+    _send_email(
+        to=user["email"],
+        subject="VeriFuse Email Verification",
+        body=f"Your VeriFuse verification code is: {code}\n\nThis code expires in 10 minutes.",
+    )
+    log.info("Verification email dispatched to %s", user["email"])
 
     return {"ok": True, "message": "Verification code sent."}
 
@@ -1782,29 +1933,37 @@ def _handle_checkout_session(session: dict) -> None:
             log.warning("Starter: currency mismatch (got %s)", currency)
             return
 
-        # Credit the starter pack
+        # Credit the starter pack via FIFO ledger (30-day expiry)
+        import uuid as _uuid_mod
+        session_id = session.get("id", "")
+        credits = STARTER_PACK["credits"]
+        expiry_days = STARTER_PACK.get("expiry_days", 30)
+        expires_ts = _epoch_now() + expiry_days * 86400
+
         conn = _get_conn()
         try:
-            get_or_create_wallet(user_id, conn)
-            conn.execute(
-                "UPDATE wallet SET purchased_credits = purchased_credits + ?, updated_at = datetime('now') "
-                "WHERE user_id = ?",
-                [STARTER_PACK["credits"], user_id],
-            )
-            conn.execute(
-                "UPDATE users SET credits_remaining = credits_remaining + ? WHERE user_id = ?",
-                [STARTER_PACK["credits"], user_id],
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO unlock_ledger_entries "
+                    "(id, user_id, source, qty_total, qty_remaining, purchased_ts, expires_ts, stripe_event_id) "
+                    "VALUES (?, ?, 'starter', ?, ?, ?, ?, ?)",
+                    [str(_uuid_mod.uuid4()), user_id, credits, credits,
+                     _epoch_now(), expires_ts, session_id],
+                )
+            except sqlite3.IntegrityError:
+                log.info("Starter pack already credited (stripe_event_id dup): %s", session_id)
+                return
             _audit_log(conn, user_id, "starter_pack_credited", {
-                "credits": STARTER_PACK["credits"], "amount_total": amount_total,
-                "session_id": session.get("id", ""),
+                "credits": credits, "amount_total": amount_total,
+                "session_id": session_id, "expires_ts": expires_ts,
             })
             conn.commit()
-            log.info("Starter pack credited: user=%s credits=%d", user_id, STARTER_PACK["credits"])
+            log.info("Starter pack credited: user=%s credits=%d expires=%d", user_id, credits, expires_ts)
         finally:
             conn.close()
     else:
-        # Subscription checkout — activate subscription
+        # Subscription checkout — record customer/subscription IDs only.
+        # Credits are granted atomically by the invoice.payment_succeeded event.
         user_id = metadata.get("user_id", "")
         tier = metadata.get("tier", "scout")
         customer_id = session.get("customer", "")
@@ -1821,18 +1980,11 @@ def _handle_checkout_session(session: dict) -> None:
                 "subscription_status = 'active', tier = ? WHERE user_id = ?",
                 [customer_id, subscription_id, tier, user_id],
             )
-            get_or_create_wallet(user_id, conn)
-            monthly = get_monthly_credits(tier)
-            conn.execute(
-                "UPDATE wallet SET tier = ?, subscription_credits = ?, updated_at = datetime('now') "
-                "WHERE user_id = ?",
-                [tier, monthly, user_id],
-            )
             _audit_log(conn, user_id, "subscription_activated", {
                 "tier": tier, "customer_id": customer_id,
             })
             conn.commit()
-            log.info("Subscription activated: user=%s tier=%s", user_id, tier)
+            log.info("Subscription activated: user=%s tier=%s (credits via invoice event)", user_id, tier)
         finally:
             conn.close()
 
@@ -1920,37 +2072,87 @@ def _handle_invoice_payment(invoice: dict) -> None:
         price_info = _PRICE_MAP[price_id]
         billing_reason = invoice.get("billing_reason", "")
 
+        import uuid as _uuid_mod
+        new_tier = price_info["tier"]
+        monthly = price_info["monthly_credits"]
+
         if billing_reason == "subscription_update":
-            # Tier sync only — NO credits
+            # Tier sync only — NO credits; handled separately from invoice
             conn.execute(
                 "UPDATE users SET tier = ?, subscription_status = 'active' WHERE user_id = ?",
-                [price_info["tier"], user_id],
+                [new_tier, user_id],
             )
-            get_or_create_wallet(user_id, conn)
-            conn.execute(
-                "UPDATE wallet SET tier = ?, updated_at = datetime('now') WHERE user_id = ?",
-                [price_info["tier"], user_id],
-            )
-            _audit_log(conn, user_id, "subscription_tier_sync", {"tier": price_info["tier"]})
+            _audit_log(conn, user_id, "subscription_tier_sync", {"tier": new_tier})
         elif billing_reason in ("subscription_cycle", "subscription_create"):
-            # GRANT credits with 2x cap
-            monthly = price_info["monthly_credits"]
-            get_or_create_wallet(user_id, conn)
+            # Determine period end (subscription expiry)
+            # invoice.lines[0].period.end is the most reliable source
+            period_end_ts = None
+            for line in lines:
+                period = line.get("period", {})
+                pe = period.get("end")
+                if pe:
+                    try:
+                        period_end_ts = int(pe)
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
+            rollover = 0
+            rollover_entries = []
+
+            # Rollover: Month 1 only (subscription_create)
+            if billing_reason == "subscription_create":
+                now_ts = _epoch_now()
+                cutoff_ts = now_ts - 7 * 86400
+                starter_rows = conn.execute(
+                    "SELECT id, qty_remaining FROM unlock_ledger_entries "
+                    "WHERE user_id = ? AND source = 'starter' AND qty_remaining > 0 "
+                    "AND purchased_ts >= ? AND (expires_ts IS NULL OR expires_ts > ?)",
+                    [user_id, cutoff_ts, now_ts],
+                ).fetchall()
+                for s in starter_rows:
+                    rollover += s["qty_remaining"]
+                    rollover_entries.append(s["id"])
+
+            total_credits = monthly + rollover
+
+            # INSERT subscription ledger entry (idempotent via stripe_event_id)
+            try:
+                conn.execute(
+                    "INSERT INTO unlock_ledger_entries "
+                    "(id, user_id, source, qty_total, qty_remaining, purchased_ts, expires_ts, "
+                    "stripe_event_id, tier_at_purchase) "
+                    "VALUES (?, ?, 'subscription', ?, ?, ?, ?, ?, ?)",
+                    [str(_uuid_mod.uuid4()), user_id, total_credits, total_credits,
+                     _epoch_now(), period_end_ts, event_id, new_tier],
+                )
+            except sqlite3.IntegrityError:
+                log.info("Invoice already processed (stripe_event_id dup): %s", event_id)
+                conn.commit()
+                return
+
+            # Zero out rolled-over starter entries
+            if rollover_entries:
+                for entry_id in rollover_entries:
+                    conn.execute(
+                        "UPDATE unlock_ledger_entries SET qty_remaining = 0 WHERE id = ?",
+                        [entry_id],
+                    )
+                _audit_log(conn, user_id, "starter_rollover", {
+                    "rollover_credits": rollover, "entry_ids": rollover_entries,
+                })
+
+            # Update users.tier + subscription_status
             conn.execute(
-                "UPDATE wallet SET subscription_credits = MIN(subscription_credits + ?, ? * 2), "
-                "tier = ?, updated_at = datetime('now') WHERE user_id = ?",
-                [monthly, monthly, price_info["tier"], user_id],
-            )
-            conn.execute(
-                "UPDATE users SET tier = ?, subscription_status = 'active', "
-                "credits_remaining = credits_remaining + ? WHERE user_id = ?",
-                [price_info["tier"], monthly, user_id],
+                "UPDATE users SET tier = ?, subscription_status = 'active' WHERE user_id = ?",
+                [new_tier, user_id],
             )
             _audit_log(conn, user_id, "subscription_credits_granted", {
-                "tier": price_info["tier"], "credits": monthly, "reason": billing_reason,
+                "tier": new_tier, "credits": monthly, "rollover": rollover,
+                "total": total_credits, "reason": billing_reason,
             })
-            log.info("Credits granted: user=%s tier=%s credits=%d reason=%s",
-                     user_id, price_info["tier"], monthly, billing_reason)
+            log.info("Credits granted: user=%s tier=%s monthly=%d rollover=%d total=%d reason=%s",
+                     user_id, new_tier, monthly, rollover, total_credits, billing_reason)
         else:
             log.debug("Invoice: unhandled billing_reason=%s for user %s", billing_reason, user_id)
 

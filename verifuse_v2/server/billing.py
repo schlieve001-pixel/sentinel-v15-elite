@@ -137,12 +137,18 @@ def _handle_checkout_completed(session: dict) -> None:
 
 
 def _handle_subscription_updated(subscription: dict) -> None:
-    """Handle tier changes (upgrade/downgrade)."""
+    """Handle tier changes — upgrades only. Downgrades are silently ignored.
+
+    Tier rank: scout < operator < sovereign.
+    Only update if new_rank >= current_rank to prevent accidental downgrades.
+    """
+    TIER_RANK = {"scout": 0, "operator": 1, "sovereign": 2}
+
     customer_id = subscription.get("customer", "")
     # Find user by stripe_customer_id
     with db.get_db() as conn:
         row = conn.execute(
-            "SELECT user_id FROM users WHERE stripe_customer_id = ?",
+            "SELECT user_id, tier FROM users WHERE stripe_customer_id = ?",
             [customer_id],
         ).fetchone()
     if not row:
@@ -150,12 +156,25 @@ def _handle_subscription_updated(subscription: dict) -> None:
 
     # Get the new price → tier
     items = subscription.get("items", {}).get("data", [])
-    if items:
-        price_id = items[0].get("price", {}).get("id", "")
-        new_tier = PRICE_TO_TIER.get(price_id)
-        if new_tier:
-            db.update_user_tier(row["user_id"], new_tier)
-            log.info("Subscription updated: user=%s tier=%s", row["user_id"], new_tier)
+    if not items:
+        return
+
+    price_id = items[0].get("price", {}).get("id", "")
+    new_tier = PRICE_TO_TIER.get(price_id)
+    if not new_tier:
+        return
+
+    current_rank = TIER_RANK.get(row["tier"], 0)
+    new_rank = TIER_RANK.get(new_tier, 0)
+
+    if new_rank >= current_rank:
+        db.update_user_tier(row["user_id"], new_tier)
+        log.info("Subscription updated: user=%s tier=%s", row["user_id"], new_tier)
+    else:
+        log.info(
+            "Subscription downgrade ignored: user=%s current=%s new=%s",
+            row["user_id"], row["tier"], new_tier,
+        )
 
 
 def _handle_subscription_deleted(subscription: dict) -> None:
