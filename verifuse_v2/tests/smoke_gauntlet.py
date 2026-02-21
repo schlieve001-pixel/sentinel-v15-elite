@@ -1,20 +1,38 @@
 #!/usr/bin/env python3
 """
-VeriFuse Omega v4.7 — The Gauntlet (Smoke Test Suite)
+VeriFuse vNEXT Phase 0 — The Gauntlet (Smoke Test Suite)
 
-Tests:
-  1. Health endpoint
-  2. Public config
-  3. Preview leads (no PII)
-  4. Wallet existence (DB check)
-  5. Founders table exists
-  6. Webhook idempotency (DB schema)
-  7. Rate limits table exists
-  8. View limits table exists
-  9. Inventory health
-  10. Sample dossier (if preview key available)
-  11. Vary header
-  12. Security headers on dossier
+DB tests (30 + 9 vNEXT = 39 target):
+  1–12. Required tables (wallet, transactions, stripe_events, etc.)
+  13.   Wallet CHECK constraints
+  14.   Wallet backfill complete
+  15.   No negative wallet balances
+  16.   No 'recon' tier
+  17.   lead_unlocks dedupe index UNIQUE
+  18.   leads county+case UNIQUE index
+  19.   Users column: subscription_status
+  20.   Users column: current_period_end
+  21.   Users column: founders_pricing
+  22.   unlock_ledger_entries table + CHECK constraints   [vNEXT]
+  23.   asset_registry table                              [vNEXT]
+  24.   asset_unlocks table + UNIQUE(user_id,asset_id)   [vNEXT]
+  25.   unlock_spend_journal table                        [vNEXT]
+  26.   tax_assets table + row_hash UNIQUE               [vNEXT]
+  27.   users.role column                                 [vNEXT]
+  28.   Ledger backfill complete                          [vNEXT]
+  29.   No expired entries with remaining credits         [vNEXT]
+  30.   asset_registry backfill complete                  [vNEXT]
+
+HTTP tests (9, target 39 total with HTTP):
+  31.  Health endpoint
+  32.  Public config
+  33.  Preview leads (no PII)
+  34.  Inventory health
+  35.  Sample dossier (or skip)
+  36.  Dossier Cache-Control
+  37.  Dossier bad key → 404
+  38.  Vary header
+  39.  Case number masked (unauthenticated)
 
 Usage:
     python3 verifuse_v2/tests/smoke_gauntlet.py [--dry-run]
@@ -203,6 +221,79 @@ def run_db_tests():
     for col in ["subscription_status", "current_period_end", "founders_pricing"]:
         check(f"Users column: {col}", col in cols)
 
+    # ── vNEXT Phase 0 checks ──────────────────────────────────────
+
+    # 1. unlock_ledger_entries: table exists + has CHECK constraints
+    ledger_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='unlock_ledger_entries'"
+    ).fetchone()
+    ledger_sql = (ledger_row[0] or "") if ledger_row else ""
+    check("Table: unlock_ledger_entries + CHECK constraints",
+          ledger_row is not None and "CHECK" in ledger_sql and "qty_remaining" in ledger_sql,
+          "strict schema" if "CHECK" in ledger_sql else "table missing or no CHECK")
+
+    # 2. asset_registry: table exists
+    check("Table: asset_registry", "asset_registry" in tables)
+
+    # 3. asset_unlocks: table exists + UNIQUE(user_id, asset_id) in DDL
+    au_tbl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='asset_unlocks'"
+    ).fetchone()
+    au_sql = (au_tbl[0] or "") if au_tbl else ""
+    check("Table: asset_unlocks + UNIQUE(user_id,asset_id) in DDL",
+          "asset_unlocks" in tables and "UNIQUE" in au_sql and "user_id" in au_sql and "asset_id" in au_sql)
+
+    # 4. unlock_spend_journal: table exists
+    check("Table: unlock_spend_journal", "unlock_spend_journal" in tables)
+
+    # 5. tax_assets: table exists + row_hash UNIQUE constraint
+    ta_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='tax_assets'"
+    ).fetchone()
+    ta_sql = (ta_row[0] or "") if ta_row else ""
+    check("Table: tax_assets + row_hash UNIQUE",
+          ta_row is not None and "UNIQUE" in ta_sql and "row_hash" in ta_sql)
+
+    # 6. users.role column exists
+    check("Users column: role", "role" in cols)
+
+    # 7. Ledger backfill: entries >= users with credits > 0
+    if ledger_row is not None:
+        ledger_count = conn.execute(
+            "SELECT COUNT(*) FROM unlock_ledger_entries"
+        ).fetchone()[0]
+        users_with_credits = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE COALESCE(credits_remaining, 0) > 0"
+        ).fetchone()[0]
+        check("Ledger backfill complete",
+              ledger_count >= users_with_credits,
+              f"entries={ledger_count}, users_with_credits={users_with_credits}")
+    else:
+        check("Ledger backfill complete", False, "unlock_ledger_entries table missing")
+
+    # 8. No expired ledger entries with remaining credits
+    if ledger_row is not None:
+        import time as _time
+        expired_with_bal = conn.execute(
+            "SELECT COUNT(*) FROM unlock_ledger_entries "
+            "WHERE expires_ts IS NOT NULL AND expires_ts <= ? AND qty_remaining > 0",
+            [int(_time.time())],
+        ).fetchone()[0]
+        check("No expired entries with remaining credits",
+              expired_with_bal == 0, f"expired_with_balance={expired_with_bal}")
+    else:
+        check("No expired entries with remaining credits", False, "table missing")
+
+    # 9. asset_registry backfill: count >= leads count
+    if "asset_registry" in tables:
+        registry_count = conn.execute("SELECT COUNT(*) FROM asset_registry").fetchone()[0]
+        leads_total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+        check("asset_registry backfill complete",
+              registry_count >= leads_total,
+              f"registry={registry_count}, leads={leads_total}")
+    else:
+        check("asset_registry backfill complete", False, "asset_registry table missing")
+
     conn.close()
 
 
@@ -212,7 +303,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  VERIFUSE OMEGA v4.7 — THE GAUNTLET")
+    print("  VERIFUSE vNEXT PHASE 0 — THE GAUNTLET (target: 39/39)")
     print("=" * 60)
 
     run_db_tests()

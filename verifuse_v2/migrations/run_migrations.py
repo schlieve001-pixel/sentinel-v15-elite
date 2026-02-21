@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-VeriFuse Migration Runner — Omega v4.7
+VeriFuse Migration Runner — vNEXT Phase 0
 
 Applies SQL migrations idempotently with file locking.
 Handles:
-  - Schema creation (002_omega_hardening.sql)
-  - Users table evolution (add missing columns)
+  - Schema creation (002_omega_hardening.sql, 003_vnext_foundation.sql)
+  - Users table evolution (add missing columns, role backfill)
   - Wallet backfill from users.credits_remaining
+  - Ledger backfill (FIFO unlock_ledger_entries from wallet/credits)
+  - Asset registry backfill (leads → asset_registry)
   - Tier rename (recon → scout)
   - Lead deduplication (county + case_number)
 
@@ -22,7 +24,9 @@ import logging
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("migrate")
@@ -151,6 +155,179 @@ def backfill_wallet(conn: sqlite3.Connection) -> None:
     log.info("  Wallet backfill: %d rows inserted", inserted)
 
 
+def evolve_users_vnext(conn: sqlite3.Connection) -> None:
+    """Add users.role column and backfill from existing flags.
+
+    Priority order (admin > approved_attorney > pending > public):
+      - is_admin=1             → 'admin'
+      - verified_attorney / attorney_status VERIFIED/APPROVED / bar_verified_at
+                               → 'approved_attorney'
+      - attorney_status PENDING → 'pending'
+      - default                → 'public'
+    """
+    existing = _get_columns(conn, "users")
+    if "role" not in existing:
+        log.info("  ADD COLUMN users.role TEXT DEFAULT 'public'")
+        conn.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'public'")
+
+    # Admin wins — overwrite anything
+    conn.execute("UPDATE users SET role = 'admin' WHERE is_admin = 1")
+
+    # Approved attorneys (verified_attorney flag OR status string OR bar_verified_at)
+    conn.execute("""
+        UPDATE users SET role = 'approved_attorney'
+        WHERE role != 'admin'
+          AND (
+              verified_attorney = 1
+              OR UPPER(COALESCE(attorney_status, '')) IN ('VERIFIED', 'APPROVED')
+              OR bar_verified_at IS NOT NULL
+          )
+    """)
+
+    # Pending attorneys
+    conn.execute("""
+        UPDATE users SET role = 'pending'
+        WHERE role NOT IN ('admin', 'approved_attorney')
+          AND UPPER(COALESCE(attorney_status, '')) = 'PENDING'
+    """)
+
+    # role = 'public' is the column DEFAULT — no explicit UPDATE needed for the rest
+    role_dist = conn.execute(
+        "SELECT role, COUNT(*) FROM users GROUP BY role"
+    ).fetchall()
+    log.info("  Role distribution: %s", dict(role_dist))
+
+
+def _parse_event_ts(sd) -> int | None:
+    """Parse a sale_date string to a UTC epoch int.
+
+    Strips trailing 'Z', handles fractional seconds.
+    Attaches timezone.utc to naive datetimes — never depends on server TZ.
+    """
+    if not sd:
+        return None
+    sd_clean = str(sd).strip().rstrip("Z")
+    formats = [
+        "%Y-%m-%d",
+        "%Y-%m-%dT%H:%M:%S",
+        "%m/%d/%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(sd_clean[:26], fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def backfill_ledger(conn: sqlite3.Connection) -> None:
+    """Create unlock_ledger_entries migration rows from existing credit balances.
+
+    Idempotency key: stripe_event_id = 'migration:{user_id}'
+    Balance = max(wallet_total, credits_remaining) — never zero a user.
+    """
+    if not _table_exists(conn, "unlock_ledger_entries"):
+        log.warning("  unlock_ledger_entries not found — skipping ledger backfill")
+        return
+
+    wallet_exists = _table_exists(conn, "wallet")
+    users = conn.execute(
+        "SELECT user_id, COALESCE(credits_remaining, 0) as cr FROM users"
+    ).fetchall()
+    inserted = 0
+
+    for u in users:
+        user_id = u["user_id"]
+        idempotency_key = f"migration:{user_id}"
+
+        # Skip if already migrated
+        if conn.execute(
+            "SELECT 1 FROM unlock_ledger_entries WHERE stripe_event_id = ?",
+            [idempotency_key],
+        ).fetchone():
+            continue
+
+        wallet_total = 0
+        if wallet_exists:
+            w = conn.execute(
+                "SELECT COALESCE(subscription_credits, 0) + COALESCE(purchased_credits, 0) AS total "
+                "FROM wallet WHERE user_id = ?",
+                [user_id],
+            ).fetchone()
+            wallet_total = int(w["total"]) if w else 0
+
+        balance = max(wallet_total, int(u["cr"]))
+        if balance <= 0:
+            continue
+
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        conn.execute(
+            "INSERT INTO unlock_ledger_entries "
+            "(id, user_id, source, qty_total, qty_remaining, purchased_ts, expires_ts, stripe_event_id) "
+            "VALUES (?, ?, 'migration', ?, ?, ?, NULL, ?)",
+            [str(uuid4()), user_id, balance, balance, now_ts, idempotency_key],
+        )
+        inserted += 1
+
+    log.info("  Ledger backfill: %d rows inserted", inserted)
+
+
+def backfill_asset_registry(conn: sqlite3.Connection) -> None:
+    """Populate asset_registry from the leads table.
+
+    Idempotent: skips leads already in registry.
+    event_ts is Python-parsed (not strftime('%s')) to handle non-standard date formats.
+    """
+    if not _table_exists(conn, "asset_registry"):
+        log.warning("  asset_registry not found — skipping backfill")
+        return
+
+    leads = conn.execute(
+        "SELECT id, county, estimated_surplus, surplus_amount, sale_date FROM leads"
+    ).fetchall()
+
+    inserted = 0
+    null_event_ts = 0
+
+    for lead in leads:
+        lead_id = lead["id"]
+
+        if conn.execute(
+            "SELECT 1 FROM asset_registry WHERE asset_id = ?", [lead_id]
+        ).fetchone():
+            continue
+
+        surplus = (lead["surplus_amount"] or lead["estimated_surplus"] or 0.0)
+        try:
+            surplus = float(surplus)
+        except (ValueError, TypeError):
+            surplus = 0.0
+        amount_cents = int(round(surplus * 100))
+
+        event_ts = _parse_event_ts(lead["sale_date"])
+        if event_ts is None and lead["sale_date"]:
+            null_event_ts += 1
+
+        conn.execute(
+            "INSERT INTO asset_registry "
+            "(asset_id, engine_type, source_table, source_id, county, amount_cents, event_ts) "
+            "VALUES (?, 'FORECLOSURE', 'leads', ?, ?, ?, ?)",
+            [lead_id, lead_id, lead["county"], amount_cents, event_ts],
+        )
+        inserted += 1
+
+    log.info(
+        "  Asset registry backfill: %d inserted, %d NULL event_ts",
+        inserted,
+        null_event_ts,
+    )
+
+
 def run(db_path: str) -> None:
     log.info("Migration target: %s", db_path)
 
@@ -192,6 +369,25 @@ def run(db_path: str) -> None:
 
         log.info("=== Phase 5: Wallet backfill ===")
         backfill_wallet(conn)
+        conn.commit()
+
+        log.info("=== Phase 6: Apply 003_vnext_foundation.sql ===")
+        sql_file_003 = MIGRATIONS_DIR / "003_vnext_foundation.sql"
+        if sql_file_003.exists():
+            apply_sql_file(conn, sql_file_003)
+        else:
+            log.warning("SQL file not found: %s", sql_file_003)
+
+        log.info("=== Phase 7: Users role column + backfill ===")
+        evolve_users_vnext(conn)
+        conn.commit()
+
+        log.info("=== Phase 8: Ledger backfill from wallet/credits ===")
+        backfill_ledger(conn)
+        conn.commit()
+
+        log.info("=== Phase 9: Asset registry backfill from leads ===")
+        backfill_asset_registry(conn)
         conn.commit()
 
         # Verify

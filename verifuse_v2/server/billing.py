@@ -22,6 +22,7 @@ import stripe
 from fastapi import HTTPException, Request
 
 from verifuse_v2.db import database as db
+from verifuse_v2.server.pricing import get_monthly_credits, get_daily_limit, get_session_limit
 
 log = logging.getLogger(__name__)
 
@@ -31,13 +32,7 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 BASE_URL = os.getenv("VERIFUSE_BASE_URL", "https://verifuse.tech")
 
-# Stripe Price IDs — create these in your Stripe Dashboard:
-#   1. Product: "VeriFuse Scout" → Price: $49/month (recurring)
-#   2. Product: "VeriFuse Operator" → Price: $149/month (recurring)
-#   3. Product: "VeriFuse Sovereign" → Price: $499/month (recurring)
-# Then paste the price_xxx IDs here or set via env vars.
-# Supports STRIPE_MODE-aware env vars (STRIPE_TEST_PRICE_* / STRIPE_LIVE_PRICE_*)
-
+# Stripe Price IDs — set via env vars (STRIPE_TEST_PRICE_* / STRIPE_LIVE_PRICE_*)
 _stripe_mode = (os.getenv("STRIPE_MODE") or "test").lower()
 _price_prefix = "STRIPE_LIVE_PRICE_" if _stripe_mode == "live" else "STRIPE_TEST_PRICE_"
 
@@ -48,26 +43,6 @@ TIER_TO_PRICE: dict[str, str] = {
 }
 
 PRICE_TO_TIER: dict[str, str] = {v: k for k, v in TIER_TO_PRICE.items() if v}
-
-TIER_CREDITS: dict[str, int] = {
-    "scout": 25,
-    "operator": 100,
-    "sovereign": 500,
-}
-
-# Anti-scraping: daily API request limits per tier (leads endpoint)
-TIER_DAILY_API_LIMIT: dict[str, int] = {
-    "scout": 100,          # 100 lead views/day
-    "operator": 500,       # 500 lead views/day
-    "sovereign": 999999,   # Unlimited
-}
-
-# Anti-scraping: concurrent session limit
-TIER_SESSION_LIMIT: dict[str, int] = {
-    "scout": 1,
-    "operator": 2,
-    "sovereign": 5,
-}
 
 
 # ── Checkout ─────────────────────────────────────────────────────────
@@ -162,12 +137,18 @@ def _handle_checkout_completed(session: dict) -> None:
 
 
 def _handle_subscription_updated(subscription: dict) -> None:
-    """Handle tier changes (upgrade/downgrade)."""
+    """Handle tier changes — upgrades only. Downgrades are silently ignored.
+
+    Tier rank: scout < operator < sovereign.
+    Only update if new_rank >= current_rank to prevent accidental downgrades.
+    """
+    TIER_RANK = {"scout": 0, "operator": 1, "sovereign": 2}
+
     customer_id = subscription.get("customer", "")
     # Find user by stripe_customer_id
     with db.get_db() as conn:
         row = conn.execute(
-            "SELECT user_id FROM users WHERE stripe_customer_id = ?",
+            "SELECT user_id, tier FROM users WHERE stripe_customer_id = ?",
             [customer_id],
         ).fetchone()
     if not row:
@@ -175,12 +156,25 @@ def _handle_subscription_updated(subscription: dict) -> None:
 
     # Get the new price → tier
     items = subscription.get("items", {}).get("data", [])
-    if items:
-        price_id = items[0].get("price", {}).get("id", "")
-        new_tier = PRICE_TO_TIER.get(price_id)
-        if new_tier:
-            db.update_user_tier(row["user_id"], new_tier)
-            log.info("Subscription updated: user=%s tier=%s", row["user_id"], new_tier)
+    if not items:
+        return
+
+    price_id = items[0].get("price", {}).get("id", "")
+    new_tier = PRICE_TO_TIER.get(price_id)
+    if not new_tier:
+        return
+
+    current_rank = TIER_RANK.get(row["tier"], 0)
+    new_rank = TIER_RANK.get(new_tier, 0)
+
+    if new_rank >= current_rank:
+        db.update_user_tier(row["user_id"], new_tier)
+        log.info("Subscription updated: user=%s tier=%s", row["user_id"], new_tier)
+    else:
+        log.info(
+            "Subscription downgrade ignored: user=%s current=%s new=%s",
+            row["user_id"], row["tier"], new_tier,
+        )
 
 
 def _handle_subscription_deleted(subscription: dict) -> None:
@@ -207,7 +201,7 @@ def _handle_invoice_paid(invoice: dict) -> None:
     if not row:
         return
 
-    credits = TIER_CREDITS.get(row["tier"], 5)
+    credits = get_monthly_credits(row["tier"])
     with db.get_db() as conn:
         conn.execute(
             "UPDATE users SET credits_remaining = ? WHERE user_id = ?",
