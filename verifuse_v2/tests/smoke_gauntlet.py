@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-VeriFuse vNEXT Phase 0 — The Gauntlet (Smoke Test Suite)
+VeriFuse vNEXT — The Gauntlet (Smoke Test Suite)
 
-DB tests (30 + 9 vNEXT = 39 target):
+DB tests (30 + 9 vNEXT Phase 0 + 9 vNEXT Phase 10 = 48 target):
   1–12. Required tables (wallet, transactions, stripe_events, etc.)
   13.   Wallet CHECK constraints
   14.   Wallet backfill complete
@@ -13,17 +13,26 @@ DB tests (30 + 9 vNEXT = 39 target):
   19.   Users column: subscription_status
   20.   Users column: current_period_end
   21.   Users column: founders_pricing
-  22.   unlock_ledger_entries table + CHECK constraints   [vNEXT]
-  23.   asset_registry table                              [vNEXT]
-  24.   asset_unlocks table + UNIQUE(user_id,asset_id)   [vNEXT]
-  25.   unlock_spend_journal table                        [vNEXT]
-  26.   tax_assets table + row_hash UNIQUE               [vNEXT]
-  27.   users.role column                                 [vNEXT]
-  28.   Ledger backfill complete                          [vNEXT]
-  29.   No expired entries with remaining credits         [vNEXT]
-  30.   asset_registry backfill complete                  [vNEXT]
+  22.   unlock_ledger_entries table + CHECK constraints   [vNEXT Ph0]
+  23.   asset_registry table                              [vNEXT Ph0]
+  24.   asset_unlocks table + UNIQUE(user_id,asset_id)   [vNEXT Ph0]
+  25.   unlock_spend_journal table                        [vNEXT Ph0]
+  26.   tax_assets table + row_hash UNIQUE               [vNEXT Ph0]
+  27.   users.role column                                 [vNEXT Ph0]
+  28.   Ledger backfill complete                          [vNEXT Ph0]
+  29.   No expired entries with remaining credits         [vNEXT Ph0]
+  30.   asset_registry backfill complete                  [vNEXT Ph0]
+  31.   county_profiles (selectors_json + last_verified_ts) [Gate 2]
+  32.   html_snapshots UNIQUE(asset_id,snapshot_type,html_sha256) [Gate 2]
+  33.   evidence_documents UNIQUE(asset_id,doc_family,file_sha256) [Gate 2]
+  34.   evidence_documents has content_type column        [Gate 2]
+  35.   extraction_events CHECK includes CAPTCHA_BLOCKED  [Gate 2]
+  36.   field_evidence table exists                       [Gate 2]
+  37.   ingestion_runs CHECK (RUNNING/SUCCESS/FAILED/PARTIAL/FAILED_STALE) [Gate 2]
+  38.   asset_registry has processing_status column       [Gate 2]
+  39.   asset_registry has treasurer_transfer_flag column [Gate 2]
 
-HTTP tests (9, target 39 total with HTTP):
+HTTP tests (9, target 48 DB + 9 HTTP = 57 target):
   31.  Health endpoint
   32.  Public config
   33.  Preview leads (no PII)
@@ -129,8 +138,10 @@ def run_http_tests():
         is_pdf = pdf_bytes[:4] == b"%PDF"
         check("Sample dossier PDF", code == 200 and is_pdf,
               f"size={len(pdf_bytes)}, pdf_header={'yes' if is_pdf else 'no'}")
+        _cc = headers.get("cache-control", "")
         check("Sample dossier Cache-Control",
-              headers.get("cache-control", "") == "no-store")
+              all(d in _cc for d in ("no-store", "no-cache", "must-revalidate", "proxy-revalidate")),
+              f"cache-control: {_cc}")
         # Bad key → 404
         code2, _, _ = http_get_raw("/api/dossier/sample/bad_key_12345678")
         check("Sample dossier bad key → 404", code2 == 404)
@@ -294,6 +305,75 @@ def run_db_tests():
     else:
         check("asset_registry backfill complete", False, "asset_registry table missing")
 
+    # ── vNEXT Phase 10 checks (Gate 2) ───────────────────────────
+
+    # 10. county_profiles: table exists with selectors_json + last_verified_ts
+    cp_cols = {r[1] for r in conn.execute("PRAGMA table_info(county_profiles)").fetchall()}
+    check("Table: county_profiles (selectors_json + last_verified_ts)",
+          "county_profiles" in tables
+          and "selectors_json" in cp_cols
+          and "last_verified_ts" in cp_cols,
+          f"cols={sorted(cp_cols)}" if cp_cols else "table missing")
+
+    # 11. html_snapshots: UNIQUE(asset_id, snapshot_type, html_sha256) in DDL
+    hs_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='html_snapshots'"
+    ).fetchone()
+    hs_sql = (hs_row[0] or "") if hs_row else ""
+    check("html_snapshots UNIQUE(asset_id, snapshot_type, html_sha256)",
+          hs_row is not None
+          and "UNIQUE" in hs_sql
+          and "html_sha256" in hs_sql
+          and "snapshot_type" in hs_sql)
+
+    # 12. evidence_documents: UNIQUE(asset_id, doc_family, file_sha256) + content_type col
+    ed_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='evidence_documents'"
+    ).fetchone()
+    ed_sql = (ed_row[0] or "") if ed_row else ""
+    ed_cols = {r[1] for r in conn.execute("PRAGMA table_info(evidence_documents)").fetchall()}
+    check("evidence_documents UNIQUE(asset_id, doc_family, file_sha256)",
+          ed_row is not None
+          and "UNIQUE" in ed_sql
+          and "file_sha256" in ed_sql
+          and "doc_family" in ed_sql)
+
+    # 13. evidence_documents has content_type column
+    check("evidence_documents has content_type column",
+          "content_type" in ed_cols,
+          f"cols={sorted(ed_cols)}" if ed_cols else "table missing")
+
+    # 14. extraction_events: status CHECK includes CAPTCHA_BLOCKED
+    ee_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='extraction_events'"
+    ).fetchone()
+    ee_sql = (ee_row[0] or "") if ee_row else ""
+    check("extraction_events status CHECK includes CAPTCHA_BLOCKED",
+          ee_row is not None and "CAPTCHA_BLOCKED" in ee_sql)
+
+    # 15. field_evidence: table exists
+    check("Table: field_evidence", "field_evidence" in tables)
+
+    # 16. ingestion_runs: status CHECK includes RUNNING/SUCCESS/FAILED/PARTIAL/FAILED_STALE
+    ir_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='ingestion_runs'"
+    ).fetchone()
+    ir_sql = (ir_row[0] or "") if ir_row else ""
+    check("ingestion_runs status CHECK (RUNNING/SUCCESS/FAILED/PARTIAL/FAILED_STALE)",
+          ir_row is not None
+          and all(v in ir_sql for v in ("RUNNING", "SUCCESS", "FAILED", "PARTIAL", "FAILED_STALE")))
+
+    # 17. asset_registry has processing_status column (PRAGMA verify)
+    ar_cols = {r[1] for r in conn.execute("PRAGMA table_info(asset_registry)").fetchall()}
+    check("asset_registry has processing_status column",
+          "processing_status" in ar_cols,
+          f"found={sorted(ar_cols)}" if not "processing_status" in ar_cols else "")
+
+    # 18. asset_registry has treasurer_transfer_flag column (PRAGMA verify)
+    check("asset_registry has treasurer_transfer_flag column",
+          "treasurer_transfer_flag" in ar_cols,
+          f"found={sorted(ar_cols)}" if not "treasurer_transfer_flag" in ar_cols else "")
+
     conn.close()
 
 
@@ -303,7 +383,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  VERIFUSE vNEXT PHASE 0 — THE GAUNTLET (target: 39/39)")
+    print("  VERIFUSE vNEXT — THE GAUNTLET (target: ≥48)")
     print("=" * 60)
 
     run_db_tests()

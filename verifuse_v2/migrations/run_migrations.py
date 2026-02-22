@@ -4,7 +4,7 @@ VeriFuse Migration Runner — vNEXT Phase 0
 
 Applies SQL migrations idempotently with file locking.
 Handles:
-  - Schema creation (002_omega_hardening.sql, 003_vnext_foundation.sql)
+  - Schema creation (002_omega_hardening.sql, 003_vnext_foundation.sql, 004_ingestion_evidence.sql)
   - Users table evolution (add missing columns, role backfill)
   - Wallet backfill from users.credits_remaining
   - Ledger backfill (FIFO unlock_ledger_entries from wallet/credits)
@@ -328,6 +328,59 @@ def backfill_asset_registry(conn: sqlite3.Connection) -> None:
     )
 
 
+def apply_phase10(conn: sqlite3.Connection) -> None:
+    """Phase 10: Apply 004_ingestion_evidence.sql + asset_registry column additions.
+
+    - Creates 6 new evidence/observability tables (idempotent).
+    - Adds processing_status and treasurer_transfer_flag to asset_registry if absent.
+    - Seeds county_profiles for jefferson and arapahoe (INSERT OR IGNORE).
+    """
+    sql_file_004 = MIGRATIONS_DIR / "004_ingestion_evidence.sql"
+    if sql_file_004.exists():
+        apply_sql_file(conn, sql_file_004)
+    else:
+        log.warning("SQL file not found: %s", sql_file_004)
+
+    # Add columns to asset_registry — verify first, add only if missing
+    for col_def in [
+        (
+            "processing_status",
+            "TEXT CHECK(processing_status IN ("
+            "'PENDING','EXTRACTED','VALIDATED','NEEDS_REVIEW','CAPTCHA_BLOCKED'"
+            ")) DEFAULT 'PENDING'",
+        ),
+        (
+            "treasurer_transfer_flag",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+    ]:
+        col_name, col_typedef = col_def
+        existing_cols = _get_columns(conn, "asset_registry")
+        if col_name not in existing_cols:
+            log.info("  ADD COLUMN asset_registry.%s", col_name)
+            conn.execute(
+                f"ALTER TABLE asset_registry ADD COLUMN {col_name} {col_typedef}"
+            )
+        else:
+            log.info("  asset_registry.%s already present — skipping", col_name)
+
+    # Seed county_profiles — INSERT OR IGNORE; base_url from env only
+    for county, env_var in [
+        ("jefferson", "GOVSOFT_JEFFERSON_URL"),
+        ("arapahoe", "GOVSOFT_ARAPAHOE_URL"),
+    ]:
+        base_url = os.getenv(env_var, "CONFIGURE_ME")
+        conn.execute(
+            """INSERT OR IGNORE INTO county_profiles
+               (county, platform_type, captcha_mode, requires_accept_terms,
+                base_url, search_path, detail_path)
+               VALUES (?, 'govsoft', 'none', 1, ?, '/SearchDetails.aspx', '/CaseDetails.aspx')
+            """,
+            [county, base_url],
+        )
+        log.info("  county_profiles seeded: %s (base_url=%s)", county, base_url)
+
+
 def run(db_path: str) -> None:
     log.info("Migration target: %s", db_path)
 
@@ -388,6 +441,10 @@ def run(db_path: str) -> None:
 
         log.info("=== Phase 9: Asset registry backfill from leads ===")
         backfill_asset_registry(conn)
+        conn.commit()
+
+        log.info("=== Phase 10: Ingestion evidence schema + asset_registry columns ===")
+        apply_phase10(conn)
         conn.commit()
 
         # Verify

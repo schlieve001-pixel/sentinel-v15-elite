@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import { type AuthUser, getMe, login as apiLogin, register as apiRegister, type AuthResponse } from "./api";
 
 interface AuthState {
@@ -24,6 +25,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => localStorage.getItem("vf_token")
   );
   const [loading, setLoading] = useState(!!token);
+  const navigate = useNavigate();
+
+  const logout = useCallback(() => {
+    localStorage.removeItem("vf_token");
+    localStorage.removeItem("vf_is_admin");
+    localStorage.removeItem("vf_simulate");
+    sessionStorage.clear();
+    setToken(null);
+    setUser(null);
+    navigate("/login", { replace: true });
+  }, [navigate]);
+
+  const revalidateAuthOrRedirect = useCallback(async () => {
+    const storedToken = localStorage.getItem("vf_token");
+    if (!storedToken) { logout(); return; }
+    try {
+      const me = await getMe();
+      setUser(me);
+    } catch {
+      logout();
+    }
+  }, [logout]);
 
   useEffect(() => {
     if (!token) return;
@@ -35,6 +58,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .finally(() => setLoading(false));
   }, [token]);
+
+  // BFCache guard: revalidate auth when page is restored from browser cache
+  useEffect(() => {
+    const handlePageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) revalidateAuthOrRedirect();
+    };
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, [revalidateAuthOrRedirect]);
 
   function handleAuth(res: AuthResponse) {
     localStorage.setItem("vf_token", res.token);
@@ -62,15 +94,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }) {
     const res = await apiRegister(data);
     handleAuth(res);
-  }
-
-  function logout() {
-    localStorage.removeItem("vf_token");
-    localStorage.removeItem("vf_simulate");
-    localStorage.removeItem("vf_is_admin");
-    setToken(null);
-    setUser(null);
-    window.location.replace("/login");
   }
 
   return (

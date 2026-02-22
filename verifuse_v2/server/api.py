@@ -726,6 +726,42 @@ async def add_vary_header(request: Request, call_next):
     return response
 
 
+def _needs_nocache(path: str) -> bool:
+    """Determine if a path requires no-cache headers.
+
+    Uses exact match for the leads listing route and prefix match for
+    subroutes to avoid false positives on unrelated paths.
+    Must NOT apply to /api/webhooks/*, /api/health, /api/public-config.
+    """
+    return (
+        path.startswith("/api/auth/")
+        or path == "/api/leads"
+        or path.startswith("/api/leads/")
+        or path.startswith("/api/lead/")
+        or path.startswith("/api/dossier/")
+        or path.startswith("/api/assets/")
+        or path.startswith("/api/evidence/")
+    )
+
+
+@app.middleware("http")
+async def bfcache_hardening(request: Request, call_next):
+    """Inject no-cache headers on authenticated/sensitive routes.
+
+    Prevents BFCache from serving stale authenticated pages after logout.
+    Explicitly excludes webhooks, health, and public-config endpoints.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if _needs_nocache(path) and not path.startswith("/api/webhooks/"):
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, proxy-revalidate"
+        )
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 # ── Legal constants ────────────────────────────────────────────────
 LEGAL_DISCLAIMER = (
     "Forensic information service only. Not a debt collection or asset recovery agency. "
@@ -2078,11 +2114,21 @@ def _handle_invoice_payment(invoice: dict) -> None:
 
         if billing_reason == "subscription_update":
             # Tier sync only — NO credits; handled separately from invoice
-            conn.execute(
-                "UPDATE users SET tier = ?, subscription_status = 'active' WHERE user_id = ?",
-                [new_tier, user_id],
-            )
-            _audit_log(conn, user_id, "subscription_tier_sync", {"tier": new_tier})
+            # TIER_RANK guard: never allow Stripe to downgrade a user
+            _TIER_RANK = {"scout": 0, "operator": 1, "sovereign": 2}
+            cur_row = conn.execute(
+                "SELECT tier FROM users WHERE user_id = ?", [user_id]
+            ).fetchone()
+            current_tier = (cur_row["tier"] if cur_row else None) or "scout"
+            if _TIER_RANK.get(new_tier, 0) >= _TIER_RANK.get(current_tier, 0):
+                conn.execute(
+                    "UPDATE users SET tier = ?, subscription_status = 'active' WHERE user_id = ?",
+                    [new_tier, user_id],
+                )
+                _audit_log(conn, user_id, "subscription_tier_sync", {"tier": new_tier})
+            else:
+                _audit_log(conn, user_id, "subscription_downgrade_blocked",
+                           {"attempted": new_tier, "current": current_tier})
         elif billing_reason in ("subscription_cycle", "subscription_create"):
             # Determine period end (subscription expiry)
             # invoice.lines[0].period.end is the most reliable source
