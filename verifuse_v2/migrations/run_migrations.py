@@ -385,6 +385,29 @@ def apply_phase10(conn: sqlite3.Connection) -> None:
         log.info("  county_profiles seeded: %s (base_url=%s)", county, base_url)
 
 
+def apply_phase11(conn: sqlite3.Connection) -> None:
+    """Phase 11: Add source_url to html_snapshots and evidence_documents.
+
+    Corresponds to migration file: 004a_source_urls.sql
+    (Numbered 004a to avoid collision with Gate 6's 005_equity_resolution.sql.)
+
+    source_url stores the page URL (snapshots) or download URL (evidence docs)
+    at the time of capture. These ALTER TABLE statements are guarded with
+    PRAGMA table_info to ensure idempotency — SQLite does not support
+    ALTER TABLE ADD COLUMN IF NOT EXISTS.
+    """
+    for table in ("html_snapshots", "evidence_documents"):
+        if not _table_exists(conn, table):
+            log.info("  Table %s not found — skipping source_url addition", table)
+            continue
+        cols = _get_columns(conn, table)
+        if "source_url" not in cols:
+            log.info("  ADD COLUMN %s.source_url TEXT", table)
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN source_url TEXT")
+        else:
+            log.info("  %s.source_url already present — skipping", table)
+
+
 def run(db_path: str) -> None:
     log.info("Migration target: %s", db_path)
 
@@ -449,6 +472,10 @@ def run(db_path: str) -> None:
 
         log.info("=== Phase 10: Ingestion evidence schema + asset_registry columns ===")
         apply_phase10(conn)
+        conn.commit()
+
+        log.info("=== Phase 11: Source URL columns (004a_source_urls) ===")
+        apply_phase11(conn)
         conn.commit()
 
         # Verify

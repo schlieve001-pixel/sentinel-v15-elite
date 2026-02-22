@@ -2,7 +2,7 @@
 """
 VeriFuse vNEXT — The Gauntlet (Smoke Test Suite)
 
-DB tests (30 + 9 vNEXT Phase 0 + 9 vNEXT Phase 10 = 48 target):
+DB tests (30 + 9 vNEXT Phase 0 + 9 vNEXT Phase 10 + 5 Gate 4 = 53 target):
   1–12. Required tables (wallet, transactions, stripe_events, etc.)
   13.   Wallet CHECK constraints
   14.   Wallet backfill complete
@@ -31,8 +31,13 @@ DB tests (30 + 9 vNEXT Phase 0 + 9 vNEXT Phase 10 = 48 target):
   37.   ingestion_runs CHECK (RUNNING/SUCCESS/FAILED/PARTIAL/FAILED_STALE) [Gate 2]
   38.   asset_registry has processing_status column       [Gate 2]
   39.   asset_registry has treasurer_transfer_flag column [Gate 2]
+  40.   html_snapshots has source_url column              [Gate 4]
+  41.   evidence_documents has source_url column          [Gate 4]
+  42.   validate_overbid: mismatch → BRONZE + NEEDS_REVIEW [Gate 4]
+  43.   validate_overbid: correct math (no voucher) → GOLD [Gate 4]
+  44.   validate_overbid: voucher present, no OCR → BRONZE [Gate 4]
 
-HTTP tests (9, target 48 DB + 9 HTTP = 57 target):
+HTTP tests (9, target 53 DB + 9 HTTP = 62 target):
   31.  Health endpoint
   32.  Public config
   33.  Preview leads (no PII)
@@ -374,6 +379,67 @@ def run_db_tests():
           "treasurer_transfer_flag" in ar_cols,
           f"found={sorted(ar_cols)}" if not "treasurer_transfer_flag" in ar_cols else "")
 
+    # ── Gate 4 checks ─────────────────────────────────────────────────────────
+
+    # 19. source_url column on html_snapshots (Gate 4 — Phase 11 migration)
+    hs_cols = {r[1] for r in conn.execute("PRAGMA table_info(html_snapshots)").fetchall()}
+    check("html_snapshots has source_url column",
+          "source_url" in hs_cols,
+          f"cols={sorted(hs_cols)}" if "source_url" not in hs_cols else "")
+
+    # 20. source_url column on evidence_documents (Gate 4 — Phase 11 migration)
+    check("evidence_documents has source_url column",
+          "source_url" in ed_cols,
+          f"cols={sorted(ed_cols)}" if "source_url" not in ed_cols else "")
+
+    # 21. Gate 4 — validate_overbid: mismatch → BRONZE + NEEDS_REVIEW (unit test)
+    try:
+        from verifuse_v2.ingest.govsoft_extract import validate_overbid
+        from decimal import Decimal
+        grade, status = validate_overbid(
+            html_overbid=Decimal("10000.00"),
+            successful_bid=Decimal("110000.00"),
+            total_indebtedness=Decimal("101000.00"),  # computed = 9000, mismatch
+        )
+        check("validate_overbid: mismatch → BRONZE + NEEDS_REVIEW",
+              grade == "BRONZE" and status == "NEEDS_REVIEW",
+              f"got grade={grade!r} status={status!r}")
+    except Exception as e:
+        check("validate_overbid: mismatch → BRONZE + NEEDS_REVIEW", False, str(e))
+
+    # 22. Gate 4 — validate_overbid: correct math, no voucher → GOLD + VALIDATED
+    try:
+        from verifuse_v2.ingest.govsoft_extract import validate_overbid
+        from decimal import Decimal
+        grade2, status2 = validate_overbid(
+            html_overbid=Decimal("10000.00"),
+            successful_bid=Decimal("110000.00"),
+            total_indebtedness=Decimal("100000.00"),  # computed = 10000, exact match
+            has_voucher_doc=False,
+        )
+        check("validate_overbid: correct math (no voucher) → GOLD + VALIDATED",
+              grade2 == "GOLD" and status2 == "VALIDATED",
+              f"got grade={grade2!r} status={status2!r}")
+    except Exception as e:
+        check("validate_overbid: correct math (no voucher) → GOLD + VALIDATED", False, str(e))
+
+    # 23. Gate 4 — validate_overbid: voucher doc exists, no OCR → BRONZE + NEEDS_REVIEW
+    try:
+        from verifuse_v2.ingest.govsoft_extract import validate_overbid
+        from decimal import Decimal
+        grade3, status3 = validate_overbid(
+            html_overbid=Decimal("10000.00"),
+            successful_bid=Decimal("110000.00"),
+            total_indebtedness=Decimal("100000.00"),  # math would match, but voucher blocks
+            voucher_overbid=None,
+            has_voucher_doc=True,  # OB doc exists, Gate 5 OCR not yet run
+        )
+        check("validate_overbid: voucher present, no OCR → BRONZE + NEEDS_REVIEW",
+              grade3 == "BRONZE" and status3 == "NEEDS_REVIEW",
+              f"got grade={grade3!r} status={status3!r}")
+    except Exception as e:
+        check("validate_overbid: voucher present, no OCR → BRONZE + NEEDS_REVIEW", False, str(e))
+
     conn.close()
 
 
@@ -383,7 +449,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  VERIFUSE vNEXT — THE GAUNTLET (target: ≥48)")
+    print("  VERIFUSE vNEXT — THE GAUNTLET (target: ≥53)")
     print("=" * 60)
 
     run_db_tests()

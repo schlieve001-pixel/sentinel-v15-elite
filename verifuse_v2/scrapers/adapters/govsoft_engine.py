@@ -225,17 +225,23 @@ def _mark_captcha_blocked(conn, asset_id_val: str, county: str) -> None:
 # ── HTML snapshot storage ────────────────────────────────────────────────────
 
 
-def _store_snapshot(conn, asset_id_val: str, snapshot_type: str, html: str) -> None:
-    """Gzip-compress and store an HTML snapshot (INSERT OR IGNORE on sha256 UNIQUE)."""
+def _store_snapshot(
+    conn, asset_id_val: str, snapshot_type: str, html: str,
+    source_url: str | None = None,
+) -> None:
+    """Gzip-compress and store an HTML snapshot (INSERT OR IGNORE on sha256 UNIQUE).
+
+    source_url — the page.url at capture time (Gate 4 first-class URL capture).
+    """
     raw_bytes = html.encode("utf-8", errors="replace")
     gz_bytes = gzip.compress(raw_bytes)
     sha = _sha256_bytes(raw_bytes)
     conn.execute(
         """INSERT OR IGNORE INTO html_snapshots
-           (id, asset_id, snapshot_type, raw_html_gzip, html_sha256, retrieved_ts)
-           VALUES (?,?,?,?,?,?)
+           (id, asset_id, snapshot_type, raw_html_gzip, html_sha256, retrieved_ts, source_url)
+           VALUES (?,?,?,?,?,?,?)
         """,
-        [str(uuid4()), asset_id_val, snapshot_type, gz_bytes, sha, _now_ts()],
+        [str(uuid4()), asset_id_val, snapshot_type, gz_bytes, sha, _now_ts(), source_url],
     )
 
 
@@ -250,12 +256,34 @@ def _store_evidence_doc(
     raw_filename: str,
     doc_type: str,
     file_bytes: bytes,
+    source_url: str | None = None,
 ) -> str | None:
     """Write document bytes to vault and insert into evidence_documents.
 
     Returns the evidence_doc id if inserted, None if already existed.
     Uses BEGIN IMMEDIATE to prevent concurrent double-spend.
+
+    Data Integrity Invariant (Gate 4): HTML masquerading as a document is rejected.
+    Legitimate binary formats (PDF, TIFF, DOC, etc.) from any county are allowed.
+    Rejection is triggered if the first 512 bytes look like HTML — not by
+    requiring a specific magic byte sequence (which would break TIFF/DOC evidence).
+    source_url — the download URL (docviewer endpoint) for first-class evidence.
     """
+    # Gate 4 HTML rejection guard — reject HTML error pages, allow all binary formats.
+    # GovSoft sometimes returns an ASP.NET HTML error page instead of the document
+    # when a file is missing or the session has expired. Detecting HTML (not requiring
+    # PDF magic bytes) ensures TIFF, DOC, and other valid binary evidence is preserved.
+    # lstrip() handles ASP.NET error pages that begin with BOM or leading whitespace
+    # before the opening '<' tag — a known GovSoft error response pattern.
+    probe = file_bytes[:512].lower().lstrip()
+    if probe.startswith(b"<"):
+        log.error(
+            "REJECTED HTML masquerading as document for %s/%s file=%s "
+            "(first 64 bytes=%r) — skipping vault write",
+            county, case_number, raw_filename, file_bytes[:64],
+        )
+        return None
+
     safe_name = _safe_filename(raw_filename)
     doc_family = _doc_family_from_filename(raw_filename)
     content_type = _content_type_from_ext(raw_filename)
@@ -280,12 +308,13 @@ def _store_evidence_doc(
         rows = conn.execute(
             """INSERT OR IGNORE INTO evidence_documents
                (id, asset_id, filename, doc_type, doc_family,
-                file_path, file_sha256, bytes, content_type, retrieved_ts)
-               VALUES (?,?,?,?,?,?,?,?,?,?)
+                file_path, file_sha256, bytes, content_type, retrieved_ts, source_url)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             [
                 doc_id, asset_id_val, raw_filename, doc_type, doc_family,
                 str(dest_path), file_sha, len(file_bytes), content_type, _now_ts(),
+                source_url,
             ],
         ).rowcount
         conn.execute("COMMIT")
@@ -488,7 +517,8 @@ class GovSoftEngine:
 
                 # Save SEARCH_RESULTS snapshot
                 _store_snapshot(
-                    self._conn, asset_id_val, "SEARCH_RESULTS", await page.content()
+                    self._conn, asset_id_val, "SEARCH_RESULTS", await page.content(),
+                    source_url=page.url,
                 )
 
                 # CAPTCHA on detail
@@ -533,7 +563,8 @@ class GovSoftEngine:
                 # Save CASE_DETAIL snapshot (even if URL didn't change — captures whatever
                 # the platform returned after the case link click)
                 _store_snapshot(
-                    self._conn, asset_id_val, "CASE_DETAIL", await page.content()
+                    self._conn, asset_id_val, "CASE_DETAIL", await page.content(),
+                    source_url=page.url,
                 )
 
                 # Click through tabs and snapshot each
@@ -558,7 +589,10 @@ class GovSoftEngine:
                                 await asyncio.sleep(2)
                                 await page.wait_for_load_state("networkidle", timeout=15000)
                                 html = await page.content()
-                                _store_snapshot(self._conn, asset_id_val, snap_type, html)
+                                _store_snapshot(
+                                    self._conn, asset_id_val, snap_type, html,
+                                    source_url=page.url,
+                                )
                                 if snap_type == "DOCS_TAB":
                                     docs_html = html
                                 break
@@ -663,6 +697,7 @@ class GovSoftEngine:
                                     actual_filename,  # PDF filename → disk + DB
                                     raw_name,         # original link text → doc_type
                                     file_bytes,
+                                    source_url=download.url,
                                 )
                                 log.info(
                                     "Downloaded %s (%d bytes) for %s/%s",
@@ -820,6 +855,7 @@ class GovSoftEngine:
                         f"FORECLOSURE:CO:{self.county.upper()}:SEARCH",
                         "SEARCH_RESULTS",
                         await page.content(),
+                        source_url=page.url,
                     )
 
                     # Collect case links on this page
