@@ -129,8 +129,10 @@ def run_http_tests():
         is_pdf = pdf_bytes[:4] == b"%PDF"
         check("Sample dossier PDF", code == 200 and is_pdf,
               f"size={len(pdf_bytes)}, pdf_header={'yes' if is_pdf else 'no'}")
+        _cc = headers.get("cache-control", "")
         check("Sample dossier Cache-Control",
-              headers.get("cache-control", "") == "no-store")
+              all(d in _cc for d in ("no-store", "no-cache", "must-revalidate", "proxy-revalidate")),
+              f"cache-control: {_cc}")
         # Bad key → 404
         code2, _, _ = http_get_raw("/api/dossier/sample/bad_key_12345678")
         check("Sample dossier bad key → 404", code2 == 404)
