@@ -364,17 +364,21 @@ def apply_phase10(conn: sqlite3.Connection) -> None:
         else:
             log.info("  asset_registry.%s already present — skipping", col_name)
 
-    # Seed county_profiles — INSERT OR IGNORE; base_url from env only
+    # Seed county_profiles — INSERT or update CONFIGURE_ME placeholder;
+    # base_url from env only. If a row already exists with a real URL, leave it.
     for county, env_var in [
         ("jefferson", "GOVSOFT_JEFFERSON_URL"),
         ("arapahoe", "GOVSOFT_ARAPAHOE_URL"),
     ]:
         base_url = os.getenv(env_var, "CONFIGURE_ME")
         conn.execute(
-            """INSERT OR IGNORE INTO county_profiles
+            """INSERT INTO county_profiles
                (county, platform_type, captcha_mode, requires_accept_terms,
                 base_url, search_path, detail_path)
                VALUES (?, 'govsoft', 'none', 1, ?, '/SearchDetails.aspx', '/CaseDetails.aspx')
+               ON CONFLICT(county) DO UPDATE SET
+                   base_url = excluded.base_url
+               WHERE county_profiles.base_url = 'CONFIGURE_ME'
             """,
             [county, base_url],
         )
