@@ -32,7 +32,7 @@ import random
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -175,6 +175,17 @@ def _asset_id(county: str, case_number: str) -> str:
 
 def _now_ts() -> int:
     return int(time.time())
+
+
+def _to_iso(mmddyyyy: str) -> str:
+    """Convert MM/DD/YYYY to YYYY-MM-DD for Playwright date inputs.
+
+    Passes through unchanged if already ISO or unrecognised format.
+    """
+    try:
+        return datetime.strptime(mmddyyyy, "%m/%d/%Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return mmddyyyy
 
 
 # ── HITL CAPTCHA sentinel ────────────────────────────────────────────────────
@@ -404,25 +415,53 @@ class GovSoftEngine:
         self.county = county
         self._conn = db_conn or _db_connect()
         self._selectors: dict = {}
+        self._config: dict = {}
 
-        # Load county profile from DB
-        row = self._conn.execute(
-            "SELECT * FROM county_profiles WHERE county=?", [county]
-        ).fetchone()
-        if not row:
-            raise ValueError(f"No county_profiles row for county={county!r}")
+        # Load county config — govsoft_county_configs is authoritative (Phase 2+);
+        # fall back to county_profiles for backwards compatibility.
+        cfg_row = None
+        try:
+            cfg_row = self._conn.execute(
+                "SELECT * FROM govsoft_county_configs WHERE county = ? AND active = 1",
+                [county]
+            ).fetchone()
+        except Exception:
+            pass  # Table may not exist on older DB — fall through to county_profiles
 
-        self.base_url: str = row["base_url"]
-        self.search_path: str = row["search_path"]
-        self.detail_path: str = row["detail_path"]
-        self.captcha_mode: str = row["captcha_mode"]
-        self.requires_accept_terms: bool = bool(row["requires_accept_terms"])
-
-        if row["selectors_json"]:
-            try:
-                self._selectors = json.loads(row["selectors_json"])
-            except (json.JSONDecodeError, TypeError):
-                log.warning("Could not parse selectors_json for county=%s", county)
+        if cfg_row:
+            self._config = dict(cfg_row)
+            self.base_url: str = cfg_row["base_url"]
+            self.search_path: str = cfg_row["search_path"]
+            self.detail_path: str = "/CaseDetails.aspx"  # govsoft_county_configs has no detail_path
+            self.captcha_mode: str = cfg_row["captcha_mode"]
+            self.requires_accept_terms: bool = bool(cfg_row["requires_accept_terms"])
+            if cfg_row["selectors_json"]:
+                try:
+                    self._selectors = json.loads(cfg_row["selectors_json"])
+                except (json.JSONDecodeError, TypeError):
+                    log.warning("Could not parse selectors_json for county=%s", county)
+        else:
+            # Fallback: load from county_profiles
+            row = self._conn.execute(
+                "SELECT * FROM county_profiles WHERE county=?", [county]
+            ).fetchone()
+            if not row:
+                raise ValueError(f"No county_profiles row for county={county!r}")
+            self.base_url: str = row["base_url"]
+            self.search_path: str = row["search_path"]
+            self.detail_path: str = row["detail_path"]
+            self.captcha_mode: str = row["captcha_mode"]
+            self.requires_accept_terms: bool = bool(row["requires_accept_terms"])
+            self._config = {
+                "page_limit": 90,
+                "captcha_mode": self.captcha_mode,
+                "requires_accept_terms": self.requires_accept_terms,
+            }
+            if row["selectors_json"]:
+                try:
+                    self._selectors = json.loads(row["selectors_json"])
+                except (json.JSONDecodeError, TypeError):
+                    log.warning("Could not parse selectors_json for county=%s", county)
 
         # PRAGMA-verify leads columns used in upsert
         self._leads_cols = {
@@ -437,6 +476,222 @@ class GovSoftEngine:
     def _sel(self, key: str, default: str) -> str:
         """Return per-county selector override or fall back to default."""
         return self._selectors.get(key, default)
+
+    def _load_county_config(self, county: str, conn) -> dict:
+        """Load county config from govsoft_county_configs (authoritative source)."""
+        row = conn.execute(
+            "SELECT * FROM govsoft_county_configs WHERE county = ? AND active = 1",
+            [county]
+        ).fetchone()
+        if not row:
+            raise ValueError(f"No active govsoft_county_configs entry for county={county!r}")
+        return dict(row)
+
+    async def _extract_total_count(self, page) -> int | None:
+        """Extract total result count from search results page.
+
+        SHOWING_RE searched first to prevent false match on single-record pages.
+        Returns int count or None if undetectable.
+        """
+        full_text = await page.inner_text("body")
+        # SHOWING_RE first: "Showing 1 to 25 of 150 records" → 150
+        m = re.search(
+            r'showing\s+\d+\s*(?:to|-|–)\s*\d+\s+of\s+([\d,]+)',
+            full_text, re.IGNORECASE,
+        )
+        if m:
+            return int(m.group(1).replace(",", ""))
+        # Fallback COUNT_RE: "150 Records Found" — only if SHOWING_RE didn't match
+        m = re.search(
+            r'(\d[\d,]*)\s*(record|result|case|item|found)',
+            full_text, re.IGNORECASE,
+        )
+        if m:
+            return int(m.group(1).replace(",", ""))
+        return None
+
+    async def _navigate_and_search(
+        self, page, date_from: str, date_to: str
+    ) -> None:
+        """Navigate to search page, select ddStatus='Sold', fill date fields, click Search.
+
+        date_from / date_to: MM/DD/YYYY strings.
+        Raises on fatal navigation failure.
+        """
+        # Step 1: Select ddStatus='Sold' to target sold/auctioned cases.
+        dd_status_loc = page.locator(
+            "#MainContent_CustomContentPlaceHolder_ddStatus"
+        )
+        if await dd_status_loc.count() > 0:
+            await dd_status_loc.select_option("Sold")
+            await asyncio.sleep(1)
+            await page.wait_for_load_state("networkidle", timeout=10000)
+            log.info("[engine] ddStatus='Sold' selected for %s", self.county)
+        else:
+            log.warning(
+                "[engine] ddStatus dropdown not found for %s — "
+                "proceeding without status filter",
+                self.county,
+            )
+
+        # Step 2: Fill sold-date range fields (YYYY-MM-DD via _to_iso).
+        sold_from_sel = self._sel(
+            "sold_date_from",
+            "#MainContent_CustomContentPlaceHolder_txtSoldDate1",
+        )
+        sold_to_sel = self._sel(
+            "sold_date_to",
+            "#MainContent_CustomContentPlaceHolder_txtSoldDate2",
+        )
+        from_loc = page.locator(sold_from_sel)
+        to_loc = page.locator(sold_to_sel)
+        if await from_loc.count() > 0:
+            await from_loc.fill(_to_iso(date_from))
+            log.info("[engine] txtSoldDate1 filled: %s", _to_iso(date_from))
+        else:
+            log.warning("txtSoldDate1 not found for %s", self.county)
+        if await to_loc.count() > 0:
+            await to_loc.fill(_to_iso(date_to))
+            log.info("[engine] txtSoldDate2 filled: %s", _to_iso(date_to))
+        else:
+            log.warning("txtSoldDate2 not found for %s", self.county)
+
+        # Step 3: Click Search and wait for results.
+        await page.click(self._sel("search_btn", SEL_SEARCH_BTN))
+        await asyncio.sleep(2)
+        await page.wait_for_load_state("networkidle", timeout=20000)
+        try:
+            await page.wait_for_selector(
+                "table[id*='gvSearchResults'], "
+                "table[id*='gvSearch'], "
+                "input[id*='btnSearch']",
+                timeout=10000,
+            )
+        except Exception:
+            pass  # Either results loaded or form shown — proceed
+        await asyncio.sleep(1)
+
+    async def _paginate_all_cases(self, page) -> list[tuple[str, str]]:
+        """Collect all (case_number, href) pairs from paginated search results.
+
+        Advances through ALL pages via __doPostBack 'Next' links.
+        Does NOT navigate into individual case detail pages.
+        Returns the full list of (case_number, href) tuples.
+        """
+        all_entries: list[tuple[str, str]] = []
+
+        while True:
+            rows = await page.locator(
+                self._sel("results_table", SEL_RESULTS_TABLE) + " tbody tr"
+            ).all()
+
+            for row in rows:
+                try:
+                    cells = await row.locator("td").all_inner_texts()
+                    case_number = ""
+                    for cell_text in cells[:4]:
+                        txt = cell_text.strip()
+                        if txt and len(txt) >= 4:
+                            case_number = txt
+                            break
+                    if not case_number:
+                        continue
+                    link_el = row.locator("a").first
+                    href = ""
+                    if await link_el.count() > 0:
+                        href = (await link_el.get_attribute("href")) or ""
+                    all_entries.append((case_number, href))
+                except Exception:
+                    continue
+
+            # Advance to next page if available
+            next_link = page.locator(SEL_DOPOSTBACK + ":has-text('Next')")
+            if await next_link.count() == 0:
+                break
+            await next_link.first.click()
+            await asyncio.sleep(2)
+            await page.wait_for_load_state("networkidle", timeout=20000)
+
+        return all_entries
+
+    def _mark_overflow_window(self, date_from: str, date_to: str) -> None:
+        """Write a NEEDS_MANUAL_REVIEW_OVERFLOW row to county_ingestion_runs.
+
+        Graceful: silently skips if table doesn't exist yet (Phase 3 migration).
+        """
+        import uuid as _uuid_mod
+        try:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO county_ingestion_runs
+                   (run_id, county, window_from, window_to, browser_count, db_count,
+                    delta, status, errors, run_ts)
+                   VALUES (?,?,?,?,NULL,0,NULL,'NEEDS_MANUAL_REVIEW_OVERFLOW',
+                           'Page limit exceeded — manual review required',?)""",
+                [
+                    str(_uuid_mod.uuid4()),
+                    self.county,
+                    date_from, date_to,
+                    _now_ts(),
+                ],
+            )
+        except Exception as exc:
+            log.warning(
+                "[govsoft] _mark_overflow_window failed for %s %s–%s: %s",
+                self.county, date_from, date_to, exc,
+            )
+
+    async def _search_window_recursive(
+        self, page, date_from: str, date_to: str, depth: int = 0
+    ) -> list[tuple[str, str]]:
+        """Adaptively collect all case pairs for a date window.
+
+        If the result count >= page_limit, splits the window recursively.
+        Safe integer midpoint — avoids float division on timedelta.
+        Returns list of (case_number, href) tuples.
+        """
+        MAX_DEPTH = 6
+        if depth > MAX_DEPTH:
+            log.warning(
+                "[govsoft] Max depth %d at %s–%s — OVERFLOW",
+                depth, date_from, date_to,
+            )
+            self._mark_overflow_window(date_from, date_to)
+            return []
+
+        await self._navigate_and_search(page, date_from, date_to)
+        total = await self._extract_total_count(page)
+        page_limit = self._config.get("page_limit", 90)
+        log.info(
+            "[govsoft] Window %s–%s total=%s depth=%d",
+            date_from, date_to, total, depth,
+        )
+
+        if total is not None and total >= page_limit:
+            from_dt = datetime.strptime(date_from, "%m/%d/%Y")
+            to_dt   = datetime.strptime(date_to,   "%m/%d/%Y")
+            if (to_dt - from_dt).days <= 1:
+                log.warning(
+                    "[govsoft] 1-day overflow %s — NEEDS_MANUAL_REVIEW_OVERFLOW",
+                    date_from,
+                )
+                self._mark_overflow_window(date_from, date_to)
+                # Fall through — paginate best effort; do not claim Delta=0
+            else:
+                # Safe integer midpoint
+                half_days = (to_dt - from_dt).days // 2
+                mid_dt    = from_dt + timedelta(days=half_days)
+                mid_str   = mid_dt.strftime("%m/%d/%Y")
+                # Right half starts at mid_dt + 1 day to prevent double-counting
+                mid_plus1 = (mid_dt + timedelta(days=1)).strftime("%m/%d/%Y")
+                left  = await self._search_window_recursive(
+                    page, date_from, mid_str,   depth + 1
+                )
+                right = await self._search_window_recursive(
+                    page, mid_plus1, date_to,   depth + 1
+                )
+                return left + right
+
+        return await self._paginate_all_cases(page)
 
     async def _capture_case_detail_on_page(
         self, page, case_number: str, asset_id_val: str
@@ -881,79 +1136,8 @@ class GovSoftEngine:
                     except Exception:
                         pass
 
-                # input[type="date"] requires ISO 8601 (YYYY-MM-DD) for Playwright fill().
-                # Callers pass MM/DD/YYYY; convert here so the interface contract is preserved.
-                def _to_iso(mmddyyyy: str) -> str:
-                    try:
-                        from datetime import datetime as _dt
-                        return _dt.strptime(mmddyyyy, "%m/%d/%Y").strftime("%Y-%m-%d")
-                    except ValueError:
-                        return mmddyyyy  # already ISO or unrecognised — pass through unchanged
-
                 try:
-                    # Step 1: Select ddStatus='Sold' to explicitly target sold/auctioned
-                    # cases. The sold date fields (txtSoldDate1/txtSoldDate2) filter by
-                    # AUCTION DATE, so the status selection narrows to confirmed-sold cases
-                    # within the date window. Selecting 'Sold' first, then filling date
-                    # fields after networkidle, prevents UpdatePanel from clearing the dates.
-                    dd_status_loc = page.locator(
-                        "#MainContent_CustomContentPlaceHolder_ddStatus"
-                    )
-                    if await dd_status_loc.count() > 0:
-                        await dd_status_loc.select_option("Sold")
-                        await asyncio.sleep(1)
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                        log.info("[engine] ddStatus='Sold' selected for %s", self.county)
-                    else:
-                        log.warning(
-                            "[engine] ddStatus dropdown not found for %s — "
-                            "proceeding without status filter",
-                            self.county,
-                        )
-
-                    # Step 2: Fill sold-date range fields (YYYY-MM-DD via _to_iso).
-                    # txtSoldDate1/txtSoldDate2 confirmed present after terms acceptance
-                    # (Playwright diagnostic 2026-02-23). Filled AFTER ddStatus selection
-                    # so UpdatePanel AJAX does not clear them.
-                    sold_from_sel = self._sel(
-                        "sold_date_from",
-                        "#MainContent_CustomContentPlaceHolder_txtSoldDate1",
-                    )
-                    sold_to_sel = self._sel(
-                        "sold_date_to",
-                        "#MainContent_CustomContentPlaceHolder_txtSoldDate2",
-                    )
-                    from_loc = page.locator(sold_from_sel)
-                    to_loc = page.locator(sold_to_sel)
-                    if await from_loc.count() > 0:
-                        await from_loc.fill(_to_iso(date_from))
-                        log.info("[engine] txtSoldDate1 filled: %s", _to_iso(date_from))
-                    else:
-                        log.warning("txtSoldDate1 not found for %s", self.county)
-                    if await to_loc.count() > 0:
-                        await to_loc.fill(_to_iso(date_to))
-                        log.info("[engine] txtSoldDate2 filled: %s", _to_iso(date_to))
-                    else:
-                        log.warning("txtSoldDate2 not found for %s", self.county)
-
-                    # Step 3: Click Search — GovSoft uses ASP.NET UpdatePanel AJAX.
-                    # Sleep briefly first so the UpdatePanel JS can fire the XHR,
-                    # then wait for networkidle, then wait for the results table
-                    # OR the search form (0 results). Avoids mid-AJAX snapshots.
-                    await page.click(self._sel("search_btn", SEL_SEARCH_BTN))
-                    await asyncio.sleep(2)  # Let UpdatePanel JS fire the XHR
-                    await page.wait_for_load_state("networkidle", timeout=20000)
-                    # Explicit wait: results table OR the search form (0 results)
-                    try:
-                        await page.wait_for_selector(
-                            "table[id*='gvSearchResults'], "
-                            "table[id*='gvSearch'], "
-                            "input[id*='btnSearch']",
-                            timeout=10000,
-                        )
-                    except Exception:
-                        pass  # Either results loaded or form shown — proceed
-                    await asyncio.sleep(1)
+                    await self._navigate_and_search(page, date_from, date_to)
                 except Exception as exc:
                     log.error("Date-range search failed for %s: %s", self.county, exc)
                     return stats
@@ -1064,29 +1248,7 @@ class GovSoftEngine:
                             )
                             # Re-run the sold-date search to restore the results page
                             try:
-                                # Re-select ddStatus='Sold' before filling date fields
-                                dd_re = page.locator(
-                                    "#MainContent_CustomContentPlaceHolder_ddStatus"
-                                )
-                                if await dd_re.count() > 0:
-                                    await dd_re.select_option("Sold")
-                                    await asyncio.sleep(1)
-                                    await page.wait_for_load_state("networkidle", timeout=10000)
-                                f_loc = page.locator(
-                                    self._sel("sold_date_from",
-                                              "#MainContent_CustomContentPlaceHolder_txtSoldDate1")
-                                )
-                                t_loc = page.locator(
-                                    self._sel("sold_date_to",
-                                              "#MainContent_CustomContentPlaceHolder_txtSoldDate2")
-                                )
-                                if await f_loc.count() > 0:
-                                    await f_loc.fill(_to_iso(date_from))
-                                if await t_loc.count() > 0:
-                                    await t_loc.fill(_to_iso(date_to))
-                                await page.click(self._sel("search_btn", SEL_SEARCH_BTN))
-                                await asyncio.sleep(2)
-                                await page.wait_for_load_state("networkidle", timeout=20000)
+                                await self._navigate_and_search(page, date_from, date_to)
                             except Exception as re_exc:
                                 log.error("Search re-run failed for %s: %s",
                                           self.county, re_exc)
