@@ -651,6 +651,29 @@ class GovSoftEngine:
                     except Exception:
                         pass
 
+                # Select ddStatus='Sold' FIRST — the form defaults to Active/Pending
+                # which excludes sold foreclosure cases. Must do this before filling the
+                # case-number field to prevent the UpdatePanel AJAX from resetting the input.
+                dd_status_loc = page.locator(
+                    "#MainContent_CustomContentPlaceHolder_ddStatus"
+                )
+                if await dd_status_loc.count() > 0:
+                    await dd_status_loc.select_option("Sold")
+                    await asyncio.sleep(1)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    log.info(
+                        "[engine] ddStatus='Sold' selected for %s single-case", self.county
+                    )
+                else:
+                    log.warning(
+                        "[engine] ddStatus dropdown not found for %s single-case "
+                        "— proceeding without status filter",
+                        self.county,
+                    )
+
                 # Fill case-number search field and submit
                 # If reCAPTCHA blocks the specific-case search (returns 0 results),
                 # fall back to btnShowAll which bypasses the token check on some deployments.
