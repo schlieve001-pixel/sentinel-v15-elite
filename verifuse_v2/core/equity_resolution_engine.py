@@ -42,6 +42,7 @@ import re
 import sqlite3
 import time
 from decimal import Decimal
+from typing import Optional
 from uuid import uuid4
 
 log = logging.getLogger(__name__)
@@ -92,11 +93,13 @@ def _parse_cents(text: str) -> int:
         return 0
 
 
-def _get_gross_surplus_cents(asset_id: str, conn: sqlite3.Connection) -> int:
+def _get_gross_surplus_cents(asset_id: str, conn: sqlite3.Connection) -> Optional[int]:
     """Return gross overbid surplus in cents from asset_registry.amount_cents.
 
     Falls back to leads.overbid_amount (* 100) if asset_registry.amount_cents is NULL.
     Returns 0 if no data available.
+    Returns None if asset_id does not conform to the canonical
+    FORECLOSURE:CO:{COUNTY}:{CASE_NUMBER} format (caller must handle None).
     """
     row = conn.execute(
         "SELECT amount_cents FROM asset_registry WHERE asset_id = ?",
@@ -105,12 +108,23 @@ def _get_gross_surplus_cents(asset_id: str, conn: sqlite3.Connection) -> int:
     if row and row[0] is not None and row[0] > 0:
         return int(row[0])
 
-    # Fallback: leads.overbid_amount
+    # Fallback: leads.overbid_amount — parse county and case_number from
+    # canonical asset_id format FORECLOSURE:CO:{COUNTY}:{CASE_NUMBER}.
+    _parts = asset_id.split(":")
+    if len(_parts) < 4:
+        log.warning(
+            "[equity] _get_gross_surplus_cents: asset_id %r has fewer than 4 "
+            "colon-separated segments; cannot derive county/case_number. "
+            "Returning None — caller must handle gracefully.",
+            asset_id,
+        )
+        return None
+
+    _county_val = _parts[2].lower()
+    _case_val = _parts[3]
     lead_row = conn.execute(
-        """SELECT overbid_amount FROM leads
-           WHERE county || ':' || case_number = ?
-              OR case_number = ?""",
-        [asset_id.split(":")[-1], asset_id.split(":")[-1]],
+        "SELECT overbid_amount FROM leads WHERE lower(county) = ? AND case_number = ?",
+        [_county_val, _case_val],
     ).fetchone()
 
     if not lead_row:
@@ -121,8 +135,12 @@ def _get_gross_surplus_cents(asset_id: str, conn: sqlite3.Connection) -> int:
         ).fetchone()
         if ar:
             lead_row = conn.execute(
-                "SELECT overbid_amount FROM leads WHERE county = ? AND case_number = ?",
-                [ar["county"], ar["source_id"].split(":")[-1] if ar["source_id"] else ""],
+                "SELECT overbid_amount FROM leads"
+                " WHERE lower(county) = ? AND case_number = ?",
+                [
+                    (ar["county"] or "").lower(),
+                    ar["source_id"].split(":")[-1] if ar["source_id"] else "",
+                ],
             ).fetchone()
 
     if lead_row and lead_row[0] is not None:
@@ -172,10 +190,13 @@ def _detect_explicit_transfer(asset_id: str, conn: sqlite3.Connection) -> bool:
     An empty <dd></dd> means "not yet recorded" — NOT transfer evidence.
     Matching label text alone (even with empty value) is NOT sufficient.
 
-    NOTE: CERTQH (Certificate of Qualified Holder) presence signals an IRS lien
-    claim but does NOT constitute transfer evidence — the IRS has a lien against
-    the overbid, which is captured in lien_records. Transfer only occurs when
-    explicit text evidence ("Overbid Transferred On: 2025-03-01") exists.
+    NOTE: CERTQH (Certificate of Qualified Holder) is filed by the lender/servicer
+    under C.R.S. § 38-38-100 to certify their holder status. It is NOT a transfer
+    document — it says nothing about the Treasurer receiving or disbursing overbid
+    funds. IRS CERTQH docs (common in cases with federal liens) represent a lien
+    claim, not a transfer. CERTQH presence alone is never sufficient for
+    TREASURER_TRANSFERRED. Only an explicit text value ("Overbid Transferred On:
+    2025-03-01") or TRANSFER_RE match with non-empty dd value constitutes evidence.
 
     NEVER returns True based on time alone, label text alone, or doc presence alone.
     """
@@ -327,6 +348,23 @@ def resolve(asset_id: str, conn: sqlite3.Connection) -> dict:
 
     # ── Step 2: Gather financial inputs ───────────────────────────────────────
     gross_cents = _get_gross_surplus_cents(asset_id, conn)
+    if gross_cents is None:
+        # Malformed asset_id — cannot resolve. Fail gracefully.
+        log.error(
+            "[equity] resolve() aborted for %r: asset_id format unrecognised "
+            "(fewer than 4 colon-separated segments). "
+            "No equity_resolution row written.",
+            asset_id,
+        )
+        return {
+            "asset_id": asset_id,
+            "gross_surplus_cents": None,
+            "junior_liens_total_cents": None,
+            "net_owner_equity_cents": None,
+            "classification": "NEEDS_REVIEW_TREASURER_WINDOW",
+            "resolved_ts": None,
+            "notes": "Malformed asset_id — equity resolution skipped",
+        }
     liens_cents = _sum_open_junior_liens_cents(asset_id, conn)
     net_cents   = max(0, gross_cents - liens_cents)
 
@@ -344,11 +382,43 @@ def resolve(asset_id: str, conn: sqlite3.Connection) -> dict:
         notes_parts.append("No gross surplus data available")
 
     elif net_cents == 0 and liens_cents >= gross_cents and gross_cents > 0:
-        # Junior liens absorb entire surplus
-        classification = "LIEN_ABSORBED"
-        notes_parts.append(
-            f"Liens {liens_cents}¢ ≥ gross {gross_cents}¢ — surplus fully absorbed"
-        )
+        # Junior liens absorb entire surplus — provenance citation required.
+        # Requires LIENOR_TAB html_snapshot OR an evidence_documents row.
+        # Without at least one, the claim cannot be court-defensible → NEEDS_REVIEW.
+        lienor_snap = conn.execute(
+            """SELECT id FROM html_snapshots
+               WHERE asset_id = ? AND snapshot_type = 'LIENOR_TAB'
+               LIMIT 1""",
+            [asset_id],
+        ).fetchone()
+        lienor_snapshot_id = lienor_snap["id"] if lienor_snap else None
+
+        ev_doc = conn.execute(
+            "SELECT id FROM evidence_documents WHERE asset_id = ? LIMIT 1",
+            [asset_id],
+        ).fetchone()
+        ev_doc_id = ev_doc["id"] if ev_doc else None
+
+        if lienor_snapshot_id is None and ev_doc_id is None:
+            # No provenance — cannot make court-defensible lien absorption claim
+            classification = "NEEDS_REVIEW"
+            notes_parts.append(
+                f"Liens {liens_cents}¢ ≥ gross {gross_cents}¢ but no provenance "
+                f"(no LIENOR_TAB snapshot, no evidence_documents) — LIEN_ABSORBED "
+                f"downgraded to NEEDS_REVIEW"
+            )
+        else:
+            classification = "LIEN_ABSORBED"
+            if lienor_snapshot_id:
+                notes_parts.append(
+                    f"Liens {liens_cents}¢ ≥ gross {gross_cents}¢ — surplus fully absorbed; "
+                    f"source=LIENOR_TAB snapshot_id={lienor_snapshot_id}"
+                )
+            else:
+                notes_parts.append(
+                    f"Liens {liens_cents}¢ ≥ gross {gross_cents}¢ — surplus fully absorbed; "
+                    f"source=evidence_documents doc_id={ev_doc_id}"
+                )
 
     elif net_cents > 0:
         # Owner has equity after lien deduction
