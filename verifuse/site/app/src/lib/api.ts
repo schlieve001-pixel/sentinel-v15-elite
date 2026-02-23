@@ -206,7 +206,9 @@ export interface Stats {
   gold_grade: number;
   total_claimable_surplus: number;
   verified_pipeline: number;
+  verified_pipeline_surplus?: number;
   total_raw_volume: number;
+  total_raw_volume_surplus?: number;
   counties: { county: string; cnt: number; total: number }[];
 }
 

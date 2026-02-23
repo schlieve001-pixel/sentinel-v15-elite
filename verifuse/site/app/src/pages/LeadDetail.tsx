@@ -170,7 +170,7 @@ export default function LeadDetail() {
             </div>
 
             <h2 className="detail-value">{fmt(lead.estimated_surplus)}</h2>
-            <p className="detail-case">Case: {lead.case_number || lead.asset_id}</p>
+            <p className="detail-case">Case: {lead.case_number || lead.registry_asset_id?.split(":")[3] || lead.asset_id?.substring(0, 12)}</p>
 
             {/* Gate 7: Equity Resolution Panel */}
             {lead.net_owner_equity_cents != null && (

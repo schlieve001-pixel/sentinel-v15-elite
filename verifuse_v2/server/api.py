@@ -1488,14 +1488,10 @@ async def get_stats():
             "gold_grade": gold_count,
             "total_claimable_surplus": round(total_surplus, 2),
             "counties": [dict(r) for r in counties],
-            "verified_pipeline": {
-                "count": vp_row["cnt"],
-                "total_surplus": round(vp_row["total"], 2),
-            },
-            "total_raw_volume": {
-                "count": raw_row["cnt"],
-                "total_surplus": round(raw_row["total"], 2),
-            },
+            "verified_pipeline": vp_row["cnt"],
+            "verified_pipeline_surplus": round(vp_row["total"], 2),
+            "total_raw_volume": raw_row["cnt"],
+            "total_raw_volume_surplus": round(raw_row["total"], 2),
         }
 
     return await _run_in_db(_run)

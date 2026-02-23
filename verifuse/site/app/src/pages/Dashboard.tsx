@@ -47,7 +47,7 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
           <span className="unverified-badge">DETECTED</span>
         )}
       </div>
-      <div className="card-id">CASE: {lead.case_number || lead.asset_id}</div>
+      <div className="card-id">CASE: {lead.case_number || lead.registry_asset_id?.split(":")[3] || lead.asset_id?.substring(0, 12)}</div>
 
       {/* Restriction notice for < 6 month leads */}
       {isRestricted && (
