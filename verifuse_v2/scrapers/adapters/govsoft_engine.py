@@ -667,6 +667,29 @@ class GovSoftEngine:
                     log.info(
                         "[engine] ddStatus='Sold' selected for %s single-case", self.county
                     )
+                    # When ddStatus='Sold', GovSoft requires a sold-date range — without
+                    # it the form returns 0 results even if a case number is supplied.
+                    # Use a broad 5-year window so any sold foreclosure case is reachable.
+                    import datetime as _dt
+                    _today = _dt.date.today().isoformat()
+                    _five_yr_ago = (_dt.date.today().replace(year=_dt.date.today().year - 5)).isoformat()
+                    for _date_sel, _date_val in [
+                        (
+                            "#MainContent_CustomContentPlaceHolder_txtSoldDate1",
+                            _five_yr_ago,
+                        ),
+                        (
+                            "#MainContent_CustomContentPlaceHolder_txtSoldDate2",
+                            _today,
+                        ),
+                    ]:
+                        _date_el = page.locator(_date_sel)
+                        if await _date_el.count() > 0:
+                            await _date_el.first.fill(_date_val)
+                    log.info(
+                        "[engine] Sold date range filled: %s → %s for %s single-case",
+                        _five_yr_ago, _today, self.county,
+                    )
                 else:
                     log.warning(
                         "[engine] ddStatus dropdown not found for %s single-case "
