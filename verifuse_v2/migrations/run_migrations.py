@@ -385,6 +385,15 @@ def apply_phase10(conn: sqlite3.Connection) -> None:
         log.info("  county_profiles seeded: %s (base_url=%s)", county, base_url)
 
 
+def apply_phase12(conn: sqlite3.Connection) -> None:
+    """Phase 12: Apply 005_equity_resolution.sql — lien_records + equity_resolution tables."""
+    sql_file_005 = MIGRATIONS_DIR / "005_equity_resolution.sql"
+    if sql_file_005.exists():
+        apply_sql_file(conn, sql_file_005)
+    else:
+        log.warning("SQL file not found: %s", sql_file_005)
+
+
 def apply_phase11(conn: sqlite3.Connection) -> None:
     """Phase 11: Add source_url to html_snapshots and evidence_documents.
 
@@ -476,6 +485,10 @@ def run(db_path: str) -> None:
 
         log.info("=== Phase 11: Source URL columns (004a_source_urls) ===")
         apply_phase11(conn)
+        conn.commit()
+
+        log.info("=== Phase 12: Equity resolution schema (005_equity_resolution.sql) ===")
+        apply_phase12(conn)
         conn.commit()
 
         # Verify

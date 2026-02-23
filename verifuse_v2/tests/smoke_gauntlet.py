@@ -60,6 +60,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 import urllib.request
 
 API = os.environ.get("VERIFUSE_API", "http://localhost:8000")
@@ -440,9 +441,61 @@ def run_db_tests():
     except Exception as e:
         check("validate_overbid: voucher present, no OCR → BRONZE + NEEDS_REVIEW", False, str(e))
 
+    # ── Gate 6 schema + equity resolution checks ──────────────────────────────
+
+    # 24. lien_records table exists
+    lr_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='lien_records'"
+    ).fetchone()
+    check("lien_records table exists", lr_exists is not None, "lien_records table missing")
+
+    # 25. equity_resolution table exists with NEEDS_REVIEW_TREASURER_WINDOW in CHECK
+    eq_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='equity_resolution'"
+    ).fetchone()
+    eq_sql = (eq_row[0] or "") if eq_row else ""
+    check("equity_resolution table with NEEDS_REVIEW_TREASURER_WINDOW CHECK",
+          eq_row is not None and "NEEDS_REVIEW_TREASURER_WINDOW" in eq_sql,
+          "equity_resolution table missing or CHECK incomplete")
+
+    # 26. Gate 6 test case: seed J2500358 with IRS lien ≥ gross surplus → LIEN_ABSORBED
+    TEST_ASSET_G6 = "FORECLOSURE:CO:JEFFERSON:J2500358"
+    try:
+        from verifuse_v2.core.equity_resolution_engine import resolve, seed_lien_records
+
+        conn6 = sqlite3.connect(DB)
+        conn6.row_factory = sqlite3.Row
+        conn6.execute("PRAGMA journal_mode = WAL")
+        conn6.execute("PRAGMA foreign_keys = ON")
+
+        # Seed a test IRS lien ≥ gross surplus (overbid=$26,932.52 → 2693252¢)
+        # IRS lien = 3000000¢ ($30,000) > gross surplus → should be LIEN_ABSORBED
+        test_lien_id = "test_gate6_irs_lien_j2500358"
+        conn6.execute(
+            """INSERT OR IGNORE INTO lien_records
+               (id, asset_id, lien_type, lienholder_name, amount_cents,
+                is_open, source, retrieved_ts)
+               VALUES (?,?,?,?,?,1,'test',?)""",
+            [test_lien_id, TEST_ASSET_G6, "IRS", "Internal Revenue Service",
+             3_000_000, int(time.time())],
+        )
+        conn6.commit()
+
+        result = resolve(TEST_ASSET_G6, conn6)
+        conn6.commit()
+        conn6.close()
+
+        check("Gate 6 J2500358 IRS lien ≥ surplus → LIEN_ABSORBED",
+              result.get("classification") == "LIEN_ABSORBED"
+              and result.get("net_owner_equity_cents") == 0,
+              f"got classification={result.get('classification')!r} "
+              f"net={result.get('net_owner_equity_cents')}")
+    except Exception as exc:
+        check("Gate 6 J2500358 IRS lien ≥ surplus → LIEN_ABSORBED", False, str(exc))
+
     # ── Gate 5 schema checks ───────────────────────────────────────────────────
 
-    # 24. field_evidence: ocr_source CHECK includes 'pdfplumber' and 'document_ai'
+    # 27. field_evidence: ocr_source CHECK includes 'pdfplumber' and 'document_ai'
     fe_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE name='field_evidence'"
     ).fetchone()
@@ -453,7 +506,7 @@ def run_db_tests():
           and "document_ai" in fe_sql,
           "field_evidence DDL missing ocr_source CHECK" if fe_row else "field_evidence table missing")
 
-    # 25. field_evidence: norm_x1 column present (Gate 5 bounding box schema)
+    # 28. field_evidence: norm_x1 column present (Gate 5 bounding box schema)
     fe_cols = {r[1] for r in conn.execute("PRAGMA table_info(field_evidence)").fetchall()}
     check("field_evidence has norm_x1 column (bounding box schema)",
           "norm_x1" in fe_cols,
@@ -468,7 +521,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  VERIFUSE vNEXT — THE GAUNTLET (target: ≥55)")
+    print("  VERIFUSE vNEXT — THE GAUNTLET (target: ≥58)")
     print("=" * 60)
 
     run_db_tests()
@@ -479,7 +532,7 @@ def main():
     total = PASS + FAIL
     print(f"  Results: {PASS}/{total} PASS, {FAIL}/{total} FAIL")
     print(f"{'=' * 60}\n")
-    # ── Gate targets: 39 (G0) → 39 (G1) → ≥47 (G2) → ≥47 (G3) → ≥53 (G4) → ≥55 (G5)
+    # ── Gate targets: 39 (G0) → 39 (G1) → ≥47 (G2) → ≥47 (G3) → ≥53 (G4) → ≥55 (G5) → ≥58 (G6)
 
     sys.exit(1 if FAIL > 0 else 0)
 
