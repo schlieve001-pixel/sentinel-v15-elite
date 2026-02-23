@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# VeriFuse one-command ops wrapper
+# Usage: bin/vf COMMAND [args...]
+set -euo pipefail
+
+LOCKFILE=/var/lock/verifuse-ingest.lock
+
+# Resolve project root relative to this script
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+case "${1:-}" in
+  # ── Core operations ─────────────────────────────────────────────────────────
+  migrate)
+    python3 verifuse_v2/migrations/run_migrations.py
+    ;;
+
+  gauntlet)
+    python3 -m verifuse_v2.tests.smoke_gauntlet
+    ;;
+
+  api-start)
+    systemctl start verifuse-api
+    ;;
+
+  api-stop)
+    systemctl stop verifuse-api
+    ;;
+
+  api-restart)
+    systemctl restart verifuse-api
+    ;;
+
+  logs-api)
+    journalctl -u verifuse-api -f
+    ;;
+
+  logs-scraper)
+    journalctl -u verifuse-scrapers -f
+    ;;
+
+  # flock -n: fail immediately if lock held by another process.
+  # This prevents timer overlap (when systemd timer fires) AND prevents
+  # collision with a concurrent manual run. If locked, prints error and exits 1.
+  scraper-run-single)
+    shift
+    flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --single-case "$@"
+    ;;
+
+  scraper-run-window)
+    shift
+    flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --date-window "$@"
+    ;;
+
+  status)
+    systemctl status verifuse-api verifuse-scrapers.timer
+    ;;
+
+  backup-db)
+    DB_PATH="${VERIFUSE_DB_PATH:-verifuse_v2/data/verifuse_v2.db}"
+    BACKUP="${DB_PATH}.bak.$(date +%Y%m%d%H%M%S)"
+    sqlite3 "$DB_PATH" ".backup $BACKUP"
+    echo "[vf backup-db] Backup written to: $BACKUP"
+    ;;
+
+  # ── Optional/convenience ────────────────────────────────────────────────────
+  db-shell)
+    DB_PATH="${VERIFUSE_DB_PATH:-verifuse_v2/data/verifuse_v2.db}"
+    sqlite3 "$DB_PATH"
+    ;;
+
+  tail-ingest)
+    journalctl -u verifuse-scrapers -f
+    ;;
+
+  rebuild-frontend)
+    (cd verifuse/site/app && npm ci && npm run build)
+    ;;
+
+  deploy)
+    echo "[vf deploy] Gate 9 deployment sequence. Run each step manually and verify:"
+    echo ""
+    echo "  1. vf backup-db"
+    echo "  2. vf migrate"
+    echo "  3. vf api-restart"
+    echo "  4. systemctl enable --now verifuse-scrapers.timer"
+    echo "  5. vf gauntlet       # must be >= 60 PASS"
+    echo "  6. vf rebuild-frontend"
+    echo ""
+    echo "Manual approval required before each step. See docs/RUNBOOK.md."
+    ;;
+
+  *)
+    cat <<'USAGE'
+VeriFuse one-command ops wrapper
+
+Usage: vf COMMAND [args...]
+
+Required commands:
+  migrate                 Run all DB migrations (idempotent)
+  gauntlet                Run full smoke gauntlet (target: >= 60 PASS)
+  api-start               Start verifuse-api systemd unit
+  api-stop                Stop verifuse-api systemd unit
+  api-restart             Restart verifuse-api (apply API changes)
+  logs-api                Tail API logs (journalctl -f)
+  logs-scraper            Tail scraper logs (journalctl -f)
+  scraper-run-single      Run single-case ingest (flock; pass --county --case-number)
+  scraper-run-window      Run date-window ingest (flock; pass --county --days N)
+  status                  Show API + scraper timer systemd status
+  backup-db               SQLite online backup (timestamped .bak file)
+
+Optional commands:
+  db-shell                Open SQLite shell on the DB
+  tail-ingest             Alias for logs-scraper
+  rebuild-frontend        npm ci + npm run build in verifuse/site/app
+  deploy                  Print Gate 9 deploy checklist (manual confirmation required)
+
+Examples:
+  vf migrate
+  vf gauntlet
+  vf scraper-run-single --county jefferson --case-number J2400300
+  vf scraper-run-window --county jefferson --days 3
+  vf backup-db && vf migrate && vf api-restart && vf gauntlet
+USAGE
+    exit 1
+    ;;
+esac

@@ -46,5 +46,11 @@ stripe>=10.0.0
 # Vertex AI / Google Cloud (Engine #4)
 google-cloud-aiplatform>=1.50.0
 
+# Document AI (Gate 5 hybrid OCR fallback)
+google-cloud-documentai>=2.20.0
+
 # Image generation (PII obfuscation)
 Pillow>=10.0.0
+
+# Browser automation (GovSoft Playwright engine)
+playwright>=1.45.0

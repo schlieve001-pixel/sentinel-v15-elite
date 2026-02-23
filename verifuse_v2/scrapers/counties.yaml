@@ -1,0 +1,26 @@
+# VeriFuse vNEXT — County Configuration
+# ======================================
+# Each county entry maps a county slug to its platform adapter and state.
+#
+# GovSoft counties: base_url and credentials are NEVER stored here.
+# Use GOVSOFT_{COUNTY_UPPER}_URL env var, seeded into county_profiles by
+# run_migrations.py Phase 10.
+#
+# Platform values:
+#   govsoft       — ASP.NET WebForms Public Trustee (GovSoft.us SaaS)
+#   realforeclose — realforeclose.com SaaS
+#   gts           — GTS platform
+#   county_page   — direct county website
+#   govease       — GovEase.com SaaS
+#   manual        — manual CSV/PDF ingest
+
+counties:
+
+  # ── GovSoft counties (Playwright engine) ────────────────────────
+  jefferson:
+    platform: govsoft
+    state: CO
+
+  arapahoe:
+    platform: govsoft
+    state: CO

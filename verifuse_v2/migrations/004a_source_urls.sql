@@ -1,0 +1,14 @@
+-- 004a_source_urls.sql
+-- VeriFuse vNEXT Gate 4: First-class source URL capture
+--
+-- Adds source_url TEXT to html_snapshots and evidence_documents.
+-- These are ALTER TABLE statements and are NOT idempotent in SQLite.
+-- They are executed via apply_phase11() in run_migrations.py which
+-- guards against double-execution using PRAGMA table_info.
+--
+-- Column semantics:
+--   html_snapshots.source_url   — page.url at time of HTML capture
+--   evidence_documents.source_url — download URL (docviewer endpoint)
+--
+-- NOTE: Do NOT execute this file directly via executescript() — use
+--       run_migrations.py which performs PRAGMA checks first.

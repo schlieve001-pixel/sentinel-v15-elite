@@ -46,6 +46,9 @@ if not VERIFUSE_DB_PATH:
         "export VERIFUSE_DB_PATH=/path/to/verifuse_v2.db"
     )
 
+# ── Vault root (evidence document storage) — Gate 7 ─────────────────
+VAULT_ROOT = Path(os.environ.get("VAULT_ROOT", "/var/lib/verifuse/vault/govsoft"))
+
 # ── API Key for machine-to-machine auth (admin/scraper endpoints) ────
 VERIFUSE_API_KEY = os.environ.get("VERIFUSE_API_KEY", "")
 
@@ -339,6 +342,11 @@ class SafeAsset(BaseModel):
     data_age_days: Optional[int] = None
     preview_key: Optional[str] = None    # HMAC key for sample dossier (null if not eligible)
     unlocked_by_me: bool = False         # True if requesting user has unlocked this lead
+    registry_asset_id: Optional[str] = None  # Canonical FORECLOSURE:CO:{county}:{case} key
+    # Gate 7 equity resolution fields (populated when equity_resolution row exists)
+    gross_surplus_cents: Optional[int] = None
+    net_owner_equity_cents: Optional[int] = None
+    classification: Optional[str] = None
 
 
 class FullAsset(SafeAsset):
@@ -543,6 +551,11 @@ def _row_to_safe(row: dict) -> dict:
         confidence_score=round(conf, 2) if conf else None,
         data_age_days=data_age_days,
         preview_key=pk,
+        # registry_asset_id: derived from county + case_number if both present
+        registry_asset_id=(
+            f"FORECLOSURE:CO:{row['county'].upper()}:{row['case_number']}"
+            if row.get("county") and row.get("case_number") else None
+        ),
     ).model_dump()
 
 
@@ -1631,6 +1644,28 @@ async def get_lead_detail(lead_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Lead not found.")
 
     result = _row_to_safe(dict(row))
+
+    # ── Equity resolution fields (Gate 7) ────────────────────────────────────
+    # If an equity_resolution row exists for this lead's canonical asset_id,
+    # include it in the response so the attorney UI can display the equity panel.
+    registry_asset_id = result.get("registry_asset_id")
+    if registry_asset_id:
+        try:
+            conn_eq = _get_conn()
+            try:
+                eq_row = conn_eq.execute(
+                    """SELECT gross_surplus_cents, net_owner_equity_cents, classification
+                       FROM equity_resolution WHERE asset_id = ?""",
+                    [registry_asset_id],
+                ).fetchone()
+            finally:
+                conn_eq.close()
+            if eq_row:
+                result["gross_surplus_cents"]    = eq_row["gross_surplus_cents"]
+                result["net_owner_equity_cents"] = eq_row["net_owner_equity_cents"]
+                result["classification"]         = eq_row["classification"]
+        except Exception:
+            pass  # Equity data is supplemental — never crash lead detail on equity error
 
     # Check if current user has unlocked this lead
     user = _get_user_from_request(request)
@@ -2802,5 +2837,93 @@ async def set_attorney_ready(lead_id: str, request: Request):
         conn.commit()
     finally:
         conn.close()
+
+
+# ── GET /api/assets/{asset_id}/evidence — List evidence docs (attorney) ─────
+#
+# RBAC: requires role IN ('approved_attorney', 'admin').
+# asset_id is the canonical FORECLOSURE:CO:{county}:{case_number} key.
+# Cache-Control: no-store (covered by bfcache_hardening middleware).
+#
+
+@app.get("/api/assets/{asset_id:path}/evidence")
+@limiter.limit("60/minute")
+async def list_asset_evidence(asset_id: str, request: Request):
+    """List evidence_documents for a captured GovSoft asset (attorney-gated)."""
+    user = _get_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if user.get("role") not in ("approved_attorney", "admin"):
+        raise HTTPException(status_code=403, detail="Attorney or admin role required.")
+
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT id, asset_id, filename, doc_type, doc_family,
+                      file_path, file_sha256, bytes, content_type, retrieved_ts
+               FROM evidence_documents
+               WHERE asset_id = ?
+               ORDER BY doc_family, filename""",
+            [asset_id],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return [dict(r) for r in rows]
+
+
+# ── GET /api/evidence/{doc_id}/download — Secure evidence download ────────────
+#
+# RBAC: requires role IN ('approved_attorney', 'admin').
+# Path traversal prevention: os.path.commonpath([resolved, vault_root]) == vault_root.
+# File existence verified before streaming.
+# MIME type from stored content_type (not hardcoded).
+#
+
+@app.get("/api/evidence/{doc_id}/download")
+@limiter.limit("30/minute")
+async def download_evidence_doc(doc_id: str, request: Request):
+    """Securely stream a vault evidence document to an authorized attorney."""
+    from fastapi.responses import FileResponse
+
+    user = _get_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if user.get("role") not in ("approved_attorney", "admin"):
+        raise HTTPException(status_code=403, detail="Attorney or admin role required.")
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            """SELECT file_path, filename, doc_type, content_type
+               FROM evidence_documents WHERE id = ?""",
+            [doc_id],
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Evidence document not found.")
+
+    resolved = Path(row["file_path"]).resolve()
+    vault_resolved = VAULT_ROOT.resolve()
+
+    # Robust path containment — os.path.commonpath avoids startswith() bypass
+    try:
+        is_safe = (
+            os.path.commonpath([str(resolved), str(vault_resolved)])
+            == str(vault_resolved)
+        )
+    except ValueError:
+        is_safe = False
+
+    if not is_safe:
+        raise HTTPException(status_code=403, detail="Path traversal denied.")
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk.")
+
+    mime = row["content_type"] or "application/octet-stream"
+    return FileResponse(str(resolved), filename=row["filename"], media_type=mime)
 
     return {"status": "ok", "lead_id": lead_id, "attorney_packet_ready": True}

@@ -1,0 +1,18 @@
+[Unit]
+Description=VeriFuse Nightly GovSoft Ingestion (72h rolling)
+After=network.target
+
+[Service]
+Type=oneshot
+User=verifuse
+WorkingDirectory=/home/schlieve001/origin/continuity_lab
+# flock -n: non-blocking — fails immediately if lock held by another process
+# (timer overlap protection AND prevents collision with manual bin/vf scraper-run-window)
+ExecStart=/usr/bin/flock -n /var/lock/verifuse-ingest.lock \
+    /usr/bin/python3 -m verifuse_v2.ingest.ingest_runner --date-window --days 3
+EnvironmentFile=/etc/verifuse/verifuse.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=verifuse-scrapers
+# Allow up to 6 hours for large date-window runs
+TimeoutStartSec=21600
