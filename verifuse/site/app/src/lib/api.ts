@@ -56,6 +56,7 @@ export interface AuthUser {
   is_active?: boolean;
   is_admin?: boolean;
   email_verified?: boolean;
+  role?: string;
 }
 
 export interface AuthResponse {

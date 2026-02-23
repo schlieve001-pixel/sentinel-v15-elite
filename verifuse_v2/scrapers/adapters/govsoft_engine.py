@@ -822,15 +822,30 @@ class GovSoftEngine:
                         return mmddyyyy  # already ISO or unrecognised — pass through unchanged
 
                 try:
-                    # Fill sold-date range fields directly — no status filter needed.
-                    # txtSoldDate1/txtSoldDate2 are ALWAYS visible after terms acceptance
-                    # (confirmed via Playwright diagnostic). These fields search by actual
-                    # AUCTION DATE regardless of the case's current status. This returns
-                    # all cases that sold in the date range including those whose status
-                    # has since moved to Owner Redemption, Deeded, Lienor Redemption, etc.
-                    # NOTE: Do NOT select ddStatus='Sold' first — that filter applies to
-                    # the CURRENT case status (not the sale date), and most post-auction
-                    # cases have already progressed beyond 'Sold' status, yielding 0 results.
+                    # Step 1: Select ddStatus='Sold' to explicitly target sold/auctioned
+                    # cases. The sold date fields (txtSoldDate1/txtSoldDate2) filter by
+                    # AUCTION DATE, so the status selection narrows to confirmed-sold cases
+                    # within the date window. Selecting 'Sold' first, then filling date
+                    # fields after networkidle, prevents UpdatePanel from clearing the dates.
+                    dd_status_loc = page.locator(
+                        "#MainContent_CustomContentPlaceHolder_ddStatus"
+                    )
+                    if await dd_status_loc.count() > 0:
+                        await dd_status_loc.select_option("Sold")
+                        await asyncio.sleep(1)
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                        log.info("[engine] ddStatus='Sold' selected for %s", self.county)
+                    else:
+                        log.warning(
+                            "[engine] ddStatus dropdown not found for %s — "
+                            "proceeding without status filter",
+                            self.county,
+                        )
+
+                    # Step 2: Fill sold-date range fields (YYYY-MM-DD via _to_iso).
+                    # txtSoldDate1/txtSoldDate2 confirmed present after terms acceptance
+                    # (Playwright diagnostic 2026-02-23). Filled AFTER ddStatus selection
+                    # so UpdatePanel AJAX does not clear them.
                     sold_from_sel = self._sel(
                         "sold_date_from",
                         "#MainContent_CustomContentPlaceHolder_txtSoldDate1",
@@ -843,18 +858,19 @@ class GovSoftEngine:
                     to_loc = page.locator(sold_to_sel)
                     if await from_loc.count() > 0:
                         await from_loc.fill(_to_iso(date_from))
+                        log.info("[engine] txtSoldDate1 filled: %s", _to_iso(date_from))
                     else:
                         log.warning("txtSoldDate1 not found for %s", self.county)
                     if await to_loc.count() > 0:
                         await to_loc.fill(_to_iso(date_to))
+                        log.info("[engine] txtSoldDate2 filled: %s", _to_iso(date_to))
                     else:
                         log.warning("txtSoldDate2 not found for %s", self.county)
 
-                    # Click Search — GovSoft uses ASP.NET UpdatePanel AJAX.
-                    # The AJAX request may start AFTER networkidle settles (JS delay),
-                    # so we sleep briefly first, then wait for networkidle, then
-                    # explicitly wait for the results table OR a no-results indicator.
-                    # This avoids capturing "Please Wait..." (mid-AJAX) snapshots.
+                    # Step 3: Click Search — GovSoft uses ASP.NET UpdatePanel AJAX.
+                    # Sleep briefly first so the UpdatePanel JS can fire the XHR,
+                    # then wait for networkidle, then wait for the results table
+                    # OR the search form (0 results). Avoids mid-AJAX snapshots.
                     await page.click(self._sel("search_btn", SEL_SEARCH_BTN))
                     await asyncio.sleep(2)  # Let UpdatePanel JS fire the XHR
                     await page.wait_for_load_state("networkidle", timeout=20000)
@@ -969,6 +985,14 @@ class GovSoftEngine:
                             )
                             # Re-run the sold-date search to restore the results page
                             try:
+                                # Re-select ddStatus='Sold' before filling date fields
+                                dd_re = page.locator(
+                                    "#MainContent_CustomContentPlaceHolder_ddStatus"
+                                )
+                                if await dd_re.count() > 0:
+                                    await dd_re.select_option("Sold")
+                                    await asyncio.sleep(1)
+                                    await page.wait_for_load_state("networkidle", timeout=10000)
                                 f_loc = page.locator(
                                     self._sel("sold_date_from",
                                               "#MainContent_CustomContentPlaceHolder_txtSoldDate1")

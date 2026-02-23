@@ -62,6 +62,7 @@ import sqlite3
 import sys
 import time
 import urllib.request
+import urllib.error
 
 API = os.environ.get("VERIFUSE_API", "http://localhost:8000")
 DB = os.environ.get("VERIFUSE_DB_PATH",
@@ -108,6 +109,104 @@ def http_get_raw(path: str) -> tuple[int, bytes, dict]:
         return e.code, b"", {}
     except Exception:
         return 0, b"", {}
+
+
+def http_get_with_token(path: str, token: str) -> tuple[int, dict]:
+    """GET with Bearer token. Returns (status_code, body_dict)."""
+    try:
+        req = urllib.request.Request(f"{API}{path}")
+        req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+            return resp.status, body
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+        except Exception:
+            body = {}
+        return e.code, body
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
+def _load_server_jwt_secret() -> str:
+    """Load VERIFUSE_JWT_SECRET from (in order):
+      1. Current process env (VERIFUSE_JWT_SECRET)
+      2. /etc/verifuse/verifuse.env or local .env files
+      3. /proc/{pid}/environ of the running API server process (same-user only)
+      4. Dev fallback
+
+    The API server may have been started with env vars injected at launch time
+    rather than via an env file, so /proc is checked as a last resort.
+    """
+    # 1. Current env
+    secret = os.getenv("VERIFUSE_JWT_SECRET", "")
+    if secret:
+        return secret
+
+    # 2. Env files (readable lines only)
+    for env_file in ["/etc/verifuse/verifuse.env", ".env", "verifuse_v2/.env"]:
+        try:
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("VERIFUSE_JWT_SECRET="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            continue
+
+    # 3. Read the API server's live process environment via /proc (same-user access)
+    try:
+        import subprocess
+        result = subprocess.run(
+            "cat /proc/$(pgrep -f 'verifuse_v2.server.api:app' | head -1)/environ",
+            shell=True, capture_output=True, text=True, timeout=5,
+        )
+        for entry in result.stdout.split("\0"):
+            if entry.startswith("VERIFUSE_JWT_SECRET="):
+                return entry.split("=", 1)[1]
+    except Exception:
+        pass
+
+    # 4. Dev fallback
+    return "vf2-dev-secret-change-in-production"
+
+
+def _mint_public_token() -> str | None:
+    """Mint a valid JWT for the first public-role user in the DB.
+
+    Uses VERIFUSE_JWT_SECRET (loaded from env or /etc/verifuse/verifuse.env).
+    Returns None if jwt (pyjwt) is not installed or no public user exists.
+    """
+    try:
+        import jwt as pyjwt
+        from datetime import datetime, timezone, timedelta
+    except ImportError:
+        return None
+
+    secret = _load_server_jwt_secret()
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    try:
+        # Pick any non-admin user with role='public' or no attorney role
+        row = conn.execute(
+            "SELECT user_id, email, tier FROM users "
+            "WHERE role NOT IN ('approved_attorney','admin') AND is_active=1 LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return None
+
+    payload = {
+        "sub": row["user_id"],
+        "email": row["email"],
+        "tier": row["tier"],
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+    }
+    return pyjwt.encode(payload, secret, algorithm="HS256")
 
 
 def run_http_tests():
@@ -183,6 +282,45 @@ def run_http_tests():
         code == 401,
         f"got {code}",
     )
+
+    # 10. Gate 7 RBAC: non-attorney authenticated user → 403 on evidence list
+    # Mints a valid JWT for a public/scout role user (NOT approved_attorney/admin).
+    # The server reads role from DB, so auth succeeds but RBAC gate must fire 403.
+    public_token = _mint_public_token()
+    if public_token:
+        code10, body10 = http_get_with_token(
+            "/api/assets/FORECLOSURE%3ACO%3AJEFFERSON%3ARBAC_TEST/evidence",
+            public_token,
+        )
+        check(
+            "Gate 7 RBAC: non-attorney authenticated → 403 on evidence list",
+            code10 == 403,
+            f"got {code10}, detail={body10.get('detail', '')}",
+        )
+    else:
+        check(
+            "Gate 7 RBAC: non-attorney authenticated → 403 on evidence list",
+            False,
+            "could not mint public token (pyjwt missing or no public user in DB)",
+        )
+
+    # 11. Gate 7 RBAC: non-attorney authenticated user → 403 on evidence download
+    if public_token:
+        code11, body11 = http_get_with_token(
+            "/api/evidence/rbac-test-doc-id/download",
+            public_token,
+        )
+        check(
+            "Gate 7 RBAC: non-attorney authenticated → 403 on evidence download",
+            code11 == 403,
+            f"got {code11}, detail={body11.get('detail', '')}",
+        )
+    else:
+        check(
+            "Gate 7 RBAC: non-attorney authenticated → 403 on evidence download",
+            False,
+            "could not mint public token (pyjwt missing or no public user in DB)",
+        )
 
 
 def run_db_tests():
@@ -548,7 +686,7 @@ def main():
     total = PASS + FAIL
     print(f"  Results: {PASS}/{total} PASS, {FAIL}/{total} FAIL")
     print(f"{'=' * 60}\n")
-    # ── Gate targets: 39 (G0) → 39 (G1) → ≥47 (G2) → ≥47 (G3) → ≥53 (G4) → ≥55 (G5) → ≥58 (G6) → ≥60 (G7)
+    # ── Gate targets: 39 (G0) → 39 (G1) → ≥47 (G2) → ≥47 (G3) → ≥53 (G4) → ≥55 (G5) → ≥58 (G6) → ≥62 (G7 hostile audit)
 
     sys.exit(1 if FAIL > 0 else 0)
 

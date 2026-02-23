@@ -51,7 +51,7 @@ export default function LeadDetail() {
 
   // Auto-load evidence docs for attorneys/admins when registry_asset_id is available
   useEffect(() => {
-    const isAttorney = user?.is_admin || (user as any)?.role === "approved_attorney" || (user as any)?.role === "admin";
+    const isAttorney = user?.is_admin || user?.role === "approved_attorney" || user?.role === "admin";
     if (!lead?.registry_asset_id || !isAttorney) return;
     setEvidenceLoading(true);
     getAssetEvidence(lead.registry_asset_id)
@@ -397,7 +397,7 @@ export default function LeadDetail() {
 
             {/* Gate 7: Evidence Documents (attorney/admin only) */}
             {lead.registry_asset_id && (() => {
-              const isAttorney = user?.is_admin || (user as any)?.role === "approved_attorney" || (user as any)?.role === "admin";
+              const isAttorney = user?.is_admin || user?.role === "approved_attorney" || user?.role === "admin";
               if (!isAttorney) {
                 return (
                   <div style={{ margin: "16px 0", padding: "10px 16px", border: "1px solid #374151", borderRadius: 6, opacity: 0.6, fontSize: "0.85em" }}>
