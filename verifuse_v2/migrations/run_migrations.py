@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -417,6 +418,79 @@ def apply_phase11(conn: sqlite3.Connection) -> None:
             log.info("  %s.source_url already present — skipping", table)
 
 
+def _pre_migration_hooks(filename: str, conn: sqlite3.Connection) -> None:
+    """
+    Run pre-flight repairs before a migration SQL file is applied.
+    Add new cases here as migrations grow — never in the SQL files themselves.
+    """
+    if filename == "006_sota_indexes.sql":
+        # Dedupe probe: remove duplicate user_daily_lead_views rows
+        # before creating uniq_user_day_lead UNIQUE index
+        dupes = conn.execute("""
+            SELECT count(*) as n FROM (
+                SELECT user_id, day, lead_id
+                FROM user_daily_lead_views
+                GROUP BY user_id, day, lead_id
+                HAVING count(*) > 1
+            )
+        """).fetchone()["n"]
+        if dupes > 0:
+            conn.execute("""
+                DELETE FROM user_daily_lead_views
+                WHERE rowid NOT IN (
+                    SELECT min(rowid) FROM user_daily_lead_views
+                    GROUP BY user_id, day, lead_id
+                )
+            """)
+            conn.commit()
+            log.warning("[migrate pre-hook] Removed %d dupe rows from user_daily_lead_views", dupes)
+
+        # PRAGMA guard: check if uniq_leads_county_case (or equiv) already exists
+        existing_indexes = {
+            row[1]: row[2]  # name: unique flag
+            for row in conn.execute("PRAGMA index_list(leads)")
+        }
+        # If a UNIQUE index covering (county, case_number) already exists, log it.
+        # Since Index 6 uses IF NOT EXISTS with a different name, a second UNIQUE index
+        # on the same columns would be created. We log but allow — SQLite permits it.
+        for idx_name, is_unique in existing_indexes.items():
+            if is_unique and idx_name in ("idx_leads_county_case", "uniq_leads_county_case"):
+                log.info(
+                    "[migrate pre-hook] UNIQUE index '%s' on leads already exists — "
+                    "Index 6 will be skipped by IF NOT EXISTS",
+                    idx_name,
+                )
+
+
+def _apply_auto_migrations(conn: sqlite3.Connection) -> None:
+    """Apply any 006_*.sql+ files not yet recorded in migrations_log."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS migrations_log (
+        filename   TEXT    PRIMARY KEY,
+        applied_ts INTEGER NOT NULL
+    )""")
+    conn.commit()
+    applied = {r[0] for r in conn.execute("SELECT filename FROM migrations_log")}
+    LEGACY = {
+        "001_initial.sql", "002_omega_hardening.sql", "003_vnext_foundation.sql",
+        "004_ingestion_evidence.sql", "004a_source_urls.sql", "005_equity_resolution.sql",
+    }
+    # Glob pattern: exactly matches NNN_name.sql (3-digit prefix)
+    for sql_file in sorted(MIGRATIONS_DIR.glob("0[0-9][0-9]_*.sql")):
+        name = sql_file.name
+        if name in LEGACY or name in applied:
+            continue
+        log.info("[migrate] Running pre-hooks for %s", name)
+        _pre_migration_hooks(name, conn)
+        log.info("[migrate] Applying %s", name)
+        apply_sql_file(conn, sql_file)
+        conn.execute(
+            "INSERT OR IGNORE INTO migrations_log (filename, applied_ts) VALUES (?,?)",
+            [name, int(time.time())]
+        )
+        conn.commit()
+        log.info("[migrate] Applied %s OK", name)
+
+
 def run(db_path: str) -> None:
     log.info("Migration target: %s", db_path)
 
@@ -490,6 +564,9 @@ def run(db_path: str) -> None:
         log.info("=== Phase 12: Equity resolution schema (005_equity_resolution.sql) ===")
         apply_phase12(conn)
         conn.commit()
+
+        log.info("=== Auto-migrations (006+) ===")
+        _apply_auto_migrations(conn)
 
         # Verify
         tables = [r[0] for r in conn.execute(

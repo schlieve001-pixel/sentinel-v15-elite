@@ -219,23 +219,31 @@ export default function Dashboard() {
 
   useEffect(() => {
     setFetchError("");
+    const ac = new AbortController();
     if (isPreview) {
-      getPreviewLeads({ county: county || undefined, limit: 50 })
+      getPreviewLeads({ county: county || undefined, limit: 50 }, ac.signal)
         .then((res) => setPreviewLeads(res.leads))
-        .catch((err) => setFetchError(err instanceof Error ? err.message : "Failed to load preview"))
+        .catch((err) => {
+          if (err instanceof Error && err.name === "AbortError") return;
+          setFetchError(err instanceof Error ? err.message : "Failed to load preview");
+        })
         .finally(() => setLoading(false));
-      return;
+      return () => ac.abort();
     }
     Promise.all([
-      getLeads({ county: county || undefined, grade: grade || undefined, limit: 50 }),
-      getStats(),
+      getLeads({ county: county || undefined, grade: grade || undefined, limit: 50 }, ac.signal),
+      getStats(ac.signal),
     ])
       .then(([leadsRes, statsRes]) => {
         setLeads(leadsRes.leads);
         setStats(statsRes);
       })
-      .catch((err) => setFetchError(err instanceof Error ? err.message : "Failed to load leads"))
+      .catch((err) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setFetchError(err instanceof Error ? err.message : "Failed to load leads");
+      })
       .finally(() => setLoading(false));
+    return () => ac.abort();
   }, [county, grade, isPreview]);
 
   // Client-side sorting

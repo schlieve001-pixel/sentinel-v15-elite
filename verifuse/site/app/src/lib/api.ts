@@ -11,9 +11,10 @@ function authHeaders(): Record<string, string> {
   return headers;
 }
 
-async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, opts: RequestInit = {}, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...opts,
+    signal,
     headers: {
       "Content-Type": "application/json",
       ...authHeaders(),
@@ -85,8 +86,8 @@ export function login(email: string, password: string): Promise<AuthResponse> {
   });
 }
 
-export function getMe(): Promise<AuthUser> {
-  return request("/api/auth/me");
+export function getMe(signal?: AbortSignal): Promise<AuthUser> {
+  return request("/api/auth/me", {}, signal);
 }
 
 export function sendVerification(): Promise<{ status: string }> {
@@ -122,13 +123,13 @@ export function getPreviewLeads(params?: {
   county?: string;
   limit?: number;
   offset?: number;
-}): Promise<PreviewLeadsResponse> {
+}, signal?: AbortSignal): Promise<PreviewLeadsResponse> {
   const qs = new URLSearchParams();
   if (params?.county) qs.set("county", params.county);
   if (params?.limit) qs.set("limit", String(params.limit));
   if (params?.offset) qs.set("offset", String(params.offset));
   const q = qs.toString();
-  return request(`/api/preview/leads${q ? `?${q}` : ""}`);
+  return request(`/api/preview/leads${q ? `?${q}` : ""}`, {}, signal);
 }
 
 // ── Leads ─────────────────────────────────────────────────────────
@@ -181,7 +182,7 @@ export function getLeads(params?: {
   bucket?: string;
   limit?: number;
   offset?: number;
-}): Promise<LeadsResponse> {
+}, signal?: AbortSignal): Promise<LeadsResponse> {
   const qs = new URLSearchParams();
   if (params?.county) qs.set("county", params.county);
   if (params?.min_surplus) qs.set("min_surplus", String(params.min_surplus));
@@ -190,11 +191,11 @@ export function getLeads(params?: {
   if (params?.limit) qs.set("limit", String(params.limit));
   if (params?.offset) qs.set("offset", String(params.offset));
   const q = qs.toString();
-  return request(`/api/leads${q ? `?${q}` : ""}`);
+  return request(`/api/leads${q ? `?${q}` : ""}`, {}, signal);
 }
 
-export function getLeadDetail(assetId: string): Promise<Lead> {
-  return request(`/api/lead/${assetId}`);
+export function getLeadDetail(assetId: string, signal?: AbortSignal): Promise<Lead> {
+  return request(`/api/lead/${assetId}`, {}, signal);
 }
 
 // ── Stats ─────────────────────────────────────────────────────────
@@ -209,8 +210,8 @@ export interface Stats {
   counties: { county: string; cnt: number; total: number }[];
 }
 
-export function getStats(): Promise<Stats> {
-  return request("/api/stats");
+export function getStats(signal?: AbortSignal): Promise<Stats> {
+  return request("/api/stats", {}, signal);
 }
 
 // ── Unlock ────────────────────────────────────────────────────────
@@ -348,8 +349,8 @@ export interface EvidenceDoc {
 }
 
 /** List evidence documents for a captured GovSoft asset (attorney/admin only). */
-export function getAssetEvidence(assetId: string): Promise<EvidenceDoc[]> {
-  return request(`/api/assets/${encodeURIComponent(assetId)}/evidence`);
+export function getAssetEvidence(assetId: string, signal?: AbortSignal): Promise<EvidenceDoc[]> {
+  return request(`/api/assets/${encodeURIComponent(assetId)}/evidence`, {}, signal);
 }
 
 /** Stream a vault evidence document (attorney/admin only). */

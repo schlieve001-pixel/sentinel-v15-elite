@@ -43,21 +43,31 @@ export default function LeadDetail() {
 
   useEffect(() => {
     if (!assetId) return;
-    getLeadDetail(assetId)
+    const ac = new AbortController();
+    getLeadDetail(assetId, ac.signal)
       .then(setLead)
-      .catch((err) => setError(err instanceof ApiError ? err.message : "Failed to load"))
+      .catch((err) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setError(err instanceof ApiError ? err.message : "Failed to load");
+      })
       .finally(() => setLoading(false));
+    return () => ac.abort();
   }, [assetId]);
 
   // Auto-load evidence docs for attorneys/admins when registry_asset_id is available
   useEffect(() => {
     const isAttorney = user?.is_admin || user?.role === "approved_attorney" || user?.role === "admin";
     if (!lead?.registry_asset_id || !isAttorney) return;
+    const ac = new AbortController();
     setEvidenceLoading(true);
-    getAssetEvidence(lead.registry_asset_id)
+    getAssetEvidence(lead.registry_asset_id, ac.signal)
       .then(setEvidenceDocs)
-      .catch((err) => setEvidenceError(err instanceof ApiError ? err.message : "Failed to load evidence"))
+      .catch((err) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setEvidenceError(err instanceof ApiError ? err.message : "Failed to load evidence");
+      })
       .finally(() => setEvidenceLoading(false));
+    return () => ac.abort();
   }, [lead?.registry_asset_id, user]);
 
   function handleUnlockError(err: unknown) {
@@ -211,8 +221,7 @@ export default function LeadDetail() {
                 </p>
                 <p style={{ marginTop: 8, fontSize: "0.85em", opacity: 0.8 }}>
                   After restriction ends, funds transfer to the State Treasurer.
-                  Finder fee blackout continues for 2 additional years (C.R.S. § 38-13-1304).
-                  Attorney-client agreements are exempt per C.R.S. § 38-13-1302(5).
+                  C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Consult counsel.
                 </p>
               </div>
             )}
@@ -301,9 +310,9 @@ export default function LeadDetail() {
                         }
                         const confirmed = window.confirm(
                           "ATTORNEY ACCESS ONLY\n\n" +
-                          "C.R.S. § 38-13-1302(5): This data is provided under the attorney-client exemption.\n\n" +
-                          "By proceeding, you confirm a bona fide attorney-client relationship exists or will be established.\n\n" +
-                          "Do you accept these terms?"
+                          "ATTORNEY ACCESS ONLY\n\n" +
+                          "C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Consult counsel before proceeding.\n\n" +
+                          "Do you confirm you are a licensed Colorado attorney and accept these terms?"
                         );
                         if (!confirmed) return;
                         setUnlocking(true);
@@ -563,10 +572,7 @@ export default function LeadDetail() {
             skip-tracing data are provided.
           </p>
           <p>
-            C.R.S. § 38-38-111(2.5)(c): Compensation agreements are prohibited while
-            overbid funds are held by the public trustee (first 6 months). C.R.S.
-            § 38-13-1304: Finder agreements void for 2 years after transfer to State
-            Treasurer. Attorney-client agreements exempt per § 38-13-1302(5).
+            C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Consult counsel.
           </p>
           <p>
             This is not legal advice. Consult a licensed Colorado attorney before

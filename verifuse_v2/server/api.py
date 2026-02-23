@@ -17,6 +17,8 @@ mobile-safe download headers, Stripe guard.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -114,6 +116,36 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+# ── ThreadPoolExecutor for non-blocking DB access ───────────────────
+
+DB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=min(32, (os.cpu_count() or 1) * 4),
+    thread_name_prefix="vf-db",
+)
+
+
+def _thread_conn() -> sqlite3.Connection:
+    """Open a hardened SQLite connection for use inside DB_EXECUTOR threads."""
+    conn = sqlite3.connect(VERIFUSE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        result = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if result != "wal":
+            log.warning("[db] journal_mode=WAL not set — got %r (read-only or in-memory?)", result)
+    except Exception as exc:
+        log.warning("[db] Failed to set WAL mode: %s", exc)
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
+async def _run_in_db(fn):
+    """Run a synchronous callable in DB_EXECUTOR, off the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(DB_EXECUTOR, fn)
 
 
 # ── Module-level compat flags (set at startup) ────────────────────────
@@ -920,6 +952,11 @@ async def startup():
     )
 
 
+@app.on_event("shutdown")
+async def _shutdown_db_executor():
+    DB_EXECUTOR.shutdown(wait=True)
+
+
 # ── Health ──────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -1007,44 +1044,47 @@ async def preview_leads(
     offset: int = Query(0, ge=0, le=500),
 ):
     """Public preview — no auth required. ZERO PII, ZERO internal IDs."""
-    conn = _get_conn()
-    try:
-        where = " WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 100"
-        where += " AND data_grade != 'REJECT'"
-        where += _EXPIRED_FILTER
-        params: list = []
-
-        if county:
-            where += " AND county = ?"
-            params.append(county)
-        if grade:
-            where += " AND data_grade = ?"
-            params.append(grade)
-
-        # Total count (independent query for stable pagination)
-        count_q = f"SELECT COUNT(*) FROM leads{where}"
-        total = conn.execute(count_q, params).fetchone()[0]
-
-        # Data query
-        order = " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC"
-        data_q = f"{_PREVIEW_SELECT}{where}{order} LIMIT ? OFFSET ?"
-        rows = conn.execute(data_q, params + [limit, offset]).fetchall()
-    finally:
-        conn.close()
-
-    leads = []
-    for row in rows:
+    def _run():
+        conn = _thread_conn()
         try:
-            leads.append(_row_to_preview(dict(row)))
-        except Exception as e:
-            log.warning("Preview projection error: %s", e)
-            continue
+            where = " WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 100"
+            where += " AND data_grade != 'REJECT'"
+            where += _EXPIRED_FILTER
+            params: list = []
 
-    return {
-        "total": total,
-        "count": len(leads),
-        "leads": leads,
-    }
+            if county:
+                where += " AND county = ?"
+                params.append(county)
+            if grade:
+                where += " AND data_grade = ?"
+                params.append(grade)
+
+            # Total count (independent query for stable pagination)
+            count_q = f"SELECT COUNT(*) FROM leads{where}"
+            total = conn.execute(count_q, params).fetchone()[0]
+
+            # Data query
+            order = " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC"
+            data_q = f"{_PREVIEW_SELECT}{where}{order} LIMIT ? OFFSET ?"
+            rows = conn.execute(data_q, params + [limit, offset]).fetchall()
+        finally:
+            conn.close()
+
+        leads = []
+        for row in rows:
+            try:
+                leads.append(_row_to_preview(dict(row)))
+            except Exception as e:
+                log.warning("Preview projection error: %s", e)
+                continue
+
+        return {
+            "total": total,
+            "count": len(leads),
+            "leads": leads,
+        }
+
+    return await _run_in_db(_run)
 
 
 # ── GET /api/leads — Paginated, NULL-safe ───────────────────────────
@@ -1066,82 +1106,81 @@ async def get_leads(
 
     Zombies (surplus<=100), REJECT, and EXPIRED hidden by default.
     """
-    # Check if user is admin (for reject visibility)
+    # Auth resolve happens here (sync, fast — header decode + small user lookup)
     user = _get_user_from_request(request)
     is_admin_user = user and _is_admin(user)
-
-    conn = _get_conn()
-    try:
-        where = " WHERE 1=1"
-        params: list = []
-
-        if not include_zombies:
-            where += " AND COALESCE(estimated_surplus, surplus_amount, 0) > 100"
-        if not include_reject or not is_admin_user:
-            where += " AND data_grade != 'REJECT'"
-        if county:
-            where += " AND county = ?"
-            params.append(county)
-        if min_surplus > 0:
-            where += " AND COALESCE(estimated_surplus, surplus_amount, 0) >= ?"
-            params.append(min_surplus)
-        if grade:
-            where += " AND data_grade = ?"
-            params.append(grade)
-
-        # Count for pagination
-        total = conn.execute(f"SELECT COUNT(*) FROM leads{where}", params).fetchone()[0]
-
-        query = f"SELECT *, {_claim_deadline_expr} FROM leads{where}"
-        query += " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-
-        rows = conn.execute(query, params).fetchall()
-    finally:
-        conn.close()
-
-    # Determine which leads the current user has unlocked (paginated set only)
-    lead_ids = [dict(row)["id"] for row in rows]
-    unlocked_ids: set[str] = set()
-    if user and lead_ids:
-        placeholders = ",".join(["?"] * len(lead_ids))
-        conn2 = _get_conn()
-        try:
-            u_rows = conn2.execute(
-                f"SELECT lead_id FROM lead_unlocks WHERE user_id = ? AND lead_id IN ({placeholders})",
-                [user["user_id"]] + lead_ids
-            ).fetchall()
-            unlocked_ids = {r["lead_id"] for r in u_rows}
-        finally:
-            conn2.close()
-
     is_eff_admin = user and _effective_admin(user, request)
-    leads = []
-    for row in rows:
-        try:
-            r = dict(row)
-            safe = _row_to_safe(r)
-            is_unlocked = r["id"] in unlocked_ids
-            safe["unlocked_by_me"] = is_unlocked
-            # Mask PII for non-unlocked, non-admin users
-            # SafeAsset only has case_number; owner_name/property_address/recorder_link are in FullAsset
-            if not is_unlocked and not is_eff_admin:
-                safe["case_number"] = None
-            # Filter out EXPIRED unless explicitly requested
-            if not include_expired and safe.get("restriction_status") == "EXPIRED":
-                continue
-            leads.append(safe)
-        except Exception as e:
-            log.warning("Lead projection error: %s", e)
-            continue
+    user_id = user["user_id"] if user else None
 
-    return {
-        "count": len(leads),
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "leads": leads,
-    }
+    def _run():
+        conn = _thread_conn()
+        try:
+            where = " WHERE 1=1"
+            params: list = []
+
+            if not include_zombies:
+                where += " AND COALESCE(estimated_surplus, surplus_amount, 0) > 100"
+            if not include_reject or not is_admin_user:
+                where += " AND data_grade != 'REJECT'"
+            if county:
+                where += " AND county = ?"
+                params.append(county)
+            if min_surplus > 0:
+                where += " AND COALESCE(estimated_surplus, surplus_amount, 0) >= ?"
+                params.append(min_surplus)
+            if grade:
+                where += " AND data_grade = ?"
+                params.append(grade)
+
+            # Count for pagination
+            total = conn.execute(f"SELECT COUNT(*) FROM leads{where}", params).fetchone()[0]
+
+            query = f"SELECT *, {_claim_deadline_expr} FROM leads{where}"
+            query += " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            rows = conn.execute(query, params).fetchall()
+
+            # Determine which leads the current user has unlocked (paginated set only)
+            lead_ids = [dict(row)["id"] for row in rows]
+            unlocked_ids: set[str] = set()
+            if user_id and lead_ids:
+                placeholders = ",".join(["?"] * len(lead_ids))
+                u_rows = conn.execute(
+                    f"SELECT lead_id FROM lead_unlocks WHERE user_id = ? AND lead_id IN ({placeholders})",
+                    [user_id] + lead_ids
+                ).fetchall()
+                unlocked_ids = {r["lead_id"] for r in u_rows}
+
+            leads = []
+            for row in rows:
+                try:
+                    r = dict(row)
+                    safe = _row_to_safe(r)
+                    is_unlocked = r["id"] in unlocked_ids
+                    safe["unlocked_by_me"] = is_unlocked
+                    # Mask PII for non-unlocked, non-admin users
+                    if not is_unlocked and not is_eff_admin:
+                        safe["case_number"] = None
+                    # Filter out EXPIRED unless explicitly requested
+                    if not include_expired and safe.get("restriction_status") == "EXPIRED":
+                        continue
+                    leads.append(safe)
+                except Exception as e:
+                    log.warning("Lead projection error: %s", e)
+                    continue
+
+            return {
+                "count": len(leads),
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "leads": leads,
+            }
+        finally:
+            conn.close()
+
+    return await _run_in_db(_run)
 
 
 # ── POST /api/leads/{id}/unlock — FIFO Ledger + Double-Spend Safe ───
@@ -1401,62 +1440,65 @@ async def billing_upgrade(request: Request):
 
 @app.get("/api/stats")
 async def get_stats():
-    conn = _get_conn()
-    try:
-        total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
-        with_surplus = conn.execute(
-            "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 1000"
-        ).fetchone()[0]
-        gold_count = conn.execute(
-            "SELECT COUNT(*) FROM leads WHERE data_grade = 'GOLD'"
-        ).fetchone()[0]
-        total_surplus = conn.execute(
-            "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0"
-        ).fetchone()[0]
-        counties = conn.execute("""
-            SELECT county, COUNT(*) as cnt,
-                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
-            FROM leads
-            WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0
-            GROUP BY county ORDER BY total DESC
-        """).fetchall()
+    def _run():
+        conn = _thread_conn()
+        try:
+            total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+            with_surplus = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 1000"
+            ).fetchone()[0]
+            gold_count = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE data_grade = 'GOLD'"
+            ).fetchone()[0]
+            total_surplus = conn.execute(
+                "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0"
+            ).fetchone()[0]
+            counties = conn.execute("""
+                SELECT county, COUNT(*) as cnt,
+                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
+                FROM leads
+                WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0
+                GROUP BY county ORDER BY total DESC
+            """).fetchall()
 
-        # Verified pipeline: GOLD+SILVER+BRONZE, surplus > 100, not expired
-        vp_row = conn.execute(f"""
-            SELECT COUNT(*) as cnt,
-                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
-            FROM leads
-            WHERE data_grade IN ('GOLD', 'SILVER', 'BRONZE')
-              AND COALESCE(estimated_surplus, surplus_amount, 0) > 100
-              {_EXPIRED_FILTER}
-        """).fetchone()
+            # Verified pipeline: GOLD+SILVER+BRONZE, surplus > 100, not expired
+            vp_row = conn.execute(f"""
+                SELECT COUNT(*) as cnt,
+                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
+                FROM leads
+                WHERE data_grade IN ('GOLD', 'SILVER', 'BRONZE')
+                  AND COALESCE(estimated_surplus, surplus_amount, 0) > 100
+                  {_EXPIRED_FILTER}
+            """).fetchone()
 
-        # Total raw volume: ALL leads
-        raw_row = conn.execute("""
-            SELECT COUNT(*) as cnt,
-                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
-            FROM leads
-        """).fetchone()
-    finally:
-        conn.close()
+            # Total raw volume: ALL leads
+            raw_row = conn.execute("""
+                SELECT COUNT(*) as cnt,
+                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
+                FROM leads
+            """).fetchone()
+        finally:
+            conn.close()
 
-    return {
-        "total_leads": total,
-        "total_assets": total,
-        "attorney_ready": with_surplus,
-        "with_surplus": with_surplus,
-        "gold_grade": gold_count,
-        "total_claimable_surplus": round(total_surplus, 2),
-        "counties": [dict(r) for r in counties],
-        "verified_pipeline": {
-            "count": vp_row["cnt"],
-            "total_surplus": round(vp_row["total"], 2),
-        },
-        "total_raw_volume": {
-            "count": raw_row["cnt"],
-            "total_surplus": round(raw_row["total"], 2),
-        },
-    }
+        return {
+            "total_leads": total,
+            "total_assets": total,
+            "attorney_ready": with_surplus,
+            "with_surplus": with_surplus,
+            "gold_grade": gold_count,
+            "total_claimable_surplus": round(total_surplus, 2),
+            "counties": [dict(r) for r in counties],
+            "verified_pipeline": {
+                "count": vp_row["cnt"],
+                "total_surplus": round(vp_row["total"], 2),
+            },
+            "total_raw_volume": {
+                "count": raw_row["cnt"],
+                "total_surplus": round(raw_row["total"], 2),
+            },
+        }
+
+    return await _run_in_db(_run)
 
 
 # ── Auth endpoints (delegate to auth module) ────────────────────────
@@ -1634,89 +1676,94 @@ async def verify_email(request: Request):
 @limiter.limit("100/minute")
 async def get_lead_detail(lead_id: str, request: Request):
     """Return a single lead as SafeAsset. Frontend calls GET /api/lead/{id}."""
-    conn = _get_conn()
-    try:
-        row = conn.execute(f"SELECT *, {_claim_deadline_expr} FROM leads WHERE id = ?", [lead_id]).fetchone()
-    finally:
-        conn.close()
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Lead not found.")
-
-    result = _row_to_safe(dict(row))
-
-    # ── Equity resolution fields (Gate 7) ────────────────────────────────────
-    # If an equity_resolution row exists for this lead's canonical asset_id,
-    # include it in the response so the attorney UI can display the equity panel.
-    registry_asset_id = result.get("registry_asset_id")
-    if registry_asset_id:
-        try:
-            conn_eq = _get_conn()
-            try:
-                eq_row = conn_eq.execute(
-                    """SELECT gross_surplus_cents, net_owner_equity_cents, classification
-                       FROM equity_resolution WHERE asset_id = ?""",
-                    [registry_asset_id],
-                ).fetchone()
-            finally:
-                conn_eq.close()
-            if eq_row:
-                result["gross_surplus_cents"]    = eq_row["gross_surplus_cents"]
-                result["net_owner_equity_cents"] = eq_row["net_owner_equity_cents"]
-                result["classification"]         = eq_row["classification"]
-        except Exception:
-            pass  # Equity data is supplemental — never crash lead detail on equity error
-
-    # Check if current user has unlocked this lead
     user = _get_user_from_request(request)
-    is_unlocked = False
-    if user:
-        conn2 = _get_conn()
+    is_eff_admin = user and _effective_admin(user, request)
+    user_id = user["user_id"] if user else None
+    tier = user.get("tier", "scout") if user else None
+    daily_limit = (get_daily_limit(tier) or 100) if tier else 100
+
+    def _run():
+        conn = _thread_conn()
         try:
-            u_row = conn2.execute(
-                "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
-                [user["user_id"], lead_id]
+            row = conn.execute(
+                f"SELECT *, {_claim_deadline_expr} FROM leads WHERE id = ?", [lead_id]
             ).fetchone()
-            is_unlocked = bool(u_row)
+            if not row:
+                return None
+
+            result = _row_to_safe(dict(row))
+
+            # ── Equity resolution fields (Gate 7) ────────────────────────────
+            registry_asset_id = result.get("registry_asset_id")
+            if registry_asset_id:
+                try:
+                    eq_row = conn.execute(
+                        """SELECT gross_surplus_cents, net_owner_equity_cents, classification
+                           FROM equity_resolution WHERE asset_id = ?""",
+                        [registry_asset_id],
+                    ).fetchone()
+                    if eq_row:
+                        result["gross_surplus_cents"]    = eq_row["gross_surplus_cents"]
+                        result["net_owner_equity_cents"] = eq_row["net_owner_equity_cents"]
+                        result["classification"]         = eq_row["classification"]
+                except Exception:
+                    pass  # Equity data is supplemental
+
+            # ── Check unlock status ───────────────────────────────────────────
+            is_unlocked = False
+            if user_id:
+                u_row = conn.execute(
+                    "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
+                    [user_id, lead_id]
+                ).fetchone()
+                is_unlocked = bool(u_row)
+            result["unlocked_by_me"] = is_unlocked
+
+            # ── Daily view rate limiting (BEGIN IMMEDIATE) ────────────────────
+            if user_id and not is_unlocked and not is_eff_admin:
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    existing = conn.execute(
+                        "SELECT count(*) as n FROM user_daily_lead_views "
+                        "WHERE user_id=? AND day=? AND lead_id=?",
+                        [user_id, today_str, lead_id]
+                    ).fetchone()["n"]
+                    if existing == 0:
+                        conn.execute(
+                            "INSERT INTO user_daily_lead_views (user_id, day, lead_id) VALUES (?,?,?)",
+                            [user_id, today_str, lead_id]
+                        )
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+                count_row = conn.execute(
+                    "SELECT COUNT(*) FROM user_daily_lead_views WHERE user_id = ? AND day = ?",
+                    [user_id, today_str],
+                ).fetchone()
+                view_count = count_row[0] if count_row else 0
+                if view_count > daily_limit:
+                    return ("RATE_LIMIT", daily_limit, tier)
+
+            # Mask PII for non-unlocked, non-admin users
+            if not is_unlocked and not is_eff_admin:
+                result["case_number"] = None
+
+            return result
         finally:
-            conn2.close()
-    result["unlocked_by_me"] = is_unlocked
+            conn.close()
 
-    # ── Unique view limiting (per tier) ──────────────────────────
-    if user and not is_unlocked and not _effective_admin(user, request):
-        tier = user.get("tier", "scout")
-        daily_limit = get_daily_limit(tier) or 100
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        conn3 = _get_conn()
-        try:
-            # Record this view (ignore duplicate)
-            try:
-                conn3.execute(
-                    "INSERT INTO user_daily_lead_views (user_id, day, lead_id) VALUES (?, ?, ?)",
-                    [user["user_id"], today, lead_id],
-                )
-                conn3.commit()
-            except sqlite3.IntegrityError:
-                pass  # Already viewed today
-            # Count unique views today
-            count_row = conn3.execute(
-                "SELECT COUNT(*) FROM user_daily_lead_views WHERE user_id = ? AND day = ?",
-                [user["user_id"], today],
-            ).fetchone()
-            view_count = count_row[0] if count_row else 0
-            if view_count > daily_limit:
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Daily view limit reached ({daily_limit} unique leads/day for {tier} tier). Upgrade to view more.",
-                )
-        finally:
-            conn3.close()
-
-    # Mask PII for non-unlocked, non-admin users
-    # SafeAsset only has case_number; owner_name/property_address/recorder_link are in FullAsset
-    if not is_unlocked and not (user and _effective_admin(user, request)):
-        result["case_number"] = None
-
+    result = await _run_in_db(_run)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+    if isinstance(result, tuple) and result[0] == "RATE_LIMIT":
+        _, lim, t = result
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily view limit reached ({lim} unique leads/day for {t} tier). Upgrade to view more.",
+        )
     return result
 
 
@@ -2838,6 +2885,8 @@ async def set_attorney_ready(lead_id: str, request: Request):
     finally:
         conn.close()
 
+    return {"status": "ok", "lead_id": lead_id, "attorney_packet_ready": True}
+
 
 # ── GET /api/assets/{asset_id}/evidence — List evidence docs (attorney) ─────
 #
@@ -2925,5 +2974,3 @@ async def download_evidence_doc(doc_id: str, request: Request):
 
     mime = row["content_type"] or "application/octet-stream"
     return FileResponse(str(resolved), filename=row["filename"], media_type=mime)
-
-    return {"status": "ok", "lead_id": lead_id, "attorney_packet_ready": True}

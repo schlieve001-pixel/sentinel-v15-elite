@@ -40,23 +40,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const revalidateAuthOrRedirect = useCallback(async () => {
     const storedToken = localStorage.getItem("vf_token");
     if (!storedToken) { logout(); return; }
+    const ac = new AbortController();
     try {
-      const me = await getMe();
+      const me = await getMe(ac.signal);
       setUser(me);
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       logout();
     }
   }, [logout]);
 
   useEffect(() => {
     if (!token) return;
-    getMe()
+    const ac = new AbortController();
+    getMe(ac.signal)
       .then(setUser)
-      .catch(() => {
+      .catch((err) => {
+        if (err instanceof Error && err.name === "AbortError") return;
         localStorage.removeItem("vf_token");
         setToken(null);
       })
       .finally(() => setLoading(false));
+    return () => ac.abort();
   }, [token]);
 
   // BFCache guard: revalidate auth when page is restored from browser cache
