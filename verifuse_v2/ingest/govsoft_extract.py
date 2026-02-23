@@ -229,6 +229,7 @@ def run_extraction(asset_id: str, conn=None) -> dict:
       - asset_registry (processing_status, amount_cents)
       - extraction_events (status)
       - leads (data_grade, processing_status, overbid_amount)
+      - surplus_math_audit (audit trail for every GOLD/BRONZE decision)
 
     Returns a result dict with keys: asset_id, processing_status, data_grade,
     successful_bid_cents, total_indebtedness_cents, overbid_at_sale_cents,
@@ -260,7 +261,7 @@ def run_extraction(asset_id: str, conn=None) -> dict:
     try:
         # ── 1. Fetch SALE_INFO snapshot ───────────────────────────────────────
         row = conn.execute(
-            """SELECT raw_html_gzip FROM html_snapshots
+            """SELECT id, raw_html_gzip FROM html_snapshots
                WHERE asset_id = ? AND snapshot_type = 'SALE_INFO'
                ORDER BY retrieved_ts DESC LIMIT 1""",
             [asset_id],
@@ -272,6 +273,8 @@ def run_extraction(asset_id: str, conn=None) -> dict:
             result["notes"]             = "No SALE_INFO snapshot found"
             log.warning("[extract] No SALE_INFO snapshot for %s — returning NEEDS_REVIEW", asset_id)
             return result
+
+        snapshot_id: str | None = row["id"]
 
         # ── 2. Extract financial fields ───────────────────────────────────────
         fields = extract_sale_fields(row["raw_html_gzip"])
@@ -301,6 +304,12 @@ def run_extraction(asset_id: str, conn=None) -> dict:
                 data_grade="BRONZE",
                 amount_cents=0,
                 overbid_amount=None,
+                snapshot_id=snapshot_id,
+                doc_id=None,
+                successful_bid_cents=0,
+                total_indebtedness_cents=0,
+                voucher_overbid_cents=None,
+                notes="Pre-sale: no financial data in SALE_INFO yet",
             )
             return result
 
@@ -312,6 +321,7 @@ def run_extraction(asset_id: str, conn=None) -> dict:
         # validate_overbid() to block at BRONZE/NEEDS_REVIEW — fail-closed.
         # This prevents HTML math from overriding the authoritative voucher doc.
         voucher_overbid: Decimal | None = None
+        voucher_doc_id: str | None = None
         ob_doc = conn.execute(
             """SELECT ed.id FROM evidence_documents ed
                WHERE ed.asset_id = ?
@@ -321,6 +331,7 @@ def run_extraction(asset_id: str, conn=None) -> dict:
         ).fetchone()
         has_voucher_doc = ob_doc is not None
         if ob_doc:
+            voucher_doc_id = ob_doc["id"]
             # Try to read voucher amount from field_evidence (Gate 5 OCR data).
             # field_evidence rows are inserted by govsoft_extract Gate 5 with
             # field_name in ('overbid_amount', 'surplus_amount', 'overbid').
@@ -376,6 +387,12 @@ def run_extraction(asset_id: str, conn=None) -> dict:
             data_grade=data_grade,
             amount_cents=overbid_cents,
             overbid_amount=float(overbid_at_sale),
+            snapshot_id=snapshot_id,
+            doc_id=voucher_doc_id,
+            successful_bid_cents=int(successful_bid * 100),
+            total_indebtedness_cents=int(total_indebtedness * 100),
+            voucher_overbid_cents=(int(voucher_overbid * 100) if voucher_overbid is not None else None),
+            notes=notes,
         )
 
     except Exception as exc:
@@ -432,15 +449,36 @@ def _write_results(
     data_grade: str,
     amount_cents: int,
     overbid_amount: float | None,
+    snapshot_id: str | None = None,
+    doc_id: str | None = None,
+    successful_bid_cents: int = 0,
+    total_indebtedness_cents: int = 0,
+    voucher_overbid_cents: int | None = None,
+    notes: str = "",
 ) -> None:
-    """Write validated extraction results to asset_registry, extraction_events, and leads.
+    """Write validated extraction results to asset_registry, extraction_events, leads,
+    and surplus_math_audit.
 
-    All three updates are wrapped in a single BEGIN IMMEDIATE ... COMMIT so that
-    a crash between writes cannot leave asset_registry and leads in inconsistent
-    states. PRAGMA table_info checks are performed before the transaction opens
+    All four updates are wrapped in a single BEGIN IMMEDIATE ... COMMIT so that
+    a crash between writes cannot leave any table in an inconsistent state.
+    PRAGMA table_info checks are performed before the transaction opens
     (read-only, no locking impact) to avoid DDL inside a DML transaction.
+
+    Provenance rule: GOLD with no snapshot_id AND no doc_id is downgraded to BRONZE
+    here — if both are None the grade is forced to BRONZE before writes proceed.
     """
+    from uuid import uuid4
+
     now_ts = int(time.time())
+
+    # ── Provenance guard: GOLD requires snapshot_id OR doc_id ─────────────────
+    if data_grade == "GOLD" and snapshot_id is None and doc_id is None:
+        log.warning(
+            "[extract] %s — GOLD downgraded to BRONZE: no snapshot_id and no doc_id",
+            asset_id,
+        )
+        data_grade = "BRONZE"
+        processing_status = "NEEDS_REVIEW"
 
     # ── PRAGMA checks BEFORE acquiring the write lock ─────────────────────────
     ar_cols = {
@@ -448,6 +486,9 @@ def _write_results(
     }
     leads_cols = {
         r[1] for r in conn.execute("PRAGMA table_info(leads)").fetchall()
+    }
+    audit_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(surplus_math_audit)").fetchall()
     }
 
     # Derive county + case_number from asset_id (FORECLOSURE:CO:COUNTY:CASE)
@@ -482,7 +523,23 @@ def _write_results(
         leads_updates.append("overbid_amount = ?")
         leads_params.append(overbid_amount)
 
-    # ── Single atomic transaction — all three tables land together or none do ──
+    # Compute derived audit fields
+    computed_surplus = successful_bid_cents - total_indebtedness_cents
+    # match_html_math: 1 if |html_overbid - computed| <= 1 cent (i.e. <= $0.01)
+    html_overbid_cents = amount_cents  # overbid_at_sale in cents
+    if successful_bid_cents > 0 or total_indebtedness_cents > 0:
+        match_html_math = 1 if abs(html_overbid_cents - computed_surplus) <= 1 else 0
+    else:
+        match_html_math = None  # pre-sale, no data to compare
+    # match_voucher: 1 if |html_overbid - voucher| <= 1 cent; None if no voucher
+    if voucher_overbid_cents is not None:
+        match_voucher = 1 if abs(html_overbid_cents - voucher_overbid_cents) <= 1 else 0
+    else:
+        match_voucher = None
+
+    promotion_blocked = 1 if (data_grade == "BRONZE" and processing_status == "NEEDS_REVIEW") else 0
+
+    # ── Single atomic transaction — all four tables land together or none do ───
     conn.execute("BEGIN IMMEDIATE")
     try:
         # asset_registry
@@ -504,6 +561,25 @@ def _write_results(
                 f"UPDATE leads SET {', '.join(leads_updates)} "
                 f"WHERE county = ? AND case_number = ?",
                 leads_params + [county, case_number],
+            )
+
+        # surplus_math_audit — insert audit row if table exists
+        if audit_cols:
+            conn.execute(
+                """INSERT INTO surplus_math_audit
+                   (id, asset_id, snapshot_id, doc_id,
+                    html_overbid, successful_bid, total_indebtedness, computed_surplus,
+                    voucher_overbid, voucher_doc_id,
+                    match_html_math, match_voucher,
+                    data_grade, promotion_blocked, audit_ts, notes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    str(uuid4()), asset_id, snapshot_id, doc_id,
+                    html_overbid_cents, successful_bid_cents, total_indebtedness_cents, computed_surplus,
+                    voucher_overbid_cents, doc_id,  # voucher_doc_id = same OB evidence_documents row
+                    match_html_math, match_voucher,
+                    data_grade, promotion_blocked, now_ts, notes,
+                ],
             )
 
         conn.execute("COMMIT")

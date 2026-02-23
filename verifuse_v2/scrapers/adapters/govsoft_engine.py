@@ -851,6 +851,19 @@ class GovSoftEngine:
                 pass
             raise
 
+        # Gate 4 — GOLD promotion: dual-validation + surplus_math_audit provenance.
+        # run_extraction() opens its own BEGIN IMMEDIATE for the audit+leads update;
+        # it is safe to call here because self._conn is autocommit (isolation_level=None)
+        # and the BRONZE write above already committed.
+        try:
+            from verifuse_v2.ingest.govsoft_extract import run_extraction
+            run_extraction(asset_id_val, self._conn)
+        except Exception as gx_exc:
+            log.warning(
+                "Gate 4 extraction failed for %s/%s — BRONZE retained: %s",
+                self.county, case_number, gx_exc,
+            )
+
     async def run_single_case(self, case_number: str) -> dict:
         """Scrape a single case by case number and store all evidence.
 
