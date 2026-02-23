@@ -440,6 +440,25 @@ def run_db_tests():
     except Exception as e:
         check("validate_overbid: voucher present, no OCR → BRONZE + NEEDS_REVIEW", False, str(e))
 
+    # ── Gate 5 schema checks ───────────────────────────────────────────────────
+
+    # 24. field_evidence: ocr_source CHECK includes 'pdfplumber' and 'document_ai'
+    fe_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='field_evidence'"
+    ).fetchone()
+    fe_sql = (fe_row[0] or "") if fe_row else ""
+    check("field_evidence ocr_source CHECK (pdfplumber / document_ai)",
+          fe_row is not None
+          and "pdfplumber" in fe_sql
+          and "document_ai" in fe_sql,
+          "field_evidence DDL missing ocr_source CHECK" if fe_row else "field_evidence table missing")
+
+    # 25. field_evidence: norm_x1 column present (Gate 5 bounding box schema)
+    fe_cols = {r[1] for r in conn.execute("PRAGMA table_info(field_evidence)").fetchall()}
+    check("field_evidence has norm_x1 column (bounding box schema)",
+          "norm_x1" in fe_cols,
+          f"cols={sorted(fe_cols)}" if fe_cols else "field_evidence table missing")
+
     conn.close()
 
 
@@ -449,7 +468,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  VERIFUSE vNEXT — THE GAUNTLET (target: ≥53)")
+    print("  VERIFUSE vNEXT — THE GAUNTLET (target: ≥55)")
     print("=" * 60)
 
     run_db_tests()
@@ -460,6 +479,7 @@ def main():
     total = PASS + FAIL
     print(f"  Results: {PASS}/{total} PASS, {FAIL}/{total} FAIL")
     print(f"{'=' * 60}\n")
+    # ── Gate targets: 39 (G0) → 39 (G1) → ≥47 (G2) → ≥47 (G3) → ≥53 (G4) → ≥55 (G5)
 
     sys.exit(1 if FAIL > 0 else 0)
 

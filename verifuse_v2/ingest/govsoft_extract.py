@@ -327,7 +327,7 @@ def run_extraction(asset_id: str, conn=None) -> dict:
             fev = conn.execute(
                 """SELECT extracted_value FROM field_evidence
                    WHERE evidence_doc_id = ?
-                     AND field_name IN ('overbid_amount', 'surplus_amount', 'overbid')
+                     AND field_name = 'overbid_amount'
                    ORDER BY confidence DESC LIMIT 1""",
                 [ob_doc["id"]],
             ).fetchone()

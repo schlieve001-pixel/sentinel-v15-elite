@@ -123,10 +123,14 @@ def _doc_family_from_filename(filename: str) -> str:
     """Classify a GovSoft document filename into the doc_family CHECK enum.
 
     Heuristic order matters — more specific matches first.
+    CERTQH (Certificate of Qualified Holder) and CKREQ (check request) are
+    overbid-related documents; both map to OB (closest enum value).
     """
     upper = filename.upper()
-    if "OBCLAIM" in upper or "OBCKREQ" in upper:
+    if "OBCLAIM" in upper or "OBCKREQ" in upper or "CKREQ" in upper:
         return "OB"
+    if "CERTQH" in upper:
+        return "OB"  # Certificate of Qualified Holder — overbid related
     if "BID" in upper:
         return "BID"
     if "COP" in upper:
@@ -414,6 +418,161 @@ class GovSoftEngine:
         """Return per-county selector override or fall back to default."""
         return self._selectors.get(key, default)
 
+    async def _capture_case_detail_on_page(
+        self, page, case_number: str, asset_id_val: str
+    ) -> None:
+        """Capture CASE_DETAIL / tabs / documents given a page already on the detail view.
+
+        Called from both run_single_case() (after case link click) and from
+        run_date_window() (after clicking a case row within the existing session).
+        Writes html_snapshots, evidence_documents, extraction_events, asset_registry,
+        and leads rows. All DB writes are idempotent (INSERT OR IGNORE / upsert).
+        """
+        # CASE_DETAIL snapshot
+        _store_snapshot(
+            self._conn, asset_id_val, "CASE_DETAIL", await page.content(),
+            source_url=page.url,
+        )
+
+        # Tab snapshots
+        tab_snapshots = {
+            TAB_SALE_INFO: "SALE_INFO",
+            TAB_LIENOR:    "LIENOR_TAB",
+            TAB_DOCS:      "DOCS_TAB",
+        }
+        docs_html = ""
+        for tab_labels, snap_type in tab_snapshots.items():
+            try:
+                tabs = page.locator(self._sel("nav_tabs", SEL_NAV_TABS))
+                count = await tabs.count()
+                for i in range(count):
+                    tab = tabs.nth(i)
+                    txt = (await tab.inner_text()).strip().lower()
+                    if any(lbl in txt for lbl in tab_labels):
+                        await tab.click()
+                        await asyncio.sleep(2)
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                        html = await page.content()
+                        _store_snapshot(
+                            self._conn, asset_id_val, snap_type, html,
+                            source_url=page.url,
+                        )
+                        if snap_type == "DOCS_TAB":
+                            docs_html = html
+                        break
+            except Exception as exc:
+                log.warning("Tab %s failed for %s/%s: %s",
+                            snap_type, self.county, case_number, exc)
+
+        # Document downloads
+        if docs_html:
+            doc_locators = await page.locator(
+                self._sel("doc_links", SEL_DOC_LINKS)
+            ).all()
+            seen_hrefs: set = set()
+            docs_to_download: list = []
+            for link in doc_locators:
+                try:
+                    href = await link.get_attribute("href")
+                    raw_name = (await link.inner_text()).strip()
+                    if not href or href.startswith("javascript:") or href.startswith("mailto:"):
+                        continue
+                    if href in seen_hrefs:
+                        continue
+                    seen_hrefs.add(href)
+                    docs_to_download.append({"href": href, "raw_name": raw_name or os.path.basename(href)})
+                except Exception:
+                    continue
+
+            for doc_info in docs_to_download:
+                href = doc_info["href"]
+                raw_name = doc_info["raw_name"]
+                page_url_before = page.url
+                try:
+                    fresh_links = await page.locator(self._sel("doc_links", SEL_DOC_LINKS)).all()
+                    target = None
+                    for fl in fresh_links:
+                        if await fl.get_attribute("href") == href:
+                            target = fl
+                            break
+                    if target is None:
+                        log.warning("Doc link not found (re-query) href=%s (%s/%s)",
+                                    href, self.county, case_number)
+                        continue
+                    try:
+                        target_handle = await target.element_handle()
+                        if target_handle:
+                            await page.evaluate("el => el.removeAttribute('target')", target_handle)
+                    except Exception:
+                        pass
+                    async with page.expect_download(timeout=45000) as dl_info:
+                        await target.click()
+                    download = await dl_info.value
+                    actual_filename = download.suggested_filename or raw_name
+                    tmp_path = await download.path()
+                    if tmp_path is None:
+                        log.warning("Download path is None for %s (%s/%s)",
+                                    actual_filename, self.county, case_number)
+                        continue
+                    file_bytes = Path(tmp_path).read_bytes()
+                    if file_bytes:
+                        _store_evidence_doc(
+                            self._conn, asset_id_val, self.county, case_number,
+                            actual_filename, raw_name, file_bytes,
+                            source_url=download.url,
+                        )
+                        log.info("Downloaded %s (%d bytes) for %s/%s",
+                                 actual_filename, len(file_bytes), self.county, case_number)
+                except Exception as exc:
+                    log.warning("Doc download failed for %s/%s href=%s: %s",
+                                self.county, case_number, href, exc)
+                    if page.url != page_url_before:
+                        try:
+                            await page.go_back(wait_until="domcontentloaded", timeout=10000)
+                            await asyncio.sleep(1)
+                            tabs_loc = page.locator(self._sel("nav_tabs", SEL_NAV_TABS))
+                            for ti in range(await tabs_loc.count()):
+                                t = tabs_loc.nth(ti)
+                                # Compute text separately — await inside any() generator
+                                # creates an async generator that any() cannot iterate.
+                                t_txt = (await t.inner_text()).lower()
+                                if any(lbl in t_txt for lbl in TAB_DOCS):
+                                    await t.click()
+                                    await asyncio.sleep(2)
+                                    await page.wait_for_load_state("networkidle", timeout=15000)
+                                    break
+                        except Exception as nav_exc:
+                            log.warning("DOCS_TAB recovery failed for %s/%s: %s",
+                                        self.county, case_number, nav_exc)
+
+        # Atomic final DB batch: extraction_events + asset_registry + leads
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO extraction_events
+                   (id, asset_id, run_ts, status) VALUES (?, ?, ?, 'PENDING')""",
+                [str(uuid4()), asset_id_val, _now_ts()],
+            )
+            self._conn.execute(
+                """INSERT INTO asset_registry
+                       (asset_id, engine_type, source_table, source_id, county, processing_status)
+                   VALUES (?, 'FORECLOSURE', 'leads', ?, ?, 'PENDING')
+                   ON CONFLICT(asset_id) DO UPDATE SET processing_status = 'PENDING'""",
+                [asset_id_val, asset_id_val, self.county],
+            )
+            _upsert_lead(
+                self._conn, self.county, case_number, asset_id_val,
+                overbid_amount=None, sale_date=None,
+                data_grade="BRONZE", processing_status="PENDING",
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            try:
+                self._conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
     async def run_single_case(self, case_number: str) -> dict:
         """Scrape a single case by case number and store all evidence.
 
@@ -461,16 +620,33 @@ class GovSoftEngine:
                 # Brief pause to let reCAPTCHA v3 score the session before interaction
                 await asyncio.sleep(3)
 
-                # Accept terms — may be a checkbox OR a submit button depending on county.
-                # Use click() universally: works for buttons and checks checkboxes.
-                # Wait for networkidle after click so any redirect completes before
-                # we try to fill the search form on the resulting page.
+                # Accept terms — GovSoft Jefferson requires a two-step flow:
+                #   Step 1: click the checkbox (makes the Accept Terms button visible)
+                #   Step 2: click the "btnAcceptTerms" submit button (loads the search form)
+                # Without step 2, the engine stays on the terms redirect page and the
+                # search form (ddStatus, case number fields, etc.) is never accessible.
                 if self.requires_accept_terms:
                     try:
-                        accept_el = page.locator(self._sel("accept_terms", SEL_ACCEPT_TERMS))
-                        if await accept_el.count() > 0:
-                            await accept_el.first.click()
-                            await page.wait_for_load_state("networkidle", timeout=15000)
+                        # Step 1: checkbox
+                        chk_el = page.locator(
+                            self._sel("accept_terms", "input[id*='chk'][type='checkbox']")
+                        )
+                        if await chk_el.count() > 0:
+                            await chk_el.first.click()
+                            await asyncio.sleep(1)
+                        # Step 2: Accept Terms submit button (appears after checkbox click)
+                        accept_btn = page.locator(
+                            "#MainContent_CustomContentPlaceHolder_btnAcceptTerms"
+                        )
+                        if await accept_btn.count() == 0:
+                            # Fuzzy fallback for other GovSoft deployments
+                            accept_btn = page.locator(
+                                "input[id*='btnAccept'][type='submit'], "
+                                "input[value*='Accept Terms'][type='submit']"
+                            )
+                        if await accept_btn.count() > 0:
+                            await accept_btn.first.click()
+                            await page.wait_for_load_state("networkidle", timeout=20000)
                             await asyncio.sleep(2)
                     except Exception:
                         pass
@@ -560,220 +736,8 @@ class GovSoftEngine:
                         self.county, case_number,
                     )
 
-                # Save CASE_DETAIL snapshot (even if URL didn't change — captures whatever
-                # the platform returned after the case link click)
-                _store_snapshot(
-                    self._conn, asset_id_val, "CASE_DETAIL", await page.content(),
-                    source_url=page.url,
-                )
-
-                # Click through tabs and snapshot each
-                tab_snapshots = {
-                    TAB_SALE_INFO: "SALE_INFO",
-                    TAB_LIENOR:    "LIENOR_TAB",
-                    TAB_DOCS:      "DOCS_TAB",
-                }
-                docs_html = ""
-                for tab_labels, snap_type in tab_snapshots.items():
-                    try:
-                        tabs = page.locator(self._sel("nav_tabs", SEL_NAV_TABS))
-                        count = await tabs.count()
-                        for i in range(count):
-                            tab = tabs.nth(i)
-                            txt = (await tab.inner_text()).strip().lower()
-                            if any(lbl in txt for lbl in tab_labels):
-                                await tab.click()
-                                # Sleep BEFORE wait_for_load_state so the UpdatePanel AJAX
-                                # request has time to start. Without this, networkidle may
-                                # return immediately (page already idle) before AJAX fires.
-                                await asyncio.sleep(2)
-                                await page.wait_for_load_state("networkidle", timeout=15000)
-                                html = await page.content()
-                                _store_snapshot(
-                                    self._conn, asset_id_val, snap_type, html,
-                                    source_url=page.url,
-                                )
-                                if snap_type == "DOCS_TAB":
-                                    docs_html = html
-                                break
-                    except Exception as exc:
-                        log.warning("Tab %s failed for %s/%s: %s",
-                                    snap_type, self.county, case_number, exc)
-
-                # Download documents from Docs tab.
-                # GovSoft serves documents via <a href="docviewer?fn=..."> links.
-                # Clicking these links triggers a browser file download — GovSoft
-                # converts TIFF→PDF server-side on the fly. page.request.get() does
-                # NOT work: the server responds to direct HTTP GET with an HTML page;
-                # only a browser-context click triggers the binary file response.
-                if docs_html:
-                    # Phase 1 — collect all unique {href, raw_name} pairs without clicking.
-                    # Deduplicates the 2× link-list GovSoft renders top + bottom of page.
-                    doc_locators = await page.locator(
-                        self._sel("doc_links", SEL_DOC_LINKS)
-                    ).all()
-                    seen_hrefs: set[str] = set()
-                    docs_to_download: list[dict] = []
-                    for link in doc_locators:
-                        try:
-                            href = await link.get_attribute("href")
-                            raw_name = (await link.inner_text()).strip()
-                            if not href or href.startswith("javascript:") or href.startswith("mailto:"):
-                                continue
-                            if href in seen_hrefs:
-                                continue
-                            seen_hrefs.add(href)
-                            docs_to_download.append({
-                                "href": href,
-                                "raw_name": raw_name or os.path.basename(href),
-                            })
-                        except Exception:
-                            continue
-
-                    # Phase 2 — click each link and capture the download.
-                    # GovSoft serves PDFs via Content-Disposition: attachment when
-                    # navigated from the same page. Removing target="_blank" (if set)
-                    # forces same-page navigation so expect_download fires correctly.
-                    # Successful downloads do NOT change page.url; docs that GovSoft
-                    # returns as HTML (server error / missing file) DO navigate the page
-                    # away. On such failures, navigate back and re-open DOCS_TAB.
-                    for doc_info in docs_to_download:
-                        href = doc_info["href"]
-                        raw_name = doc_info["raw_name"]
-                        page_url_before = page.url
-                        try:
-                            # Fresh DOM query — match by href attribute value
-                            fresh_links = await page.locator(
-                                self._sel("doc_links", SEL_DOC_LINKS)
-                            ).all()
-                            target = None
-                            for fl in fresh_links:
-                                if await fl.get_attribute("href") == href:
-                                    target = fl
-                                    break
-                            if target is None:
-                                log.warning(
-                                    "Doc link not found (re-query) href=%s (%s/%s)",
-                                    href, self.county, case_number,
-                                )
-                                continue
-
-                            # Strip target="_blank" to force same-page navigation.
-                            # Content-Disposition: attachment then fires a download event
-                            # on the current page without changing page.url.
-                            try:
-                                target_handle = await target.element_handle()
-                                if target_handle:
-                                    await page.evaluate(
-                                        "el => el.removeAttribute('target')", target_handle
-                                    )
-                            except Exception:
-                                pass  # Best-effort; click proceeds regardless
-
-                            # 45s timeout — generous for large PDFs (up to ~10MB).
-                            # If GovSoft returns HTML instead of binary, the page
-                            # navigates away (no download event), timeout fires, and
-                            # the recovery block below restores DOCS_TAB.
-                            async with page.expect_download(timeout=45000) as dl_info:
-                                await target.click()
-                            download = await dl_info.value
-
-                            # GovSoft renames download to .pdf (TIFF→PDF conversion).
-                            # Use suggested_filename for disk/DB; keep raw_name as doc_type.
-                            actual_filename = download.suggested_filename or raw_name
-                            tmp_path = await download.path()
-                            if tmp_path is None:
-                                log.warning(
-                                    "Download path is None for %s (%s/%s)",
-                                    actual_filename, self.county, case_number,
-                                )
-                                continue
-
-                            file_bytes = Path(tmp_path).read_bytes()
-                            if file_bytes:
-                                _store_evidence_doc(
-                                    self._conn, asset_id_val,
-                                    self.county, case_number,
-                                    actual_filename,  # PDF filename → disk + DB
-                                    raw_name,         # original link text → doc_type
-                                    file_bytes,
-                                    source_url=download.url,
-                                )
-                                log.info(
-                                    "Downloaded %s (%d bytes) for %s/%s",
-                                    actual_filename, len(file_bytes), self.county, case_number,
-                                )
-                        except Exception as exc:
-                            log.warning(
-                                "Doc download failed for %s/%s href=%s: %s",
-                                self.county, case_number, href, exc,
-                            )
-                            # If page navigated away (GovSoft returned HTML for this doc),
-                            # go back and re-open DOCS_TAB so remaining links are accessible.
-                            if page.url != page_url_before:
-                                try:
-                                    await page.go_back(
-                                        wait_until="domcontentloaded", timeout=10000
-                                    )
-                                    await asyncio.sleep(1)
-                                    tabs_loc = page.locator(self._sel("nav_tabs", SEL_NAV_TABS))
-                                    tab_count = await tabs_loc.count()
-                                    for ti in range(tab_count):
-                                        t = tabs_loc.nth(ti)
-                                        txt = (await t.inner_text()).strip().lower()
-                                        if any(lbl in txt for lbl in TAB_DOCS):
-                                            await t.click()
-                                            await asyncio.sleep(2)
-                                            await page.wait_for_load_state(
-                                                "networkidle", timeout=15000
-                                            )
-                                            break
-                                except Exception as nav_exc:
-                                    log.warning(
-                                        "DOCS_TAB recovery failed for %s/%s: %s",
-                                        self.county, case_number, nav_exc,
-                                    )
-
-                # Atomic final batch: extraction_events + asset_registry + leads
-                # BEGIN IMMEDIATE ensures all three land together or none do.
-                # (isolation_level=None on conn; no implicit transaction is open here)
-                self._conn.execute("BEGIN IMMEDIATE")
-                try:
-                    # extraction_events — INSERT OR IGNORE (id PK prevents duplicates)
-                    # Column order: (id, asset_id, run_ts, status) — status literal last
-                    self._conn.execute(
-                        """INSERT OR IGNORE INTO extraction_events
-                           (id, asset_id, run_ts, status)
-                           VALUES (?, ?, ?, 'PENDING')
-                        """,
-                        [str(uuid4()), asset_id_val, _now_ts()],
-                    )
-                    # asset_registry — upsert; set processing_status=PENDING
-                    self._conn.execute(
-                        """INSERT INTO asset_registry
-                               (asset_id, engine_type, source_table, source_id,
-                                county, processing_status)
-                           VALUES (?, 'FORECLOSURE', 'leads', ?, ?, 'PENDING')
-                           ON CONFLICT(asset_id) DO UPDATE SET
-                               processing_status = 'PENDING'
-                        """,
-                        [asset_id_val, asset_id_val, self.county],
-                    )
-                    # Option A: upsert leads — UI serves this case immediately
-                    _upsert_lead(
-                        self._conn, self.county, case_number, asset_id_val,
-                        overbid_amount=None,
-                        sale_date=None,
-                        data_grade="BRONZE",
-                        processing_status="PENDING",
-                    )
-                    self._conn.execute("COMMIT")
-                except Exception:
-                    try:
-                        self._conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    raise
+                # Capture detail page: tabs, documents, DB batch (shared helper)
+                await self._capture_case_detail_on_page(page, case_number, asset_id_val)
 
                 result["processing_status"] = "PENDING"
 
@@ -823,32 +787,97 @@ class GovSoftEngine:
 
                 await page.goto(search_url, wait_until="networkidle", timeout=30000)
 
+                # Accept terms — same two-step flow as run_single_case().
+                # Step 1: checkbox → Step 2: btnAcceptTerms submit button.
                 if self.requires_accept_terms:
                     try:
-                        accept_el = page.locator(self._sel("accept_terms", SEL_ACCEPT_TERMS))
-                        if await accept_el.count() > 0:
-                            await accept_el.first.click()
-                            await page.wait_for_load_state("networkidle", timeout=15000)
+                        chk_el = page.locator(
+                            self._sel("accept_terms", "input[id*='chk'][type='checkbox']")
+                        )
+                        if await chk_el.count() > 0:
+                            await chk_el.first.click()
+                            await asyncio.sleep(1)
+                        accept_btn = page.locator(
+                            "#MainContent_CustomContentPlaceHolder_btnAcceptTerms"
+                        )
+                        if await accept_btn.count() == 0:
+                            accept_btn = page.locator(
+                                "input[id*='btnAccept'][type='submit'], "
+                                "input[value*='Accept Terms'][type='submit']"
+                            )
+                        if await accept_btn.count() > 0:
+                            await accept_btn.first.click()
+                            await page.wait_for_load_state("networkidle", timeout=20000)
+                            await asyncio.sleep(2)
                     except Exception:
                         pass
 
-                # Fill date range
+                # input[type="date"] requires ISO 8601 (YYYY-MM-DD) for Playwright fill().
+                # Callers pass MM/DD/YYYY; convert here so the interface contract is preserved.
+                def _to_iso(mmddyyyy: str) -> str:
+                    try:
+                        from datetime import datetime as _dt
+                        return _dt.strptime(mmddyyyy, "%m/%d/%Y").strftime("%Y-%m-%d")
+                    except ValueError:
+                        return mmddyyyy  # already ISO or unrecognised — pass through unchanged
+
                 try:
-                    await page.fill(
-                        self._sel("date_from", "input[id*='From'], input[id*='Start']"),
-                        date_from,
+                    # Fill sold-date range fields directly — no status filter needed.
+                    # txtSoldDate1/txtSoldDate2 are ALWAYS visible after terms acceptance
+                    # (confirmed via Playwright diagnostic). These fields search by actual
+                    # AUCTION DATE regardless of the case's current status. This returns
+                    # all cases that sold in the date range including those whose status
+                    # has since moved to Owner Redemption, Deeded, Lienor Redemption, etc.
+                    # NOTE: Do NOT select ddStatus='Sold' first — that filter applies to
+                    # the CURRENT case status (not the sale date), and most post-auction
+                    # cases have already progressed beyond 'Sold' status, yielding 0 results.
+                    sold_from_sel = self._sel(
+                        "sold_date_from",
+                        "#MainContent_CustomContentPlaceHolder_txtSoldDate1",
                     )
-                    await page.fill(
-                        self._sel("date_to", "input[id*='To'], input[id*='End']"),
-                        date_to,
+                    sold_to_sel = self._sel(
+                        "sold_date_to",
+                        "#MainContent_CustomContentPlaceHolder_txtSoldDate2",
                     )
+                    from_loc = page.locator(sold_from_sel)
+                    to_loc = page.locator(sold_to_sel)
+                    if await from_loc.count() > 0:
+                        await from_loc.fill(_to_iso(date_from))
+                    else:
+                        log.warning("txtSoldDate1 not found for %s", self.county)
+                    if await to_loc.count() > 0:
+                        await to_loc.fill(_to_iso(date_to))
+                    else:
+                        log.warning("txtSoldDate2 not found for %s", self.county)
+
+                    # Click Search — GovSoft uses ASP.NET UpdatePanel AJAX.
+                    # The AJAX request may start AFTER networkidle settles (JS delay),
+                    # so we sleep briefly first, then wait for networkidle, then
+                    # explicitly wait for the results table OR a no-results indicator.
+                    # This avoids capturing "Please Wait..." (mid-AJAX) snapshots.
                     await page.click(self._sel("search_btn", SEL_SEARCH_BTN))
+                    await asyncio.sleep(2)  # Let UpdatePanel JS fire the XHR
                     await page.wait_for_load_state("networkidle", timeout=20000)
+                    # Explicit wait: results table OR the search form (0 results)
+                    try:
+                        await page.wait_for_selector(
+                            "table[id*='gvSearchResults'], "
+                            "table[id*='gvSearch'], "
+                            "input[id*='btnSearch']",
+                            timeout=10000,
+                        )
+                    except Exception:
+                        pass  # Either results loaded or form shown — proceed
+                    await asyncio.sleep(1)
                 except Exception as exc:
                     log.error("Date-range search failed for %s: %s", self.county, exc)
                     return stats
 
-                # Paginate through results
+                # Paginate through results — process each case INLINE within this
+                # browser session. Do NOT call run_single_case() here: post-sale
+                # cases don't appear in a fresh case-number search (the default form
+                # shows Active/Pending only). We click each row directly from the
+                # sold-date results, capture the detail, then navigate back.
                 while True:
                     _store_snapshot(
                         self._conn,
@@ -858,40 +887,115 @@ class GovSoftEngine:
                         source_url=page.url,
                     )
 
-                    # Collect case links on this page
+                    # Collect (case_number, row_link_href) pairs from this results page.
+                    # Collect upfront so row locators don't go stale after navigation.
                     rows = await page.locator(
                         self._sel("results_table", SEL_RESULTS_TABLE) + " tbody tr"
                     ).all()
 
-                    case_numbers: list[str] = []
+                    case_entries: list[tuple[str, str]] = []  # (case_number, href)
                     for row in rows:
                         try:
                             cells = await row.locator("td").all_inner_texts()
-                            # Case number is typically in one of the first few cells
+                            case_number = ""
                             for cell_text in cells[:4]:
                                 txt = cell_text.strip()
                                 if txt and len(txt) >= 4:
-                                    case_numbers.append(txt)
+                                    case_number = txt
                                     break
+                            if not case_number:
+                                continue
+                            # Capture the row link href for direct navigation
+                            link_el = row.locator("a").first
+                            href = ""
+                            if await link_el.count() > 0:
+                                href = (await link_el.get_attribute("href")) or ""
+                            case_entries.append((case_number, href))
                         except Exception:
                             continue
 
-                    for case_number in case_numbers:
+                    results_page_content = await page.content()
+
+                    for case_number, _href in case_entries:
+                        asset_id_val = _asset_id(self.county, case_number)
                         try:
-                            await self.run_single_case(case_number)
+                            # Re-locate the case link on the current page (locators are
+                            # refreshed after go_back / search re-run to avoid stale refs).
+                            case_link = page.locator(
+                                f"a:has-text('{case_number}')"
+                            ).first
+                            if await case_link.count() == 0:
+                                log.warning(
+                                    "Case link %s not in results (stale?); skipping",
+                                    case_number,
+                                )
+                                stats["cases_failed"] += 1
+                                continue
+
+                            url_before = page.url
+                            await case_link.click()
+                            await asyncio.sleep(2)
+                            await page.wait_for_load_state("networkidle", timeout=20000)
+
+                            log.info("Opened case detail: %s/%s url=%s",
+                                     self.county, case_number, page.url)
+
+                            # Capture all detail tabs, documents, and write DB rows
+                            await self._capture_case_detail_on_page(
+                                page, case_number, asset_id_val
+                            )
                             stats["cases_processed"] += 1
-                            # Polite jitter between cases
-                            await asyncio.sleep(random.uniform(1.5, 4.5))
+
                         except Exception as exc:
-                            log.error("Case %s/%s failed: %s",
+                            log.error("Case %s/%s failed in date-window: %s",
                                       self.county, case_number, exc)
                             stats["cases_failed"] += 1
+
+                        # Navigate back to the results page (within same session).
+                        # Use go_back() first; if that loses the results, re-run the search.
+                        try:
+                            await page.go_back(
+                                wait_until="domcontentloaded", timeout=15000
+                            )
+                            await asyncio.sleep(2)
+                            await page.wait_for_load_state("networkidle", timeout=15000)
+                            # Verify results table is still present
+                            if await page.locator(SEL_RESULTS_TABLE).count() == 0:
+                                raise Exception("Results table missing after go_back")
+                        except Exception:
+                            log.info(
+                                "Results page lost for %s — re-running sold-date search",
+                                self.county,
+                            )
+                            # Re-run the sold-date search to restore the results page
+                            try:
+                                f_loc = page.locator(
+                                    self._sel("sold_date_from",
+                                              "#MainContent_CustomContentPlaceHolder_txtSoldDate1")
+                                )
+                                t_loc = page.locator(
+                                    self._sel("sold_date_to",
+                                              "#MainContent_CustomContentPlaceHolder_txtSoldDate2")
+                                )
+                                if await f_loc.count() > 0:
+                                    await f_loc.fill(_to_iso(date_from))
+                                if await t_loc.count() > 0:
+                                    await t_loc.fill(_to_iso(date_to))
+                                await page.click(self._sel("search_btn", SEL_SEARCH_BTN))
+                                await asyncio.sleep(2)
+                                await page.wait_for_load_state("networkidle", timeout=20000)
+                            except Exception as re_exc:
+                                log.error("Search re-run failed for %s: %s",
+                                          self.county, re_exc)
+
+                        await asyncio.sleep(random.uniform(1.0, 2.5))
 
                     # Next page via __doPostBack
                     next_link = page.locator(SEL_DOPOSTBACK + ":has-text('Next')")
                     if await next_link.count() == 0:
                         break
                     await next_link.first.click()
+                    await asyncio.sleep(2)
                     await page.wait_for_load_state("networkidle", timeout=20000)
 
             finally:
