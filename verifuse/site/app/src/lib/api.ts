@@ -160,6 +160,12 @@ export interface Lead {
   data_age_days: number | null;
   preview_key?: string;        // null if not preview-eligible
   unlocked_by_me?: boolean;    // true if current user unlocked
+  // Gate 7: canonical asset_registry key (FORECLOSURE:CO:{county}:{case})
+  registry_asset_id?: string | null;
+  // Gate 7: equity resolution fields (populated when equity_resolution row exists)
+  gross_surplus_cents?: number | null;
+  net_owner_equity_cents?: number | null;
+  classification?: string | null;
 }
 
 export interface LeadsResponse {
@@ -323,5 +329,34 @@ export function createCheckout(tier: string): Promise<{ checkout_url: string }> 
   return request("/api/billing/checkout", {
     method: "POST",
     body: JSON.stringify({ tier }),
+  });
+}
+
+// ── Gate 7: Evidence documents (attorney-gated) ───────────────────
+
+export interface EvidenceDoc {
+  id: string;
+  asset_id: string;
+  filename: string;
+  doc_type: string;
+  doc_family: string;
+  file_sha256: string;
+  bytes: number;
+  content_type: string;
+  retrieved_ts: number;
+}
+
+/** List evidence documents for a captured GovSoft asset (attorney/admin only). */
+export function getAssetEvidence(assetId: string): Promise<EvidenceDoc[]> {
+  return request(`/api/assets/${encodeURIComponent(assetId)}/evidence`);
+}
+
+/** Stream a vault evidence document (attorney/admin only). */
+export function downloadEvidenceDoc(docId: string): Promise<Blob> {
+  return fetch(`${API_BASE}/api/evidence/${encodeURIComponent(docId)}/download`, {
+    headers: authHeaders(),
+  }).then((res) => {
+    if (!res.ok) throw new ApiError(res.status, "Evidence download failed");
+    return res.blob();
   });
 }

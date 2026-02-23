@@ -168,6 +168,22 @@ def run_http_tests():
     else:
         check("Lead masking (skipped — no leads or auth required)", True)
 
+    # 8. Gate 7: Evidence list endpoint — unauthenticated → 401
+    code, body = http_get("/api/assets/FORECLOSURE%3ACO%3AJEFFERSON%3ATEST_G7/evidence")
+    check(
+        "Gate 7: /api/assets/{id}/evidence unauthenticated → 401",
+        code == 401,
+        f"got {code}",
+    )
+
+    # 9. Gate 7: Evidence download endpoint — unauthenticated → 401
+    code, _, _ = http_get_raw("/api/evidence/test-nonexistent-doc-g7/download")
+    check(
+        "Gate 7: /api/evidence/{id}/download unauthenticated → 401",
+        code == 401,
+        f"got {code}",
+    )
+
 
 def run_db_tests():
     print("\n=== Database Tests ===\n")
@@ -532,7 +548,7 @@ def main():
     total = PASS + FAIL
     print(f"  Results: {PASS}/{total} PASS, {FAIL}/{total} FAIL")
     print(f"{'=' * 60}\n")
-    # ── Gate targets: 39 (G0) → 39 (G1) → ≥47 (G2) → ≥47 (G3) → ≥53 (G4) → ≥55 (G5) → ≥58 (G6)
+    # ── Gate targets: 39 (G0) → 39 (G1) → ≥47 (G2) → ≥47 (G3) → ≥53 (G4) → ≥55 (G5) → ≥58 (G6) → ≥60 (G7)
 
     sys.exit(1 if FAIL > 0 else 0)
 

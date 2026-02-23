@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
-import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, type Lead, type UnlockResponse, ApiError } from "../lib/api";
+import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, getAssetEvidence, downloadEvidenceDoc, type Lead, type UnlockResponse, type EvidenceDoc, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import ClassificationBadge from "../components/ClassificationBadge";
 
 function isVerifyEmailError(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 &&
@@ -36,6 +37,9 @@ export default function LeadDetail() {
   const [verifyCode, setVerifyCode] = useState("");
   const [verifySending, setVerifySending] = useState(false);
   const [verifyMsg, setVerifyMsg] = useState("");
+  const [evidenceDocs, setEvidenceDocs] = useState<EvidenceDoc[]>([]);
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [evidenceError, setEvidenceError] = useState("");
 
   useEffect(() => {
     if (!assetId) return;
@@ -44,6 +48,17 @@ export default function LeadDetail() {
       .catch((err) => setError(err instanceof ApiError ? err.message : "Failed to load"))
       .finally(() => setLoading(false));
   }, [assetId]);
+
+  // Auto-load evidence docs for attorneys/admins when registry_asset_id is available
+  useEffect(() => {
+    const isAttorney = user?.is_admin || (user as any)?.role === "approved_attorney" || (user as any)?.role === "admin";
+    if (!lead?.registry_asset_id || !isAttorney) return;
+    setEvidenceLoading(true);
+    getAssetEvidence(lead.registry_asset_id)
+      .then(setEvidenceDocs)
+      .catch((err) => setEvidenceError(err instanceof ApiError ? err.message : "Failed to load evidence"))
+      .finally(() => setEvidenceLoading(false));
+  }, [lead?.registry_asset_id, user]);
 
   function handleUnlockError(err: unknown) {
     if (isVerifyEmailError(err)) {
@@ -146,6 +161,39 @@ export default function LeadDetail() {
 
             <h2 className="detail-value">{fmt(lead.estimated_surplus)}</h2>
             <p className="detail-case">Case: {lead.case_number || lead.asset_id}</p>
+
+            {/* Gate 7: Equity Resolution Panel */}
+            {lead.net_owner_equity_cents != null && (
+              <div style={{
+                margin: "12px 0",
+                padding: "10px 16px",
+                border: "1px solid #374151",
+                borderRadius: 6,
+                background: "rgba(17,24,39,0.6)",
+                display: "flex",
+                gap: 24,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}>
+                {lead.gross_surplus_cents != null && (
+                  <div>
+                    <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>GROSS SURPLUS</div>
+                    <div style={{ fontWeight: 600, fontSize: "0.95em" }}>
+                      {fmt(lead.gross_surplus_cents / 100)}
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>NET OWNER EQUITY</div>
+                  <div style={{ fontWeight: 600, fontSize: "0.95em" }}>
+                    {fmt(lead.net_owner_equity_cents / 100)}
+                  </div>
+                </div>
+                {lead.classification && (
+                  <ClassificationBadge classification={lead.classification} />
+                )}
+              </div>
+            )}
 
             {/* C.R.S. § 38-38-111 RESTRICTION NOTICE */}
             {isRestricted && (
@@ -346,6 +394,70 @@ export default function LeadDetail() {
                 )}
               </div>
             )}
+
+            {/* Gate 7: Evidence Documents (attorney/admin only) */}
+            {lead.registry_asset_id && (() => {
+              const isAttorney = user?.is_admin || (user as any)?.role === "approved_attorney" || (user as any)?.role === "admin";
+              if (!isAttorney) {
+                return (
+                  <div style={{ margin: "16px 0", padding: "10px 16px", border: "1px solid #374151", borderRadius: 6, opacity: 0.6, fontSize: "0.85em" }}>
+                    Attorney verification required to access evidence documents.
+                  </div>
+                );
+              }
+              return (
+                <div style={{ margin: "16px 0" }}>
+                  <h4 style={{ margin: "0 0 8px", fontSize: "0.8em", letterSpacing: "0.08em", opacity: 0.7 }}>
+                    EVIDENCE DOCUMENTS
+                  </h4>
+                  {evidenceLoading && <p style={{ opacity: 0.6, fontSize: "0.85em" }}>Loading evidence…</p>}
+                  {evidenceError && <p className="auth-error" style={{ fontSize: "0.85em" }}>{evidenceError}</p>}
+                  {!evidenceLoading && evidenceDocs.length === 0 && !evidenceError && (
+                    <p style={{ opacity: 0.5, fontSize: "0.82em" }}>No evidence documents on file for this asset.</p>
+                  )}
+                  {evidenceDocs.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {evidenceDocs.map((doc) => (
+                        <div key={doc.id} style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                          padding: "6px 10px",
+                          border: "1px solid #374151",
+                          borderRadius: 4,
+                          fontSize: "0.82em",
+                        }}>
+                          <span style={{ opacity: 0.5, minWidth: 40, fontSize: "0.9em" }}>{doc.doc_family}</span>
+                          <span style={{ flex: 1, opacity: 0.85 }}>{doc.filename}</span>
+                          <span style={{ opacity: 0.45, fontSize: "0.85em" }}>
+                            {doc.bytes > 0 ? `${Math.round(doc.bytes / 1024)} KB` : ""}
+                          </span>
+                          <button
+                            className="btn-outline-sm"
+                            style={{ fontSize: "0.78em" }}
+                            onClick={async () => {
+                              try {
+                                const blob = await downloadEvidenceDoc(doc.id);
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement("a");
+                                a.href = url;
+                                a.download = doc.filename;
+                                a.click();
+                                URL.revokeObjectURL(url);
+                              } catch (err) {
+                                setError(err instanceof ApiError ? err.message : "Download failed");
+                              }
+                            }}
+                          >
+                            DOWNLOAD
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Unlocked Data */}
             {unlocked && (

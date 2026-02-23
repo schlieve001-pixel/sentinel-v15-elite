@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly VeriFuse GovSoft ingestion (72h rolling window)
+
+[Timer]
+# Run daily at 02:00 server time
+OnCalendar=*-*-* 02:00:00
+# Randomize within ±15 minutes to avoid thundering herd if multiple instances
+RandomizedDelaySec=900
+# Re-trigger missed runs on next boot (safe because ingest_runner is idempotent)
+Persistent=true
+
+[Install]
+WantedBy=timers.target
