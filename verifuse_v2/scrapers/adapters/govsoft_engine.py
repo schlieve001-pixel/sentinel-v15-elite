@@ -88,6 +88,26 @@ def _db_connect():
     return conn
 
 
+# ── Sale-date extractor ───────────────────────────────────────────────────────
+
+_SALE_DATE_LABEL_RE = re.compile(
+    r'(?:sale\s+date|date\s+of\s+sale|sold\s+date|auction\s+date)'
+    r'\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})',
+    re.IGNORECASE,
+)
+
+
+def _parse_sale_date(html: str) -> str | None:
+    """Extract sale date from SALE_INFO tab HTML. Returns ISO YYYY-MM-DD or None."""
+    m = _SALE_DATE_LABEL_RE.search(html)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%m/%d/%Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -441,6 +461,7 @@ class GovSoftEngine:
             TAB_DOCS:      "DOCS_TAB",
         }
         docs_html = ""
+        sale_info_html = ""
         for tab_labels, snap_type in tab_snapshots.items():
             try:
                 tabs = page.locator(self._sel("nav_tabs", SEL_NAV_TABS))
@@ -459,6 +480,8 @@ class GovSoftEngine:
                         )
                         if snap_type == "DOCS_TAB":
                             docs_html = html
+                        if snap_type == "SALE_INFO":
+                            sale_info_html = html
                         break
             except Exception as exc:
                 log.warning("Tab %s failed for %s/%s: %s",
@@ -562,7 +585,7 @@ class GovSoftEngine:
             )
             _upsert_lead(
                 self._conn, self.county, case_number, asset_id_val,
-                overbid_amount=None, sale_date=None,
+                overbid_amount=None, sale_date=_parse_sale_date(sale_info_html),
                 data_grade="BRONZE", processing_status="PENDING",
             )
             self._conn.execute("COMMIT")
@@ -1012,6 +1035,16 @@ class GovSoftEngine:
                             log.error("Case %s/%s failed in date-window: %s",
                                       self.county, case_number, exc)
                             stats["cases_failed"] += 1
+                            try:
+                                _upsert_lead(
+                                    self._conn, self.county, case_number, asset_id_val,
+                                    data_grade="BRONZE", processing_status="NEEDS_REVIEW",
+                                )
+                            except Exception as ue:
+                                log.warning(
+                                    "BRONZE fallback write failed for %s/%s: %s",
+                                    self.county, case_number, ue,
+                                )
 
                         # Navigate back to the results page (within same session).
                         # Use go_back() first; if that loses the results, re-run the search.
