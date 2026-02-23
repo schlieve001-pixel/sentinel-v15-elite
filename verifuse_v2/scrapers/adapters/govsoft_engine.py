@@ -91,8 +91,8 @@ def _db_connect():
 # ── Sale-date extractor ───────────────────────────────────────────────────────
 
 _SALE_DATE_LABEL_RE = re.compile(
-    r'(?:sale\s+date|date\s+of\s+sale|sold\s+date|auction\s+date)'
-    r'\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})',
+    r'(?:sale\s+date|date\s+of\s+sale|sold\s+date|auction\s+date|date\s+sold)'
+    r'(?:</dt>\s*<dd>|[^<\d]*:?\s*)(\d{1,2}/\d{1,2}/\d{4})',
     re.IGNORECASE,
 )
 
@@ -582,8 +582,8 @@ class GovSoftEngine:
 
         while True:
             rows = await page.locator(
-                self._sel("results_table", SEL_RESULTS_TABLE) + " tbody tr"
-            ).all()
+                self._sel("results_table", SEL_RESULTS_TABLE)
+            ).first.locator("tbody tr").all()
 
             for row in rows:
                 try:
@@ -1158,9 +1158,13 @@ class GovSoftEngine:
 
                     # Collect (case_number, row_link_href) pairs from this results page.
                     # Collect upfront so row locators don't go stale after navigation.
+                    # Use .first.locator() chaining — plain string concatenation of a
+                    # comma-separated selector with " tbody tr" only appends the
+                    # descendant to the LAST alternative, causing the whole table to
+                    # be matched by the first alternative instead of individual rows.
                     rows = await page.locator(
-                        self._sel("results_table", SEL_RESULTS_TABLE) + " tbody tr"
-                    ).all()
+                        self._sel("results_table", SEL_RESULTS_TABLE)
+                    ).first.locator("tbody tr").all()
 
                     case_entries: list[tuple[str, str]] = []  # (case_number, href)
                     for row in rows:
@@ -1222,6 +1226,7 @@ class GovSoftEngine:
                             try:
                                 _upsert_lead(
                                     self._conn, self.county, case_number, asset_id_val,
+                                    overbid_amount=None, sale_date=None,
                                     data_grade="BRONZE", processing_status="NEEDS_REVIEW",
                                 )
                             except Exception as ue:
