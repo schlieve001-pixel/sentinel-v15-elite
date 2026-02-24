@@ -78,6 +78,11 @@ if not _PREVIEW_HMAC_SECRET:
 
 log = logging.getLogger(__name__)
 
+# ── Dev environment flag (NEVER true in production) ──────────────────
+# Set VERIFUSE_ENV=development in .env to enable dev-only bypasses.
+# Production must not set this variable (defaults to non-development).
+_IS_DEV = os.environ.get("VERIFUSE_ENV", "production").lower() == "development"
+
 # ── Pricing & entitlements (canonical source) ─────────────────────────
 from verifuse_v2.server.pricing import (
     FOUNDERS_MAX_SLOTS,
@@ -397,15 +402,14 @@ class FullAsset(SafeAsset):
 
 
 class PreviewLead(BaseModel):
-    """Public preview — ZERO PII, ZERO internal IDs. Explicit SELECT (no SELECT *)."""
+    """Public preview — ZERO PII, ZERO internal IDs, ZERO exact amounts.
+    Returns only banded surplus to enforce the monetization wall.
+    """
     preview_key: str  # HMAC hash for React key ONLY — not usable for lookups
     county: Optional[str] = None
-    sale_date: Optional[str] = None  # YYYY-MM only (anti-triangulation)
+    sale_month: Optional[str] = None  # YYYY-MM only (anti-triangulation)
     data_grade: Optional[str] = None
-    confidence_score: Optional[float] = None
-    estimated_surplus: Optional[float] = None  # COALESCED + ROUND(x,2) — exact to the penny
-    restriction_status: Optional[str] = None
-    days_until_actionable: Optional[int] = None
+    surplus_band: Optional[str] = None  # Banded range — never exact amount
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -608,40 +612,43 @@ def _row_to_full(row: dict) -> dict:
     return safe
 
 
+def surplus_band(cents: int) -> str:
+    """Return human-readable surplus band for preview display. Never exposes exact amount."""
+    dollars = cents / 100
+    if dollars < 50_000:
+        return "0–50K"
+    if dollars < 150_000:
+        return "50K–150K"
+    if dollars < 500_000:
+        return "150K–500K"
+    return "500K+"
+
+
 def _row_to_preview(row: dict) -> dict:
-    """Convert a leads row to PreviewLead dict. ZERO PII, ZERO internal IDs."""
+    """Convert a leads row to PreviewLead dict.
+    ZERO PII, ZERO internal IDs, ZERO exact surplus amounts.
+    """
     county = row.get("county")
     sale_date_raw = row.get("sale_date")
     data_grade = row.get("data_grade")
-    confidence = _safe_float(row.get("confidence_score"))
-    surplus = _safe_float(row.get("estimated_surplus")) or 0.0
+    # Convert DB dollars (float) → cents for banding
+    surplus_dollars = _safe_float(row.get("estimated_surplus")) or 0.0
+    surplus_cents = int(round(surplus_dollars * 100))
 
-    # Truncate sale_date to YYYY-MM (anti-triangulation)
-    sale_date_display = (sale_date_raw or "")[:7] if sale_date_raw else None
+    # Truncate to YYYY-MM (anti-triangulation)
+    sale_month = (sale_date_raw or "")[:7] if sale_date_raw else None
 
     # HMAC preview_key — stable, id-only salt (24 hex chars)
     preview_key = _compute_preview_key(row)
     # Pop id so it's not in output
     row.pop("id", None)
 
-    # Compute status + days
-    status = _compute_status(row)
-    days_until_actionable = None
-    if sale_date_raw:
-        restriction_end = _compute_restriction_end(sale_date_raw)
-        if restriction_end:
-            today = datetime.now(timezone.utc).date()
-            days_until_actionable = max(0, (restriction_end - today).days) if restriction_end > today else 0
-
     return PreviewLead(
         preview_key=preview_key,
         county=county,
-        sale_date=sale_date_display,
+        sale_month=sale_month,
         data_grade=data_grade,
-        confidence_score=round(confidence, 2) if confidence else None,
-        estimated_surplus=round(surplus, 2),
-        restriction_status=status,
-        days_until_actionable=days_until_actionable,
+        surplus_band=surplus_band(surplus_cents),
     ).model_dump()
 
 
@@ -722,7 +729,15 @@ def _require_admin_or_api_key(request: Request) -> None:
 
 
 def _check_email_verified(user: dict, request: Request = None) -> None:
-    """Check email verification. Raises 403 if not verified and not admin."""
+    """Check email verification. Raises 403 if not verified and not admin.
+
+    DEV-ONLY BYPASS: In development (VERIFUSE_ENV=development), admin and
+    sovereign roles are allowed through without email verification so that
+    local testing is not blocked by SMTP. This bypass is compile-time gated
+    by _IS_DEV — it is physically unreachable in production.
+    """
+    if _IS_DEV and user.get("role") in ("admin", "sovereign"):
+        return
     if not user.get("email_verified") and not _effective_admin(user, request):
         raise HTTPException(
             status_code=403,
@@ -1596,6 +1611,11 @@ async def send_verification(request: Request):
     code = "".join(random.choices(string.digits, k=6))
     now = datetime.now(timezone.utc).isoformat()
 
+    # DEV-ONLY: log the code when SMTP is not configured (email mode = log).
+    # NEVER logs in production — _IS_DEV is False unless VERIFUSE_ENV=development.
+    if _IS_DEV and os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower() == "log":
+        log.info("[DEV] Verification code for %s: %s", user["email"], code)
+
     conn = _get_conn()
     try:
         conn.execute(
@@ -1714,6 +1734,37 @@ async def get_lead_detail(lead_id: str, request: Request):
                 ).fetchone()
                 is_unlocked = bool(u_row)
             result["unlocked_by_me"] = is_unlocked
+
+            # ── Forensic audit data (Phase 4 — unlocked leads only) ──────────
+            # surplus_math_audit: math proof behind the GOLD grade
+            # equity_resolution.notes: provenance citation (snapshot_id / doc_id)
+            if is_unlocked and registry_asset_id:
+                try:
+                    audit_row = conn.execute(
+                        """SELECT html_overbid, successful_bid, total_indebtedness,
+                                  computed_surplus, voucher_overbid, voucher_doc_id,
+                                  match_html_math, match_voucher,
+                                  data_grade AS audit_grade, notes AS audit_notes,
+                                  snapshot_id, doc_id
+                           FROM surplus_math_audit
+                           WHERE asset_id = ?
+                           ORDER BY audit_ts DESC LIMIT 1""",
+                        [registry_asset_id],
+                    ).fetchone()
+                    if audit_row:
+                        result["surplus_math_audit"] = dict(audit_row)
+                except Exception:
+                    pass  # Supplemental — never block the lead response
+
+                try:
+                    eq_notes_row = conn.execute(
+                        "SELECT notes FROM equity_resolution WHERE asset_id = ?",
+                        [registry_asset_id],
+                    ).fetchone()
+                    if eq_notes_row and eq_notes_row["notes"]:
+                        result["equity_resolution_notes"] = eq_notes_row["notes"]
+                except Exception:
+                    pass  # Supplemental — never block the lead response
 
             # ── Daily view rate limiting (BEGIN IMMEDIATE) ────────────────────
             if user_id and not is_unlocked and not is_eff_admin:

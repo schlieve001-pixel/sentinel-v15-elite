@@ -106,12 +106,9 @@ export function verifyEmail(code: string): Promise<{ status: string }> {
 export interface PreviewLead {
   preview_key: string;
   county: string;
-  sale_date: string | null;
+  sale_month: string | null;
   data_grade: string;
-  confidence_score: number;
-  estimated_surplus: number;
-  restriction_status: "RESTRICTED" | "WATCHLIST" | "ACTIONABLE" | "EXPIRED" | "UNKNOWN";
-  days_until_actionable: number | null;
+  surplus_band: string | null;
 }
 
 export interface PreviewLeadsResponse {
@@ -133,6 +130,21 @@ export function getPreviewLeads(params?: {
 }
 
 // ── Leads ─────────────────────────────────────────────────────────
+
+export interface SurplusMathAudit {
+  html_overbid: number | null;
+  successful_bid: number | null;
+  total_indebtedness: number | null;
+  computed_surplus: number | null;
+  voucher_overbid: number | null;
+  voucher_doc_id: string | null;
+  match_html_math: number | null;  // 1 = match, 0 = mismatch, null = n/a
+  match_voucher: number | null;
+  audit_grade: string | null;
+  audit_notes: string | null;
+  snapshot_id: string | null;
+  doc_id: string | null;
+}
 
 export interface Lead {
   asset_id: string;
@@ -158,7 +170,6 @@ export interface Lead {
   address_hint: string;
   owner_img: string | null;
   completeness_score: number;
-  confidence_score: number;
   data_age_days: number | null;
   preview_key?: string;        // null if not preview-eligible
   unlocked_by_me?: boolean;    // true if current user unlocked
@@ -168,6 +179,9 @@ export interface Lead {
   gross_surplus_cents?: number | null;
   net_owner_equity_cents?: number | null;
   classification?: string | null;
+  // Phase 4: forensic audit data (unlocked leads only)
+  surplus_math_audit?: SurplusMathAudit | null;
+  equity_resolution_notes?: string | null;
 }
 
 export interface LeadsResponse {

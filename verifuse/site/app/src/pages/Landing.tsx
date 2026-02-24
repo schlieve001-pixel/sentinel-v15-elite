@@ -122,7 +122,7 @@ export default function Landing() {
             <h3>Exact surplus amounts — down to the penny</h3>
           </div>
           <div className="step-card">
-            <h3>County, sale date, grade, confidence — free to preview</h3>
+            <h3>County, sale date, grade — free to preview</h3>
           </div>
           <div className="step-card">
             <h3>Owner name, address, case number — unlock with 1 credit</h3>
@@ -149,7 +149,7 @@ export default function Landing() {
             <div className="step-num">02</div>
             <h3>Intelligence Grading</h3>
             <p>
-              Each asset is scored on completeness, confidence, surplus amount,
+              Each asset is scored on completeness, surplus amount,
               and statutory deadline. Only GOLD-grade leads reach you.
             </p>
           </div>
