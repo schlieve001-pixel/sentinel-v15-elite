@@ -44,7 +44,7 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
       <div className="card-value">
         {formatCurrency(lead.estimated_surplus)}
         {!lead.surplus_verified && (
-          <span className="unverified-badge">DETECTED</span>
+          <span className="unverified-badge">PRELIMINARY</span>
         )}
       </div>
       <div className="card-id">CASE: {lead.case_number || lead.registry_asset_id?.split(":")[3] || lead.asset_id?.substring(0, 12)}</div>
@@ -70,9 +70,6 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
       <div className="card-meta">
         <span className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`}>
           {lead.data_grade}
-        </span>
-        <span className="confidence-pill">
-          {Math.round((lead.confidence_score || 0) * 100)}%
         </span>
         {lead.days_to_claim != null && !lead.deadline_passed && (
           <span className={`days-pill ${lead.days_to_claim < 60 ? "urgent" : ""}`}>
@@ -474,8 +471,8 @@ export default function Dashboard() {
                 <h2>DATA ACCESS ONLY — RESTRICTION PERIOD</h2>
                 <span className="bucket-count">{watchlist.length} leads</span>
                 <p className="bucket-desc">
-                  Sold &lt; 6 months ago. C.R.S. § 38-38-111(2.5)(c): Compensation agreements
-                  are void and unenforceable while funds are held by the Public Trustee.
+                  Sold &lt; 6 months ago. Statutory restrictions under C.R.S. § 38-38-111 and
+                  § 38-13-1304 may apply depending on sale date and fund status. Consult counsel.
                 </p>
               </div>
               <div className="vault-grid">
@@ -500,19 +497,11 @@ export default function Dashboard() {
             contact homeowners, and does not assist in the recovery of overbid or surplus funds.
           </p>
           <p>
-            Colorado law (C.R.S. § 38-38-111) prohibits agreements to pay compensation to recover
-            or assist in recovering overbid amounts from the public trustee. Colorado law (C.R.S.
-            § 38-13-1304) restricts agreements to recover unclaimed overbids held by the State
-            Treasurer for at least two years after transfer, and caps compensation at 20-30%.
+            Statutory restrictions under C.R.S. § 38-38-111 and § 38-13-1304 may apply
+            depending on sale date and fund status. Consult counsel.
           </p>
           <p>
-            Subscribers acknowledge that inducing or attempting to induce a person to enter into a
-            compensation agreement that violates C.R.S. § 38-38-111 or § 38-13-1304 is a class 2
-            misdemeanor and a deceptive trade practice under the Colorado Consumer Protection Act.
-          </p>
-          <p>
-            This data subscription does not constitute legal advice. Surplus amounts marked
-            "DETECTED" have not been independently confirmed against county indebtedness records.
+            This data subscription does not constitute legal advice.
             No phone numbers, email addresses, or skip-tracing data are provided by this platform.
           </p>
         </>)}

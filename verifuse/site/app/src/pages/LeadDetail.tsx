@@ -148,7 +148,7 @@ export default function LeadDetail() {
                   {lead.data_grade}
                 </span>
                 {!lead.surplus_verified && (
-                  <span className="unverified-badge" style={{ marginLeft: 8 }}>DETECTED</span>
+                  <span className="unverified-badge" style={{ marginLeft: 8 }}>PRELIMINARY</span>
                 )}
                 {(lead as any).attorney_packet_ready === 1 && (
                   <span className="grade-badge grade-gold" style={{ marginLeft: 8 }}>
@@ -210,18 +210,14 @@ export default function LeadDetail() {
               <div className="restriction-banner">
                 <strong>C.R.S. § 38-38-111 RESTRICTION ACTIVE</strong>
                 <p>
-                  Compensation agreements are <strong>VOID AND UNENFORCEABLE</strong> while
-                  funds are held by the Public Trustee (first 6 months after sale).
+                  Statutory restrictions under C.R.S. § 38-38-111 and § 38-13-1304 may apply
+                  depending on sale date and fund status. Consult counsel.
                 </p>
                 <p>
                   Restriction lifts: <strong>{lead.restriction_end_date}</strong>
                   {lead.days_until_actionable != null && (
                     <span> ({lead.days_until_actionable} days remaining)</span>
                   )}
-                </p>
-                <p style={{ marginTop: 8, fontSize: "0.85em", opacity: 0.8 }}>
-                  After restriction ends, funds transfer to the State Treasurer.
-                  C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Consult counsel.
                 </p>
               </div>
             )}
@@ -257,10 +253,6 @@ export default function LeadDetail() {
                 }}>
                   {isRestricted ? "DATA ACCESS ONLY" : isExpired ? "EXPIRED" : "ESCROW ENDED"}
                 </span>
-              </div>
-              <div className="detail-field">
-                <label>Confidence</label>
-                <span>{Math.round((lead.confidence_score || 0) * 100)}%</span>
               </div>
             </div>
 
@@ -487,7 +479,7 @@ export default function LeadDetail() {
                   </div>
                   <div className="detail-field">
                     <label>Total Indebtedness</label>
-                    <span>{unlocked.total_indebtedness ? fmt(unlocked.total_indebtedness) : "DETECTED"}</span>
+                    <span>{unlocked.total_indebtedness ? fmt(unlocked.total_indebtedness) : "PRELIMINARY"}</span>
                   </div>
                   <div className="detail-field">
                     <label>Overbid Amount</label>
@@ -558,6 +550,61 @@ export default function LeadDetail() {
                     </button>
                   )}
                 </div>
+
+                {/* Phase 4: Surplus Math Audit Panel
+                    Rule: render if data_grade === 'GOLD' OR audit record explicitly exists.
+                    Only visible to authenticated users viewing an unlocked lead. */}
+                {(lead!.data_grade === "GOLD" || lead!.surplus_math_audit) && (
+                  <div style={{ marginTop: 20, padding: "12px 16px", border: "1px solid #374151", borderRadius: 6, background: "rgba(17,24,39,0.6)" }}>
+                    <h4 style={{ margin: "0 0 10px", fontSize: "0.78em", letterSpacing: "0.08em", opacity: 0.7 }}>
+                      SURPLUS MATH AUDIT
+                    </h4>
+                    {lead!.surplus_math_audit ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 20, alignItems: "flex-start" }}>
+                        {lead!.surplus_math_audit.html_overbid != null && (
+                          <div>
+                            <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>HTML OVERBID</div>
+                            <div style={{ fontWeight: 600, fontSize: "0.92em" }}>{fmt(lead!.surplus_math_audit.html_overbid / 100)}</div>
+                          </div>
+                        )}
+                        {lead!.surplus_math_audit.computed_surplus != null && (
+                          <div>
+                            <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>COMPUTED SURPLUS (BID – DEBT)</div>
+                            <div style={{ fontWeight: 600, fontSize: "0.92em" }}>{fmt(lead!.surplus_math_audit.computed_surplus / 100)}</div>
+                          </div>
+                        )}
+                        {lead!.surplus_math_audit.voucher_overbid != null && (
+                          <div>
+                            <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>VOUCHER AMOUNT</div>
+                            <div style={{ fontWeight: 600, fontSize: "0.92em" }}>{fmt(lead!.surplus_math_audit.voucher_overbid / 100)}</div>
+                          </div>
+                        )}
+                        <div>
+                          <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>MATH MATCH STATUS</div>
+                          <div style={{ fontWeight: 700, fontSize: "0.88em", color: lead!.surplus_math_audit.match_html_math === 1 ? "#22c55e" : lead!.surplus_math_audit.match_html_math === 0 ? "#ef4444" : "#94a3b8" }}>
+                            {lead!.surplus_math_audit.match_html_math === 1 ? "CONFIRMED" : lead!.surplus_math_audit.match_html_math === 0 ? "MISMATCH" : "PENDING"}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p style={{ margin: 0, opacity: 0.5, fontSize: "0.82em" }}>Math audit pending for this GOLD asset.</p>
+                    )}
+                  </div>
+                )}
+
+                {/* Phase 4: Provenance Citation
+                    Displays equity_resolution.notes (snapshot_id / doc_id reference).
+                    Only visible to authenticated users viewing an unlocked lead. */}
+                {lead!.equity_resolution_notes && (
+                  <div style={{ marginTop: 12, padding: "10px 16px", border: "1px solid #1f2937", borderRadius: 6, background: "rgba(17,24,39,0.4)" }}>
+                    <h4 style={{ margin: "0 0 6px", fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.6 }}>
+                      PROVENANCE CITATION
+                    </h4>
+                    <p style={{ margin: 0, fontSize: "0.82em", opacity: 0.8, whiteSpace: "pre-wrap" }}>
+                      {lead!.equity_resolution_notes}
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -575,9 +622,8 @@ export default function LeadDetail() {
             C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Consult counsel.
           </p>
           <p>
-            This is not legal advice. Consult a licensed Colorado attorney before
-            filing any claim. Surplus amounts labeled "DETECTED" lack independent
-            indebtedness confirmation.
+            Statutory restrictions under C.R.S. § 38-38-111 and § 38-13-1304 may apply
+            depending on sale date and fund status. Consult counsel.
           </p>
         </div>
       </div>

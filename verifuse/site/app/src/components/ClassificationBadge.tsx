@@ -27,7 +27,7 @@ function getClassificationInfo(classification: string | null | undefined): Class
   switch (classification) {
     case "OWNER_ELIGIBLE":
       return {
-        label: "OWNER ELIGIBLE",
+        label: "POTENTIAL OWNER CLAIM",
         color: "#22c55e",
         bg: "rgba(34,197,94,0.1)",
         border: "rgba(34,197,94,0.3)",

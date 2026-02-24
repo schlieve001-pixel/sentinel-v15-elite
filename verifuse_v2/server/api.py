@@ -1735,6 +1735,37 @@ async def get_lead_detail(lead_id: str, request: Request):
                 is_unlocked = bool(u_row)
             result["unlocked_by_me"] = is_unlocked
 
+            # ── Forensic audit data (Phase 4 — unlocked leads only) ──────────
+            # surplus_math_audit: math proof behind the GOLD grade
+            # equity_resolution.notes: provenance citation (snapshot_id / doc_id)
+            if is_unlocked and registry_asset_id:
+                try:
+                    audit_row = conn.execute(
+                        """SELECT html_overbid, successful_bid, total_indebtedness,
+                                  computed_surplus, voucher_overbid, voucher_doc_id,
+                                  match_html_math, match_voucher,
+                                  data_grade AS audit_grade, notes AS audit_notes,
+                                  snapshot_id, doc_id
+                           FROM surplus_math_audit
+                           WHERE asset_id = ?
+                           ORDER BY audit_ts DESC LIMIT 1""",
+                        [registry_asset_id],
+                    ).fetchone()
+                    if audit_row:
+                        result["surplus_math_audit"] = dict(audit_row)
+                except Exception:
+                    pass  # Supplemental — never block the lead response
+
+                try:
+                    eq_notes_row = conn.execute(
+                        "SELECT notes FROM equity_resolution WHERE asset_id = ?",
+                        [registry_asset_id],
+                    ).fetchone()
+                    if eq_notes_row and eq_notes_row["notes"]:
+                        result["equity_resolution_notes"] = eq_notes_row["notes"]
+                except Exception:
+                    pass  # Supplemental — never block the lead response
+
             # ── Daily view rate limiting (BEGIN IMMEDIATE) ────────────────────
             if user_id and not is_unlocked and not is_eff_admin:
                 today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
