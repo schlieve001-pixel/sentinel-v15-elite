@@ -18,23 +18,23 @@ from typing import Optional
 # ── Tier definitions ──────────────────────────────────────────────────
 
 TIERS: dict[str, dict] = {
-    "scout": {
-        "monthly_price_cents": 4900,   # $49/month
-        "credits": 25,
-        "daily_limit": 100,
-        "sessions": 1,
-        "label": "Scout",
-    },
-    "operator": {
+    "associate": {
         "monthly_price_cents": 14900,  # $149/month
+        "credits": 30,
+        "daily_limit": None,
+        "sessions": 1,
+        "label": "Associate",
+    },
+    "partner": {
+        "monthly_price_cents": 39900,  # $399/month
         "credits": 100,
-        "daily_limit": 500,
+        "daily_limit": None,
         "sessions": 2,
-        "label": "Operator",
+        "label": "Partner",
     },
     "sovereign": {
-        "monthly_price_cents": 49900,  # $499/month
-        "credits": 500,
+        "monthly_price_cents": 89900,  # $899/month
+        "credits": 350,
         "daily_limit": None,           # Unlimited
         "sessions": 5,
         "label": "Sovereign",
@@ -43,8 +43,8 @@ TIERS: dict[str, dict] = {
 
 STARTER_PACK: dict = {
     "credits": 10,
-    "price_cents": 1900,    # $19.00
-    "expiry_days": 30,
+    "price_cents": 4900,    # $49.00 one-time
+    "expiry_days": 90,
 }
 
 FOUNDERS_MAX_SLOTS: int = 100
@@ -103,8 +103,8 @@ def build_price_map(mode: str) -> dict[str, dict]:
     """
     prefix = "STRIPE_LIVE_PRICE_" if mode == "live" else "STRIPE_TEST_PRICE_"
     definitions = {
-        "SCOUT":     {"tier": "scout",     "monthly_credits": get_monthly_credits("scout"),     "kind": "subscription"},
-        "OPERATOR":  {"tier": "operator",  "monthly_credits": get_monthly_credits("operator"),  "kind": "subscription"},
+        "ASSOCIATE": {"tier": "associate", "monthly_credits": get_monthly_credits("associate"), "kind": "subscription"},
+        "PARTNER":   {"tier": "partner",   "monthly_credits": get_monthly_credits("partner"),   "kind": "subscription"},
         "SOVEREIGN": {"tier": "sovereign", "monthly_credits": get_monthly_credits("sovereign"), "kind": "subscription"},
         "STARTER":   {"tier": "starter",   "monthly_credits": STARTER_PACK["credits"],          "kind": "starter"},
     }

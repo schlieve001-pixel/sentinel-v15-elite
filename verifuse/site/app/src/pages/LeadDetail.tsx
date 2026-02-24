@@ -160,6 +160,10 @@ export default function LeadDetail() {
                 <span className="restriction-badge">
                   RESTRICTED — {lead.days_until_actionable} DAYS
                 </span>
+              ) : lead.restriction_status === "UNKNOWN" ? (
+                <span className="status-badge" style={{ background: "#374151", color: "#9ca3af" }}>
+                  SALE DATE PENDING
+                </span>
               ) : lead.days_to_claim != null ? (
                 <span className={`timer-badge ${lead.days_to_claim < 60 ? "urgent" : ""} ${lead.deadline_passed ? "expired" : ""}`}>
                   {lead.deadline_passed
@@ -496,13 +500,6 @@ export default function LeadDetail() {
                     </span>
                   </div>
                 </div>
-                {unlocked.motion_pdf && (
-                  <div className="motion-download">
-                    <span className="success-badge">MOTION PDF GENERATED</span>
-                    <p>Court-ready motion citing C.R.S. § 38-38-111 has been prepared.</p>
-                  </div>
-                )}
-
                 {/* Attorney Tool Downloads */}
                 <div style={{ marginTop: 20, display: "flex", gap: 12, flexWrap: "wrap" }}>
                   <button
@@ -519,15 +516,24 @@ export default function LeadDetail() {
                   >
                     DOSSIER (.PDF)
                   </button>
-                  {(lead!.data_grade === "GOLD" || lead!.data_grade === "SILVER") && (
-                    <button
-                      className="btn-outline"
-                      style={{ fontSize: "0.85em" }}
-                      onClick={() => downloadSecure(`/api/case-packet/${lead!.asset_id}`, `case_packet_${lead!.asset_id}.html`)}
-                    >
-                      CASE PACKET (HTML)
-                    </button>
-                  )}
+                  {(() => {
+                    const hasEvidence = evidenceDocs.length > 0 || (unlocked?.source_doc_count ?? 0) > 0;
+                    return hasEvidence ? (
+                      <button className="btn-outline" style={{ fontSize: "0.85em" }}
+                        onClick={() => downloadSecure(`/api/case-packet/${lead!.asset_id}`, `case_packet_${lead!.asset_id}.html`)}>
+                        CASE PACKET (HTML)
+                      </button>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <span style={{ color: "#ef4444", fontWeight: 600, fontSize: "0.78em", letterSpacing: "0.06em" }}>
+                          &#9888; INSUFFICIENT EVIDENCE: No source documents on file.
+                        </span>
+                        <button className="btn-outline" style={{ fontSize: "0.85em", opacity: 0.4, cursor: "not-allowed" }} disabled>
+                          CASE PACKET (HTML)
+                        </button>
+                      </div>
+                    );
+                  })()}
                   {user?.bar_number && (
                     <button
                       className="btn-outline"

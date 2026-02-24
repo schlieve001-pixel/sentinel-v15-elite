@@ -64,10 +64,10 @@ counties:
     notes: "27K+ records — use strict 30-day Sold Date Range filters. Full doc repo. Standard GovSoft IDs. URL: gts.weld.gov (redirected from weld.gov/…/Property-Foreclosure-Search)."
 
   # douglas: GovSoft (/gts/), Accept Terms gate required
-  # douglas:
-  #   platform: govsoft
-  #   state: CO
-  #   notes: "URL TBD — /gts/ path. Accept Terms gate."
+  douglas:
+    platform: govsoft
+    state: CO
+    notes: "Accept Terms gate. URL: apps.douglas.co.us/gts. Standard GovSoft layout."
 
   # ── Pattern B: GovSoft + CAPTCHA (HITL required) ──────────────────────
   mesa:
@@ -93,7 +93,7 @@ counties:
   #   notes: "Do NOT scrape GovSoft UI. Download Current_Bids.pdf and Overbid-Refund-Pymt Sheet-Check Requests.xlsm from /media/denvergov/ endpoints."
 
   # ── Pattern D: Larimer — Custom ASP.NET MVC ─────────────────────────────
-  # larimer:
-  #   platform: larimer_mvc
-  #   state: CO
-  #   notes: "Clean MVC. No Accept Terms, no CAPTCHA, no __VIEWSTATE. Summary-only, no doc repo. URL: apps.larimer.org/publictrustee/search/..."
+  larimer:
+    platform: larimer_mvc
+    state: CO
+    notes: "Clean MVC. No Accept Terms, no CAPTCHA, no __VIEWSTATE. Summary-only, no doc repo. URL: apps.larimer.org/publictrustee"

@@ -247,7 +247,7 @@ export interface UnlockResponse {
   recorder_link: string | null;
   data_grade: string | null;
   confidence_score: number | null;
-  motion_pdf: string | null;
+  source_doc_count?: number;
   credits_remaining?: number;
 }
 

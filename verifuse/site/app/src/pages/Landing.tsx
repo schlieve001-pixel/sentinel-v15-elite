@@ -4,44 +4,64 @@ import { getStats, type Stats } from "../lib/api";
 
 const TIERS = [
   {
-    name: "Scout",
+    name: "Starter Pack",
     price: "$49",
-    credits: 25,
-    perCredit: "$1.96",
+    credits: 10,
+    perCredit: "$4.90",
+    oneTime: true,
     features: [
-      "25 lead unlocks / month",
-      "100 lead views / day",
+      "10 lead unlocks (one-time)",
+      "All Colorado counties",
+      "Forensic evidence packet (source documents + audit trail)",
+      "C.R.S. § 38-38-111 restriction period tracking",
+      "Fail-closed GOLD certification (4-gate verified)",
+    ],
+  },
+  {
+    name: "Associate",
+    price: "$149",
+    credits: 30,
+    perCredit: "$4.97",
+    features: [
+      "30 lead unlocks / month",
       "All Colorado counties",
       "Dossier PDF downloads",
+      "Forensic evidence packet (source documents + audit trail)",
+      "C.R.S. § 38-38-111 restriction period tracking",
+      "Fail-closed GOLD certification (4-gate verified)",
       "Single-session access",
     ],
   },
   {
-    name: "Operator",
-    price: "$149",
+    name: "Partner",
+    price: "$399",
     credits: 100,
-    perCredit: "$1.49",
+    perCredit: "$3.99",
     popular: true,
     features: [
       "100 lead unlocks / month",
-      "500 lead views / day",
       "All Colorado counties",
-      "Court motion PDF generation",
+      "Priority new-lead alerts",
+      "Forensic evidence packet (source documents + audit trail)",
+      "C.R.S. § 38-38-111 restriction period tracking",
+      "Fail-closed GOLD certification (4-gate verified)",
       "2 concurrent sessions",
     ],
   },
   {
     name: "Sovereign",
-    price: "$499",
-    credits: 500,
-    perCredit: "$0.99",
+    price: "$899",
+    credits: 350,
+    perCredit: "$2.57",
     bestValue: true,
     features: [
-      "500 lead unlocks / month",
+      "350 lead unlocks / month",
       "Unlimited lead views",
-      "Priority new-lead alerts",
-      "Motion + dossier generation",
-      "5 concurrent sessions",
+      "API access",
+      "Forensic evidence packet (source documents + audit trail)",
+      "C.R.S. § 38-38-111 restriction period tracking",
+      "Fail-closed GOLD certification (4-gate verified)",
+      "5 concurrent sessions + white-glove data",
     ],
   },
 ];
@@ -157,9 +177,9 @@ export default function Landing() {
             <div className="step-num">03</div>
             <h3>Unlock + File</h3>
             <p>
-              Use a credit to reveal full owner data, download a court-ready
-              motion PDF citing C.R.S. § 38-38-111, and file before the
-              deadline.
+              Use a credit to reveal full owner data, download a forensic
+              evidence packet with source documents and audit trail, and file
+              before the deadline.
             </p>
           </div>
         </div>
@@ -185,13 +205,13 @@ export default function Landing() {
               <h3>{tier.name}</h3>
               <div className="price">
                 {tier.price}
-                <span>/mo</span>
+                <span>{(tier as any).oneTime ? " one-time" : "/mo"}</span>
               </div>
               <div style={{ color: "#10b981", fontSize: "0.85rem", marginBottom: "0.25rem" }}>
                 {tier.perCredit} per credit
               </div>
               <div style={{ color: "#64748b", fontSize: "0.8rem", marginBottom: "1rem" }}>
-                {tier.credits} credits included
+                {tier.credits} credits {(tier as any).oneTime ? "(pay-as-you-go)" : "included"}
               </div>
               <ul>
                 {tier.features.map((f) => (

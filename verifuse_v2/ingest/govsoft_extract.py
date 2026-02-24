@@ -158,7 +158,12 @@ def extract_sale_fields(gzip_html: bytes) -> dict:
         or pairs.get("Initial Bid")
         or ""
     )
-    total_indebtedness_text = pairs.get("Total Indebtedness", "")
+    total_indebtedness_text = (
+        pairs.get("Total Indebtedness")
+        or pairs.get("Total due holder")
+        or pairs.get("Total Due Holder")
+        or ""
+    )
 
     # Overbid: try exact label first, then OVERBID_RE scan across all labels
     # Exclude transfer labels ("Overbid Transferred On/To") — different field.
@@ -212,6 +217,11 @@ def validate_overbid(
       ("GOLD",   "VALIDATED")    — confirmed match
       ("BRONZE", "NEEDS_REVIEW") — mismatch, uncertainty, or awaiting OCR
     """
+    # Debt=0 with no voucher — math path is invalid; block GOLD
+    if total_indebtedness == Decimal('0') and voucher_overbid is None:
+        log.warning("[validate] %s — debt=0, no voucher; math path invalid; blocking GOLD", asset_id)
+        return "BRONZE", "NEEDS_REVIEW"
+
     # Voucher present but not yet extracted — fail-closed; await Gate 5 OCR
     if has_voucher_doc and voucher_overbid is None:
         log.warning(
@@ -534,6 +544,33 @@ def _write_results(
     county      = parts[2].lower()
     case_number = parts[3]
 
+    # ── Absolute GOLD gate (4 conditions, all required) ───────────────────────
+    if data_grade == "GOLD":
+        gate_fails = []
+        existing = conn.execute(
+            "SELECT sale_date FROM leads WHERE county=? AND case_number=?",
+            [county, case_number]
+        ).fetchone()
+        if not existing or not existing[0]:
+            gate_fails.append("sale_date IS NULL")
+        if total_indebtedness_cents <= 0:
+            gate_fails.append("total_debt not extracted")
+        if amount_cents <= 0:
+            gate_fails.append("overbid_amount = 0")
+        snap_ct = conn.execute(
+            "SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [asset_id]
+        ).fetchone()[0]
+        pdf_ct = conn.execute(
+            "SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [asset_id]
+        ).fetchone()[0]
+        if snap_ct + pdf_ct == 0:
+            gate_fails.append("no evidence")
+        if gate_fails:
+            log.warning("[extract] %s — GOLD gate blocked: %s", asset_id, " | ".join(gate_fails))
+            data_grade = "BRONZE"
+            processing_status = "NEEDS_REVIEW"
+            notes = (notes + " | GOLD_GATE: " + "; ".join(gate_fails)).strip(" |")
+
     # Build asset_registry SET clause
     ar_updates: list[str] = []
     ar_params: list = []
@@ -556,18 +593,20 @@ def _write_results(
     if "overbid_amount" in leads_cols and overbid_amount is not None:
         leads_updates.append("overbid_amount = ?")
         leads_params.append(overbid_amount)
-    if "estimated_surplus" in leads_cols and overbid_amount is not None:
+    if "estimated_surplus" in leads_cols:
         leads_updates.append("estimated_surplus = ?")
-        leads_params.append(overbid_amount)
-    if "surplus_amount" in leads_cols and overbid_amount is not None:
+        val = overbid_amount if (overbid_amount is not None and total_indebtedness_cents > 0) else None
+        leads_params.append(val)
+    if "surplus_amount" in leads_cols:
         leads_updates.append("surplus_amount = ?")
-        leads_params.append(overbid_amount)
+        val = overbid_amount if (overbid_amount is not None and total_indebtedness_cents > 0) else None
+        leads_params.append(val)
     if "winning_bid" in leads_cols and successful_bid_cents > 0:
         leads_updates.append("winning_bid = ?")
         leads_params.append(round(successful_bid_cents / 100, 2))
-    if "total_debt" in leads_cols and total_indebtedness_cents > 0:
+    if "total_debt" in leads_cols:
         leads_updates.append("total_debt = ?")
-        leads_params.append(round(total_indebtedness_cents / 100, 2))
+        leads_params.append(round(total_indebtedness_cents / 100, 2) if total_indebtedness_cents > 0 else None)
 
     # Compute derived audit fields
     computed_surplus = successful_bid_cents - total_indebtedness_cents

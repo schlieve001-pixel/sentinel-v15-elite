@@ -398,7 +398,7 @@ class FullAsset(SafeAsset):
     days_remaining: Optional[int] = None
     statute_window: Optional[str] = None
     recorder_link: Optional[str] = None
-    motion_pdf: Optional[str] = None
+    source_doc_count: Optional[int] = None
 
 
 class PreviewLead(BaseModel):
@@ -453,7 +453,7 @@ def _compute_status(row: dict) -> str:
         if restriction_end:
             return "ACTIONABLE"
 
-    return "ACTIONABLE"
+    return "UNKNOWN"
 
 
 def _safe_float(val) -> Optional[float]:
@@ -615,7 +615,6 @@ def _row_to_full(row: dict) -> dict:
         "surplus_amount": _safe_float(row.get("surplus_amount")),
         "overbid_amount": _safe_float(row.get("overbid_amount")),
         "recorder_link": row.get("recorder_link"),
-        "motion_pdf": row.get("motion_pdf"),
     })
     return safe
 
@@ -1291,6 +1290,18 @@ async def unlock_lead(lead_id: str, request: Request):
             conn2.close()
 
         result = _row_to_full(dict(row))
+        # Phase 5: source_doc_count for UI evidence lock
+        try:
+            _sc2 = _get_conn()
+            _county2 = dict(row).get("county", "")
+            _case2 = dict(row).get("case_number", "")
+            _asset_key2 = f"FORECLOSURE:CO:{_county2.upper()}:{_case2.upper()}"
+            _snap_ct2 = _sc2.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key2]).fetchone()[0]
+            _pdf_ct2 = _sc2.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [lead_id]).fetchone()[0]
+            result["source_doc_count"] = _snap_ct2 + _pdf_ct2
+            _sc2.close()
+        except Exception:
+            result["source_doc_count"] = 0
         result["ok"] = True
         result["credits_remaining"] = -1
         result["credits_spent"] = 0
@@ -1350,6 +1361,16 @@ async def unlock_lead(lead_id: str, request: Request):
             balance = _ledger_balance(conn, user_id)
             conn.execute("COMMIT")
             result = _row_to_full(lead)
+            # Phase 5: source_doc_count for UI evidence lock
+            try:
+                _county3 = lead.get("county", "")
+                _case3 = lead.get("case_number", "")
+                _asset_key3 = f"FORECLOSURE:CO:{_county3.upper()}:{_case3.upper()}"
+                _snap_ct3 = conn.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key3]).fetchone()[0]
+                _pdf_ct3 = conn.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [lead_id]).fetchone()[0]
+                result["source_doc_count"] = _snap_ct3 + _pdf_ct3
+            except Exception:
+                result["source_doc_count"] = 0
             result["ok"] = True
             result["credits_remaining"] = balance
             result["credits_spent"] = 0
@@ -1423,6 +1444,18 @@ async def unlock_lead(lead_id: str, request: Request):
         conn.close()
 
     result = _row_to_full(lead)
+    # Phase 5: source_doc_count for UI evidence lock
+    try:
+        _sc = _get_conn()
+        _county = lead.get("county", "")
+        _case = lead.get("case_number", "")
+        _asset_key = f"FORECLOSURE:CO:{_county.upper()}:{_case.upper()}"
+        _snap_ct = _sc.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key]).fetchone()[0]
+        _pdf_ct = _sc.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [lead_id]).fetchone()[0]
+        result["source_doc_count"] = _snap_ct + _pdf_ct
+        _sc.close()
+    except Exception:
+        result["source_doc_count"] = 0
     result["ok"] = True
     result["credits_remaining"] = credits_after
     result["credits_spent"] = cost
