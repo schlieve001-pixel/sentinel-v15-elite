@@ -3,24 +3,97 @@
 # Each county entry maps a county slug to its platform adapter and state.
 #
 # GovSoft counties: base_url and credentials are NEVER stored here.
-# Use GOVSOFT_{COUNTY_UPPER}_URL env var, seeded into county_profiles by
-# run_migrations.py Phase 10.
+# They live in govsoft_county_configs (DB-seeded). See run_migrations.py.
+#
+# Pattern A: GovSoft Standard (ASP.NET WebForms + Playwright)
+# Pattern B: GovSoft + CAPTCHA (captcha_mode in govsoft_county_configs)
+# Pattern C: Static file ingestion (Denver — PTG/Pioneer system)
+# Pattern D: Custom MVC (Larimer — no __VIEWSTATE)
 #
 # Platform values:
 #   govsoft       — ASP.NET WebForms Public Trustee (GovSoft.us SaaS)
-#   realforeclose — realforeclose.com SaaS
-#   gts           — GTS platform
+#   govsoft_pdf   — GovSoft + PDF post-sale list supplement
+#   denver_ptg    — Denver Pioneer Technology Group static files
+#   larimer_mvc   — Larimer custom ASP.NET MVC (HTTP only, no Playwright)
 #   county_page   — direct county website
-#   govease       — GovEase.com SaaS
 #   manual        — manual CSV/PDF ingest
 
 counties:
 
-  # ── GovSoft counties (Playwright engine) ────────────────────────
+  # ── Pattern A: GovSoft Standard — no CAPTCHA ────────────────────────────
   jefferson:
     platform: govsoft
     state: CO
+    notes: "Full doc repo. Overbid at Sale. Accept Terms gate. Case IDs: J2400300. OBCLAIMVOUCHERLIENHOLDER for surplus proofs."
 
   arapahoe:
     platform: govsoft
     state: CO
+    notes: "Full doc repo. Overbid at Sale. Accept Terms gate. Case IDs: 0275-2024. Pagination present."
+
+  adams:
+    platform: govsoft
+    state: CO
+    notes: "NO document repository. Use HTML Sale Information tab only. Overbid visible. No CAPTCHA. No Accept Terms."
+
+  el_paso:
+    platform: govsoft
+    state: CO
+    notes: "49K+ records — use strict 30-day Sold Date Range filters. Full doc repo. Overbid at Sale. No CAPTCHA."
+
+  boulder:
+    platform: govsoft
+    state: CO
+    notes: "Overbid field labeled 'Overbid Amount' (not 'Overbid at Sale'). contains(Overbid) regex required. Publishes UNCLAIMED OVERBID FUNDS.pdf and SALE INVOICE.pdf."
+
+  broomfield:
+    platform: govsoft
+    state: CO
+    notes: "No Accept Terms gate. No CAPTCHA. Standard GovSoft layout."
+
+  gilpin:
+    platform: govsoft
+    state: CO
+    notes: "Clean GovSoft deployment. No CAPTCHA. Full document repository."
+
+  # ── Pattern A: GovSoft Standard — URL TBD ─────────────────────────────
+  # weld: GovSoft, 27K+ records, 30-day rolling window required, Overbid at Sale
+  # weld:
+  #   platform: govsoft
+  #   state: CO
+  #   notes: "URL TBD — confirm via weldgov.com. 27K records, strict date filters."
+
+  # douglas: GovSoft (/gts/), Accept Terms gate required
+  # douglas:
+  #   platform: govsoft
+  #   state: CO
+  #   notes: "URL TBD — /gts/ path. Accept Terms gate."
+
+  # ── Pattern B: GovSoft + CAPTCHA (HITL required) ──────────────────────
+  mesa:
+    platform: govsoft
+    state: CO
+    notes: "CAPTCHA only on case detail page (SearchDetails.aspx). Search grid scrapable without CAPTCHA."
+
+  eagle:
+    platform: govsoft
+    state: CO
+    notes: "Accept Terms + image CAPTCHA on entry. Requires HITL."
+
+  # garfield: GovSoft + CAPTCHA on entry (URL TBD)
+  # garfield:
+  #   platform: govsoft
+  #   state: CO
+  #   notes: "CAPTCHA on entry. URL TBD."
+
+  # ── Pattern C: Denver — Pioneer Technology Group static files ───────────
+  # denver:
+  #   platform: denver_ptg
+  #   state: CO
+  #   notes: "Do NOT scrape GovSoft UI. Download Current_Bids.pdf and Overbid-Refund-Pymt Sheet-Check Requests.xlsm from /media/denvergov/ endpoints."
+
+  # ── Pattern D: Larimer — Custom ASP.NET MVC ─────────────────────────────
+  # larimer:
+  #   platform: larimer_mvc
+  #   state: CO
+  #   notes: "Clean MVC. No Accept Terms, no CAPTCHA, no __VIEWSTATE. Summary-only, no doc repo. URL: apps.larimer.org/publictrustee/search/..."

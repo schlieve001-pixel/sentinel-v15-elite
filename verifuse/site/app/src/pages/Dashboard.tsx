@@ -153,7 +153,12 @@ export default function Dashboard() {
   const location = useLocation();
   const navigate = useNavigate();
   const isPreviewRoute = location.pathname === "/preview";
-  const isPreview = isPreviewRoute || (searchParams.get("preview") === "1" && !user);
+  // simMode must be declared before isPreview so the calculation can reference it
+  const [simMode, setSimMode] = useState<string | null>(
+    () => localStorage.getItem("vf_simulate")
+  );
+  // simMode="user" lets admin see exactly what a non-logged-in visitor sees (banded preview)
+  const isPreview = isPreviewRoute || (searchParams.get("preview") === "1" && !user) || simMode === "user";
 
   // Dashboard guard: redirect unauthenticated users to /preview
   useEffect(() => {
@@ -172,9 +177,6 @@ export default function Dashboard() {
   const [verifyCode, setVerifyCode] = useState("");
   const [verifySending, setVerifySending] = useState(false);
   const [verifyMsg, setVerifyMsg] = useState("");
-  const [simMode, setSimMode] = useState<string | null>(
-    () => localStorage.getItem("vf_simulate")
-  );
   const [legalOpen, setLegalOpen] = useState(false);
   const healthOk = useHealth();
 

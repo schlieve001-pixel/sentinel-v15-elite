@@ -1615,6 +1615,9 @@ async def send_verification(request: Request):
     # NEVER logs in production — _IS_DEV is False unless VERIFUSE_ENV=development.
     if _IS_DEV and os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower() == "log":
         log.info("[DEV] Verification code for %s: %s", user["email"], code)
+        # print() goes directly to stdout → systemd journal (log.info is swallowed
+        # without a configured handler in uvicorn's log setup)
+        print(f"[DEV] Verification code for {user['email']}: {code}", flush=True)
 
     conn = _get_conn()
     try:
