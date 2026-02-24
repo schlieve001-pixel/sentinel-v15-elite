@@ -92,7 +92,7 @@ export default function Landing() {
           <div className="hero-stats">
             <div className="stat-block">
               <span className="stat-value">{stats.total_assets}</span>
-              <span className="stat-label">Total Assets Tracked</span>
+              <span className="stat-label">Active Pipeline</span>
             </div>
             <div className="stat-block">
               <span className="stat-value">{stats.attorney_ready}</span>

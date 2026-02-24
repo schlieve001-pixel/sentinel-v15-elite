@@ -1514,7 +1514,7 @@ async def get_stats():
 
         return {
             "total_leads": total,
-            "total_assets": total,
+            "total_assets": vp_row["cnt"],  # pipeline: GOLD/SILVER/BRONZE, surplus>100
             "attorney_ready": with_surplus,
             "with_surplus": with_surplus,
             "gold_grade": gold_count,

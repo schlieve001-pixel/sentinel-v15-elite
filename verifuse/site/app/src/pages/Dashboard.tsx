@@ -352,7 +352,7 @@ export default function Dashboard() {
         <div className="stats-row">
           <div className="stat-pill">
             <span className="stat-value">{stats.total_assets}</span>
-            <span className="stat-label">Verified Assets</span>
+            <span className="stat-label">Active Leads</span>
           </div>
           <div className="stat-pill">
             <span className="stat-value">{stats.gold_grade}</span>
