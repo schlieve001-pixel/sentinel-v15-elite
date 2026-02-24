@@ -402,15 +402,14 @@ class FullAsset(SafeAsset):
 
 
 class PreviewLead(BaseModel):
-    """Public preview — ZERO PII, ZERO internal IDs. Explicit SELECT (no SELECT *)."""
+    """Public preview — ZERO PII, ZERO internal IDs, ZERO exact amounts.
+    Returns only banded surplus to enforce the monetization wall.
+    """
     preview_key: str  # HMAC hash for React key ONLY — not usable for lookups
     county: Optional[str] = None
-    sale_date: Optional[str] = None  # YYYY-MM only (anti-triangulation)
+    sale_month: Optional[str] = None  # YYYY-MM only (anti-triangulation)
     data_grade: Optional[str] = None
-    confidence_score: Optional[float] = None
-    estimated_surplus: Optional[float] = None  # COALESCED + ROUND(x,2) — exact to the penny
-    restriction_status: Optional[str] = None
-    days_until_actionable: Optional[int] = None
+    surplus_band: Optional[str] = None  # Banded range — never exact amount
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -613,40 +612,43 @@ def _row_to_full(row: dict) -> dict:
     return safe
 
 
+def surplus_band(cents: int) -> str:
+    """Return human-readable surplus band for preview display. Never exposes exact amount."""
+    dollars = cents / 100
+    if dollars < 50_000:
+        return "0–50K"
+    if dollars < 150_000:
+        return "50K–150K"
+    if dollars < 500_000:
+        return "150K–500K"
+    return "500K+"
+
+
 def _row_to_preview(row: dict) -> dict:
-    """Convert a leads row to PreviewLead dict. ZERO PII, ZERO internal IDs."""
+    """Convert a leads row to PreviewLead dict.
+    ZERO PII, ZERO internal IDs, ZERO exact surplus amounts.
+    """
     county = row.get("county")
     sale_date_raw = row.get("sale_date")
     data_grade = row.get("data_grade")
-    confidence = _safe_float(row.get("confidence_score"))
-    surplus = _safe_float(row.get("estimated_surplus")) or 0.0
+    # Convert DB dollars (float) → cents for banding
+    surplus_dollars = _safe_float(row.get("estimated_surplus")) or 0.0
+    surplus_cents = int(round(surplus_dollars * 100))
 
-    # Truncate sale_date to YYYY-MM (anti-triangulation)
-    sale_date_display = (sale_date_raw or "")[:7] if sale_date_raw else None
+    # Truncate to YYYY-MM (anti-triangulation)
+    sale_month = (sale_date_raw or "")[:7] if sale_date_raw else None
 
     # HMAC preview_key — stable, id-only salt (24 hex chars)
     preview_key = _compute_preview_key(row)
     # Pop id so it's not in output
     row.pop("id", None)
 
-    # Compute status + days
-    status = _compute_status(row)
-    days_until_actionable = None
-    if sale_date_raw:
-        restriction_end = _compute_restriction_end(sale_date_raw)
-        if restriction_end:
-            today = datetime.now(timezone.utc).date()
-            days_until_actionable = max(0, (restriction_end - today).days) if restriction_end > today else 0
-
     return PreviewLead(
         preview_key=preview_key,
         county=county,
-        sale_date=sale_date_display,
+        sale_month=sale_month,
         data_grade=data_grade,
-        confidence_score=round(confidence, 2) if confidence else None,
-        estimated_surplus=round(surplus, 2),
-        restriction_status=status,
-        days_until_actionable=days_until_actionable,
+        surplus_band=surplus_band(surplus_cents),
     ).model_dump()
 
 

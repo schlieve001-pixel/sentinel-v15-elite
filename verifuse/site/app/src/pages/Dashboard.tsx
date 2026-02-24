@@ -123,24 +123,16 @@ function PreviewCard({ lead }: { lead: PreviewLead }) {
     <div className="lead-card preview-card">
       <div className="card-header">
         <span className="county-badge">{lead.county}</span>
-        {lead.restriction_status === "RESTRICTED" && lead.days_until_actionable != null && (
-          <span className="restriction-badge">
-            RESTRICTED — {lead.days_until_actionable} DAYS
-          </span>
-        )}
       </div>
-      <div className="card-value">
-        {formatCurrency(lead.estimated_surplus)}
+      <div className="card-value surplus-band-display">
+        {lead.surplus_band ?? "—"}
       </div>
       <div className="card-meta">
         <span className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`}>
           {lead.data_grade}
         </span>
-        <span className="confidence-pill">
-          {Math.round((lead.confidence_score || 0) * 100)}%
-        </span>
-        {lead.sale_date && (
-          <span className="sale-date-pill">Sale: {lead.sale_date}</span>
+        {lead.sale_month && (
+          <span className="sale-date-pill">Sale: {lead.sale_month}</span>
         )}
       </div>
       <div className="card-actions stacked">

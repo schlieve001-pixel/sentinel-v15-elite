@@ -106,12 +106,9 @@ export function verifyEmail(code: string): Promise<{ status: string }> {
 export interface PreviewLead {
   preview_key: string;
   county: string;
-  sale_date: string | null;
+  sale_month: string | null;
   data_grade: string;
-  confidence_score: number;
-  estimated_surplus: number;
-  restriction_status: "RESTRICTED" | "WATCHLIST" | "ACTIONABLE" | "EXPIRED" | "UNKNOWN";
-  days_until_actionable: number | null;
+  surplus_band: string | null;
 }
 
 export interface PreviewLeadsResponse {
