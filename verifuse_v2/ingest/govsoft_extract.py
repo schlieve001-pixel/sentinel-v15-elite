@@ -101,6 +101,29 @@ def _extract_dt_dd_pairs(soup) -> dict[str, str]:
     return pairs
 
 
+def _extract_td_input_pairs(soup) -> dict[str, str]:
+    """Extract label→value pairs from table rows where value is in a readonly input.
+
+    Handles Boulder's GovSoft wizard style:
+      <tr><td>Holder's Initial Bid:</td><td><input type="text" value="$348,211.21" readonly></td></tr>
+
+    Returns a flat dict of {label_text: input_value}.
+    """
+    pairs: dict[str, str] = {}
+    for row in soup.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            continue
+        label_cell = cells[0]
+        value_cell = cells[1]
+        inp = value_cell.find("input", {"type": "text"})
+        if inp and inp.get("value"):
+            label = label_cell.get_text(strip=True).rstrip(":")
+            if label:
+                pairs[label] = inp["value"]
+    return pairs
+
+
 def extract_sale_fields(gzip_html: bytes) -> dict:
     """Decompress gzipped HTML snapshot and extract sale financial fields.
 
@@ -121,9 +144,20 @@ def extract_sale_fields(gzip_html: bytes) -> dict:
     html = gzip.decompress(gzip_html).decode("utf-8", errors="replace")
     soup = BeautifulSoup(html, "lxml")
     pairs = _extract_dt_dd_pairs(soup)
+    # Merge table/input pairs (Boulder wizard style) — dl/dt/dd takes precedence
+    td_pairs = _extract_td_input_pairs(soup)
+    for k, v in td_pairs.items():
+        if k not in pairs:
+            pairs[k] = v
 
     # Exact GovSoft label matching — primary extraction path
-    successful_bid_text    = pairs.get("Successful Bid at Sale", "")
+    # "Successful Bid at Sale" = standard; "Holder's Initial Bid" = Boulder wizard
+    successful_bid_text = (
+        pairs.get("Successful Bid at Sale")
+        or pairs.get("Holder's Initial Bid")
+        or pairs.get("Initial Bid")
+        or ""
+    )
     total_indebtedness_text = pairs.get("Total Indebtedness", "")
 
     # Overbid: try exact label first, then OVERBID_RE scan across all labels

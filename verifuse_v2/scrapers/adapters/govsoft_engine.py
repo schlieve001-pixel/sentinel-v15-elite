@@ -58,7 +58,7 @@ SEL_RESULTS_TABLE = "table[id*='gv'], table[id*='SearchResults'], table[id*='Gri
 SEL_DOPOSTBACK    = "a[href*='__doPostBack']"
 SEL_ACCEPT_TERMS  = "input[id*='chk'][type='checkbox'], input[id*='Accept']"
 # GTS Jefferson: nav tabs use NavList_NavButton_* IDs; fallbacks for other counties
-SEL_NAV_TABS      = "a[id*='NavButton'], td.tab a, div.tab a, a[id*='tab'], a[id*='Tab']"
+SEL_NAV_TABS      = "a[id*='NavButton'], a[id*='SideBarButton'], td.tab a, div.tab a, a[id*='tab'], a[id*='Tab']"
 # GTS Jefferson: documents served via docviewer?fn=... relative links
 SEL_DOC_LINKS     = "a[href*='docviewer'], a[href*='.pdf'], a[href*='Document'], a[href*='ViewDoc']"
 
@@ -520,7 +520,7 @@ class GovSoftEngine:
         """
         # Step 1: Select ddStatus='Sold' to target sold/auctioned cases.
         dd_status_loc = page.locator(
-            "#MainContent_CustomContentPlaceHolder_ddStatus"
+            self._sel("dd_status", "[id$='ddStatus']")
         )
         if await dd_status_loc.count() > 0:
             await dd_status_loc.select_option("Sold")
@@ -537,11 +537,11 @@ class GovSoftEngine:
         # Step 2: Fill sold-date range fields (YYYY-MM-DD via _to_iso).
         sold_from_sel = self._sel(
             "sold_date_from",
-            "#MainContent_CustomContentPlaceHolder_txtSoldDate1",
+            "[id$='txtSoldDate1']",
         )
         sold_to_sel = self._sel(
             "sold_date_to",
-            "#MainContent_CustomContentPlaceHolder_txtSoldDate2",
+            "[id$='txtSoldDate2']",
         )
         from_loc = page.locator(sold_from_sel)
         to_loc = page.locator(sold_to_sel)
@@ -946,7 +946,7 @@ class GovSoftEngine:
                 # which excludes sold foreclosure cases. Must do this before filling the
                 # case-number field to prevent the UpdatePanel AJAX from resetting the input.
                 dd_status_loc = page.locator(
-                    "#MainContent_CustomContentPlaceHolder_ddStatus"
+                    self._sel("dd_status", "[id$='ddStatus']")
                 )
                 if await dd_status_loc.count() > 0:
                     await dd_status_loc.select_option("Sold")
@@ -966,11 +966,11 @@ class GovSoftEngine:
                     _five_yr_ago = (_dt.date.today().replace(year=_dt.date.today().year - 5)).isoformat()
                     for _date_sel, _date_val in [
                         (
-                            "#MainContent_CustomContentPlaceHolder_txtSoldDate1",
+                            self._sel("sold_date_from", "[id$='txtSoldDate1']"),
                             _five_yr_ago,
                         ),
                         (
-                            "#MainContent_CustomContentPlaceHolder_txtSoldDate2",
+                            self._sel("sold_date_to", "[id$='txtSoldDate2']"),
                             _today,
                         ),
                     ]:

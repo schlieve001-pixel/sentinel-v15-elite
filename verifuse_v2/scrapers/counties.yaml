@@ -56,12 +56,12 @@ counties:
     state: CO
     notes: "Clean GovSoft deployment. No CAPTCHA. Full document repository."
 
-  # ── Pattern A: GovSoft Standard — URL TBD ─────────────────────────────
-  # weld: GovSoft, 27K+ records, 30-day rolling window required, Overbid at Sale
-  # weld:
-  #   platform: govsoft
-  #   state: CO
-  #   notes: "URL TBD — confirm via weldgov.com. 27K records, strict date filters."
+  # ── Pattern A: GovSoft Standard — URL confirmed ────────────────────────
+  # weld: GovSoft at gts.weld.gov, 27K+ records, 30-day rolling window required
+  weld:
+    platform: govsoft
+    state: CO
+    notes: "27K+ records — use strict 30-day Sold Date Range filters. Full doc repo. Standard GovSoft IDs. URL: gts.weld.gov (redirected from weld.gov/…/Property-Foreclosure-Search)."
 
   # douglas: GovSoft (/gts/), Accept Terms gate required
   # douglas:
