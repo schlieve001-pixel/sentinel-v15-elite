@@ -384,19 +384,22 @@ def _upsert_lead(
     """
     conn.execute(
         """INSERT INTO leads
-               (id, county, case_number, overbid_amount, sale_date,
-                data_grade, processing_status, ingestion_source)
-           VALUES (?,?,?,?,?,?,?,'govsoft')
+               (id, county, case_number, overbid_amount, estimated_surplus, surplus_amount,
+                sale_date, data_grade, processing_status, ingestion_source)
+           VALUES (?,?,?,?,?,?,?,?,?,'govsoft')
            ON CONFLICT(county, case_number) DO UPDATE SET
-               data_grade      = excluded.data_grade,
+               data_grade        = excluded.data_grade,
                processing_status = excluded.processing_status,
-               overbid_amount  = COALESCE(excluded.overbid_amount, leads.overbid_amount),
-               sale_date       = COALESCE(excluded.sale_date, leads.sale_date),
-               ingestion_source = 'govsoft'
+               overbid_amount    = COALESCE(excluded.overbid_amount, leads.overbid_amount),
+               estimated_surplus = COALESCE(excluded.estimated_surplus, leads.estimated_surplus),
+               surplus_amount    = COALESCE(excluded.surplus_amount, leads.surplus_amount),
+               sale_date         = COALESCE(excluded.sale_date, leads.sale_date),
+               ingestion_source  = 'govsoft'
         """,
         [
             str(uuid4()), county, case_number,
-            overbid_amount, sale_date, data_grade, processing_status,
+            overbid_amount, overbid_amount, overbid_amount,
+            sale_date, data_grade, processing_status,
         ],
     )
 

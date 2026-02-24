@@ -556,6 +556,18 @@ def _write_results(
     if "overbid_amount" in leads_cols and overbid_amount is not None:
         leads_updates.append("overbid_amount = ?")
         leads_params.append(overbid_amount)
+    if "estimated_surplus" in leads_cols and overbid_amount is not None:
+        leads_updates.append("estimated_surplus = ?")
+        leads_params.append(overbid_amount)
+    if "surplus_amount" in leads_cols and overbid_amount is not None:
+        leads_updates.append("surplus_amount = ?")
+        leads_params.append(overbid_amount)
+    if "winning_bid" in leads_cols and successful_bid_cents > 0:
+        leads_updates.append("winning_bid = ?")
+        leads_params.append(round(successful_bid_cents / 100, 2))
+    if "total_debt" in leads_cols and total_indebtedness_cents > 0:
+        leads_updates.append("total_debt = ?")
+        leads_params.append(round(total_indebtedness_cents / 100, 2))
 
     # Compute derived audit fields
     computed_surplus = successful_bid_cents - total_indebtedness_cents

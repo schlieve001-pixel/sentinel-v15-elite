@@ -483,7 +483,7 @@ def _round_surplus(amount: Optional[float]) -> Optional[float]:
 
 def is_preview_eligible(row: dict) -> bool:
     """Single source of truth for preview eligibility. Uses only raw DB fields."""
-    surplus = _safe_float(row.get("estimated_surplus")) or _safe_float(row.get("surplus_amount")) or 0.0
+    surplus = _safe_float(row.get("estimated_surplus")) or _safe_float(row.get("surplus_amount")) or _safe_float(row.get("overbid_amount")) or 0.0
     if surplus <= 100:
         return False
     grade = (row.get("data_grade") or "").upper()
@@ -515,7 +515,7 @@ def _compute_preview_key(row: dict) -> str:
 
 def _row_to_safe(row: dict) -> dict:
     """Convert a leads row to SafeAsset dict. NULL-safe."""
-    surplus = _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus")) or 0.0
+    surplus = _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus")) or _safe_float(row.get("overbid_amount")) or 0.0
     bid = _safe_float(row.get("winning_bid")) or 0.0
     debt = _safe_float(row.get("total_debt")) or 0.0
     conf = _safe_float(row.get("confidence_score")) or 0.0
@@ -598,7 +598,15 @@ def _row_to_safe(row: dict) -> dict:
 def _row_to_full(row: dict) -> dict:
     """Convert a leads row to FullAsset dict. NULL-safe."""
     safe = _row_to_safe(row)
+    # Exact (unrounded) surplus for authenticated users — override the $100-rounded preview value
+    exact_surplus = (
+        _safe_float(row.get("surplus_amount"))
+        or _safe_float(row.get("estimated_surplus"))
+        or _safe_float(row.get("overbid_amount"))
+        or 0.0
+    )
     safe.update({
+        "estimated_surplus": round(exact_surplus, 2),
         "owner_name": row.get("owner_name"),
         "property_address": row.get("property_address"),
         "winning_bid": _safe_float(row.get("winning_bid")),
@@ -632,7 +640,7 @@ def _row_to_preview(row: dict) -> dict:
     sale_date_raw = row.get("sale_date")
     data_grade = row.get("data_grade")
     # Convert DB dollars (float) → cents for banding
-    surplus_dollars = _safe_float(row.get("estimated_surplus")) or 0.0
+    surplus_dollars = _safe_float(row.get("estimated_surplus")) or _safe_float(row.get("surplus_amount")) or _safe_float(row.get("overbid_amount")) or 0.0
     surplus_cents = int(round(surplus_dollars * 100))
 
     # Truncate to YYYY-MM (anti-triangulation)
@@ -877,7 +885,7 @@ async def startup():
     statute_status_expr = "statute_window_status" if "statute_window_status" in _LEADS_COLUMNS else "NULL AS statute_window_status"
     _PREVIEW_SELECT = (
         f"SELECT id, county, sale_date, data_grade, confidence_score, "
-        f"ROUND(COALESCE(estimated_surplus, surplus_amount, 0), 2) as estimated_surplus, "
+        f"ROUND(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0), 2) as estimated_surplus, "
         f"{claim_deadline_expr}, {statute_status_expr} "
         f"FROM leads"
     )
@@ -900,9 +908,9 @@ async def startup():
         conn = _get_conn()
         try:
             q = ("SELECT id, "
-                 "ROUND(COALESCE(estimated_surplus, surplus_amount, 0), 2) as estimated_surplus, "
+                 "ROUND(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0), 2) as estimated_surplus, "
                  f"data_grade, {claim_deadline_expr} "
-                 "FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 100 "
+                 "FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 100 "
                  f"AND data_grade != 'REJECT' {_EXPIRED_FILTER}")
             for row in conn.execute(q).fetchall():
                 r = dict(row)
@@ -988,7 +996,7 @@ async def health():
         scoreboard_rows = conn.execute("""
             SELECT data_grade,
                    COUNT(*) as lead_count,
-                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as verified_surplus
+                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as verified_surplus
             FROM leads
             GROUP BY data_grade
             ORDER BY verified_surplus DESC
@@ -1013,7 +1021,7 @@ async def health():
 
         # Verified total
         verified_total = conn.execute(
-            "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0"
+            "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0"
         ).fetchone()[0]
 
     finally:
@@ -1062,7 +1070,7 @@ async def preview_leads(
     def _run():
         conn = _thread_conn()
         try:
-            where = " WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 100"
+            where = " WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 100"
             where += " AND data_grade != 'REJECT'"
             where += _EXPIRED_FILTER
             params: list = []
@@ -1079,7 +1087,7 @@ async def preview_leads(
             total = conn.execute(count_q, params).fetchone()[0]
 
             # Data query
-            order = " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC"
+            order = " ORDER BY COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) DESC, sale_date DESC, county ASC, id ASC"
             data_q = f"{_PREVIEW_SELECT}{where}{order} LIMIT ? OFFSET ?"
             rows = conn.execute(data_q, params + [limit, offset]).fetchall()
         finally:
@@ -1134,14 +1142,14 @@ async def get_leads(
             params: list = []
 
             if not include_zombies:
-                where += " AND COALESCE(estimated_surplus, surplus_amount, 0) > 100"
+                where += " AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 100"
             if not include_reject or not is_admin_user:
                 where += " AND data_grade != 'REJECT'"
             if county:
                 where += " AND county = ?"
                 params.append(county)
             if min_surplus > 0:
-                where += " AND COALESCE(estimated_surplus, surplus_amount, 0) >= ?"
+                where += " AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) >= ?"
                 params.append(min_surplus)
             if grade:
                 where += " AND data_grade = ?"
@@ -1151,7 +1159,7 @@ async def get_leads(
             total = conn.execute(f"SELECT COUNT(*) FROM leads{where}", params).fetchone()[0]
 
             query = f"SELECT *, {_claim_deadline_expr} FROM leads{where}"
-            query += " ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC, sale_date DESC, county ASC, id ASC LIMIT ? OFFSET ?"
+            query += " ORDER BY COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) DESC, sale_date DESC, county ASC, id ASC LIMIT ? OFFSET ?"
             params.extend([limit, offset])
 
             rows = conn.execute(query, params).fetchall()
@@ -1174,6 +1182,15 @@ async def get_leads(
                     safe = _row_to_safe(r)
                     is_unlocked = r["id"] in unlocked_ids
                     safe["unlocked_by_me"] = is_unlocked
+                    # Exact cents for admins and unlocked leads — override the $100-rounded preview value
+                    if is_unlocked or is_eff_admin:
+                        exact = (
+                            _safe_float(r.get("surplus_amount"))
+                            or _safe_float(r.get("estimated_surplus"))
+                            or _safe_float(r.get("overbid_amount"))
+                            or 0.0
+                        )
+                        safe["estimated_surplus"] = round(exact, 2)
                     # Mask PII for non-unlocked, non-admin users
                     if not is_unlocked and not is_eff_admin:
                         safe["case_number"] = None
@@ -1460,36 +1477,36 @@ async def get_stats():
         try:
             total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
             with_surplus = conn.execute(
-                "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 1000"
+                "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 1000"
             ).fetchone()[0]
             gold_count = conn.execute(
                 "SELECT COUNT(*) FROM leads WHERE data_grade = 'GOLD'"
             ).fetchone()[0]
             total_surplus = conn.execute(
-                "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0"
+                "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0"
             ).fetchone()[0]
             counties = conn.execute("""
                 SELECT county, COUNT(*) as cnt,
-                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
+                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total
                 FROM leads
-                WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0
+                WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0
                 GROUP BY county ORDER BY total DESC
             """).fetchall()
 
             # Verified pipeline: GOLD+SILVER+BRONZE, surplus > 100, not expired
             vp_row = conn.execute(f"""
                 SELECT COUNT(*) as cnt,
-                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
+                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total
                 FROM leads
                 WHERE data_grade IN ('GOLD', 'SILVER', 'BRONZE')
-                  AND COALESCE(estimated_surplus, surplus_amount, 0) > 100
+                  AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 100
                   {_EXPIRED_FILTER}
             """).fetchone()
 
             # Total raw volume: ALL leads
             raw_row = conn.execute("""
                 SELECT COUNT(*) as cnt,
-                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total
+                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total
                 FROM leads
             """).fetchone()
         finally:
@@ -2372,11 +2389,11 @@ async def get_counties():
     try:
         rows = conn.execute("""
             SELECT county, COUNT(*) as lead_count,
-                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as total_surplus,
-                   COALESCE(AVG(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as avg_surplus,
-                   COALESCE(MAX(COALESCE(estimated_surplus, surplus_amount, 0)), 0) as max_surplus
+                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total_surplus,
+                   COALESCE(AVG(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as avg_surplus,
+                   COALESCE(MAX(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as max_surplus
             FROM leads
-            WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0
+            WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0
             GROUP BY county ORDER BY total_surplus DESC
         """).fetchall()
     finally:
@@ -2397,7 +2414,7 @@ async def inventory_health():
     try:
         total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
         active = conn.execute(
-            "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 100 "
+            "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 100 "
             f"AND data_grade != 'REJECT' {_EXPIRED_FILTER}"
         ).fetchone()[0]
         new_7d = conn.execute(
@@ -2405,7 +2422,7 @@ async def inventory_health():
         ).fetchone()[0]
         # Completeness: leads with surplus > 0 and non-null owner_name
         complete = conn.execute(
-            "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, 0) > 0 "
+            "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0 "
             "AND owner_name IS NOT NULL AND TRIM(owner_name) != ''"
         ).fetchone()[0]
         completeness_pct = round(complete / total * 100, 1) if total > 0 else 0
@@ -2431,7 +2448,7 @@ async def admin_leads(
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT * FROM leads ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC LIMIT ?", [limit]
+            "SELECT * FROM leads ORDER BY COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) DESC LIMIT ?", [limit]
         ).fetchall()
     finally:
         conn.close()
@@ -2739,7 +2756,7 @@ async def get_sample_dossier(preview_key: str, request: Request):
     try:
         row = conn.execute(
             f"SELECT county, sale_date, data_grade, confidence_score, "
-            f"ROUND(COALESCE(estimated_surplus, surplus_amount, 0), 2) as estimated_surplus, "
+            f"ROUND(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0), 2) as estimated_surplus, "
             f"{_claim_deadline_expr} "
             f"FROM leads WHERE id = ?", [lead_id]
         ).fetchone()
@@ -2871,7 +2888,7 @@ async def get_attorney_ready_leads(
         rows = conn.execute("""
             SELECT * FROM leads
             WHERE attorney_packet_ready = 1
-            ORDER BY COALESCE(estimated_surplus, surplus_amount, 0) DESC
+            ORDER BY COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) DESC
             LIMIT ? OFFSET ?
         """, [limit, offset]).fetchall()
     finally:
