@@ -78,6 +78,11 @@ if not _PREVIEW_HMAC_SECRET:
 
 log = logging.getLogger(__name__)
 
+# ── Dev environment flag (NEVER true in production) ──────────────────
+# Set VERIFUSE_ENV=development in .env to enable dev-only bypasses.
+# Production must not set this variable (defaults to non-development).
+_IS_DEV = os.environ.get("VERIFUSE_ENV", "production").lower() == "development"
+
 # ── Pricing & entitlements (canonical source) ─────────────────────────
 from verifuse_v2.server.pricing import (
     FOUNDERS_MAX_SLOTS,
@@ -722,7 +727,15 @@ def _require_admin_or_api_key(request: Request) -> None:
 
 
 def _check_email_verified(user: dict, request: Request = None) -> None:
-    """Check email verification. Raises 403 if not verified and not admin."""
+    """Check email verification. Raises 403 if not verified and not admin.
+
+    DEV-ONLY BYPASS: In development (VERIFUSE_ENV=development), admin and
+    sovereign roles are allowed through without email verification so that
+    local testing is not blocked by SMTP. This bypass is compile-time gated
+    by _IS_DEV — it is physically unreachable in production.
+    """
+    if _IS_DEV and user.get("role") in ("admin", "sovereign"):
+        return
     if not user.get("email_verified") and not _effective_admin(user, request):
         raise HTTPException(
             status_code=403,
@@ -1595,6 +1608,11 @@ async def send_verification(request: Request):
 
     code = "".join(random.choices(string.digits, k=6))
     now = datetime.now(timezone.utc).isoformat()
+
+    # DEV-ONLY: log the code when SMTP is not configured (email mode = log).
+    # NEVER logs in production — _IS_DEV is False unless VERIFUSE_ENV=development.
+    if _IS_DEV and os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower() == "log":
+        log.info("[DEV] Verification code for %s: %s", user["email"], code)
 
     conn = _get_conn()
     try:
