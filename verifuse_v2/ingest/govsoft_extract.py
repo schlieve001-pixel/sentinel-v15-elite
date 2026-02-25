@@ -370,9 +370,15 @@ def run_extraction(asset_id: str, conn=None) -> dict:
             """SELECT ed.id FROM evidence_documents ed
                WHERE ed.asset_id = ?
                  AND ed.doc_family = 'OB'
+                 AND (UPPER(ed.filename) LIKE '%OBCLAIM%'
+                      OR UPPER(ed.filename) LIKE '%OBCKREQ%'
+                      OR UPPER(ed.filename) LIKE '%CKREQ%')
                LIMIT 1""",
             [asset_id],
         ).fetchone()
+        # CERTQH (Certificate of Qualified Holder) is present in ALL sold cases
+        # and is NOT an overbid voucher. Only OBCLAIM/OBCKREQ/CKREQ are true
+        # overbid vouchers that require Gate 5 OCR confirmation.
         has_voucher_doc = ob_doc is not None
         if ob_doc:
             voucher_doc_id = ob_doc["id"]

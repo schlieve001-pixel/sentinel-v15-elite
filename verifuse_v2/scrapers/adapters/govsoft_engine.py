@@ -150,7 +150,10 @@ def _doc_family_from_filename(filename: str) -> str:
     if "OBCLAIM" in upper or "OBCKREQ" in upper or "CKREQ" in upper:
         return "OB"
     if "CERTQH" in upper:
-        return "OB"  # Certificate of Qualified Holder — overbid related
+        return "OB"  # Certificate of Qualified Holder. Stored as OB (DB constraint).
+        # NOT a true overbid voucher — present in ALL sold cases.
+        # govsoft_extract.py has_voucher_doc query filters by OBCLAIM/OBCKREQ/CKREQ
+        # filename to exclude CERTQH from Gate 5 voucher checks.
     if "BID" in upper:
         return "BID"
     if "COP" in upper:
@@ -757,6 +760,12 @@ class GovSoftEngine:
                     if not href or href.startswith("javascript:") or href.startswith("mailto:"):
                         continue
                     if href in seen_hrefs:
+                        continue
+                    # Skip .doc files — docviewer?fn=*.doc renders inline in IE/Edge only;
+                    # Playwright can't trigger a download from the docviewer iframe.
+                    # These are legacy Word docs; PDF equivalents are always also present.
+                    if href.lower().endswith(".doc") or ".doc&" in href.lower() or ".doc+" in href.lower():
+                        log.debug("Skipping .doc file (non-downloadable via browser): %s", href)
                         continue
                     seen_hrefs.add(href)
                     docs_to_download.append({"href": href, "raw_name": raw_name or os.path.basename(href)})

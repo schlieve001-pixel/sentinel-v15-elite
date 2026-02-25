@@ -243,9 +243,12 @@ export default function Landing() {
           provide legal advice, does not act as a finder under C.R.S. §
           38-13-1301, and does not claim any interest in surplus funds. Users are
           responsible for ensuring compliance with all applicable state and
-          federal regulations, including the 6-month post-sale contact
-          restriction under C.R.S. § 38-38-111(5). Use of this platform
-          constitutes acceptance of our Terms of Service.
+          federal regulations, including: the 6-month post-sale contact
+          restriction under C.R.S. § 38-38-111(5); the 24-month lockout on
+          finder agreements after transfer to the State Treasurer under C.R.S. §
+          38-13-1304; and the 10% maximum finder fee cap under C.R.S. §
+          38-13-1304(1)(b)(IV) as amended by HB25-1224 (eff. June 4, 2025).
+          Use of this platform constitutes acceptance of our Terms of Service.
         </p>
       </section>
 
