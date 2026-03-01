@@ -37,8 +37,8 @@ _stripe_mode = (os.getenv("STRIPE_MODE") or "test").lower()
 _price_prefix = "STRIPE_LIVE_PRICE_" if _stripe_mode == "live" else "STRIPE_TEST_PRICE_"
 
 TIER_TO_PRICE: dict[str, str] = {
-    "scout": os.getenv(f"{_price_prefix}SCOUT", "") or os.getenv("STRIPE_PRICE_SCOUT", ""),
-    "operator": os.getenv(f"{_price_prefix}OPERATOR", "") or os.getenv("STRIPE_PRICE_OPERATOR", ""),
+    "associate": os.getenv(f"{_price_prefix}ASSOCIATE", "") or os.getenv("STRIPE_PRICE_ASSOCIATE", ""),
+    "partner":   os.getenv(f"{_price_prefix}PARTNER", "")   or os.getenv("STRIPE_PRICE_PARTNER", ""),
     "sovereign": os.getenv(f"{_price_prefix}SOVEREIGN", "") or os.getenv("STRIPE_PRICE_SOVEREIGN", ""),
 }
 

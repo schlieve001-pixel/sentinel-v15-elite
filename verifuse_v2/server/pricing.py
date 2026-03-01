@@ -24,6 +24,9 @@ TIERS: dict[str, dict] = {
         "daily_limit": None,
         "sessions": 1,
         "label": "Associate",
+        "rollover_days": 30,
+        "max_bank_multiplier": 1.5,    # max 45 banked
+        "access": ["foreclosure_overbid"],
     },
     "partner": {
         "monthly_price_cents": 39900,  # $399/month
@@ -31,23 +34,77 @@ TIERS: dict[str, dict] = {
         "daily_limit": None,
         "sessions": 2,
         "label": "Partner",
+        "rollover_days": 60,
+        "max_bank_multiplier": 1.5,    # max 150 banked
+        "access": ["foreclosure_overbid", "tax_lien", "tax_deed", "hoa"],
     },
     "sovereign": {
         "monthly_price_cents": 89900,  # $899/month
-        "credits": 350,
-        "daily_limit": None,           # Unlimited
+        "credits": 250,
+        "daily_limit": None,
         "sessions": 5,
         "label": "Sovereign",
+        "rollover_days": 90,
+        "max_bank_multiplier": 1.5,    # max 375 banked
+        "access": ["foreclosure_overbid", "tax_lien", "tax_deed", "hoa", "unclaimed_property", "estate_cases", "api", "county_reports"],
     },
 }
+
+# ── Rollover configuration (per-tier, also available as flat dicts) ───
+
+ROLLOVER_DAYS: dict[str, int] = {
+    "associate": 30,
+    "partner":   60,
+    "sovereign": 90,
+}
+
+MAX_BANK_MULTIPLIER: dict[str, float] = {
+    "associate": 1.5,   # 30 credits/mo * 1.5 = max 45 banked
+    "partner":   1.5,   # 100 credits/mo * 1.5 = max 150 banked
+    "sovereign": 1.5,   # 250 credits/mo * 1.5 = max 375 banked
+}
+
+# ── Credit costs (universal currency) ────────────────────────────────
+#
+# 1 credit  = 1 standard lead unlock
+# 3 credits = 1 Filing Pack (motion template + owner address + lien summary + evidence bundle)
+# 5 credits = 1 Premium Dossier (Filing Pack + heir notification letter)
+# 2 credits = 1 Tax Lien Report (per county, per month)
+
+CREDIT_COSTS: dict[str, int] = {
+    "standard_unlock":   1,
+    "filing_pack":       3,
+    "premium_dossier":   5,
+    "tax_lien_report":   2,
+}
+
+# ── One-time credit packs ─────────────────────────────────────────────
 
 STARTER_PACK: dict = {
     "credits": 10,
     "price_cents": 4900,    # $49.00 one-time
     "expiry_days": 90,
+    "label": "Starter Pack",
+}
+
+INVESTIGATION_PACK: dict = {
+    "credits": 25,
+    "price_cents": 9900,    # $99.00 one-time
+    "expiry_days": 90,
+    "label": "Investigation Pack",
+}
+
+# ── Add-on cash prices ────────────────────────────────────────────────
+
+ADD_ON_CASH_PRICES: dict[str, int] = {
+    "filing_pack":       4900,   # $49/case
+    "premium_dossier":   7900,   # $79/case
+    "tax_lien_report":   2900,   # $29/county/month
+    "bulk_co_report":    29900,  # $299: all 64 counties, one surplus type, one month
 }
 
 FOUNDERS_MAX_SLOTS: int = 100
+FOUNDERS_FREE_TRIAL_SLOTS: int = 10   # First 10 get 3-month Partner free trial
 
 ROLES: list[str] = ["public", "pending", "approved_attorney", "admin"]
 
@@ -75,17 +132,29 @@ def get_credit_cost(opportunity_score: float) -> int:
 
 def get_monthly_credits(tier: str) -> int:
     """Credits granted per billing cycle for a tier."""
-    return TIERS.get(tier, TIERS["scout"])["credits"]
+    return TIERS.get(tier, TIERS["associate"])["credits"]
 
 
 def get_daily_limit(tier: str) -> Optional[int]:
     """Daily API lead view limit. None = unlimited."""
-    return TIERS.get(tier, TIERS["scout"])["daily_limit"]
+    return TIERS.get(tier, TIERS["associate"])["daily_limit"]
 
 
 def get_session_limit(tier: str) -> int:
     """Concurrent session limit."""
-    return TIERS.get(tier, TIERS["scout"])["sessions"]
+    return TIERS.get(tier, TIERS["associate"])["sessions"]
+
+
+def get_rollover_days(tier: str) -> int:
+    """Credit rollover window in days for a tier."""
+    return ROLLOVER_DAYS.get(tier, 30)
+
+
+def get_max_bank(tier: str) -> int:
+    """Maximum credits that can be banked (carried over) for a tier."""
+    monthly = get_monthly_credits(tier)
+    multiplier = MAX_BANK_MULTIPLIER.get(tier, 1.5)
+    return int(monthly * multiplier)
 
 
 # ── Stripe price map builder ──────────────────────────────────────────
@@ -94,19 +163,21 @@ def build_price_map(mode: str) -> dict[str, dict]:
     """Build Stripe price_id → {tier, monthly_credits, kind} map.
 
     Reads env vars:
-      STRIPE_TEST_PRICE_SCOUT / STRIPE_LIVE_PRICE_SCOUT
-      STRIPE_TEST_PRICE_OPERATOR / STRIPE_LIVE_PRICE_OPERATOR
+      STRIPE_TEST_PRICE_ASSOCIATE / STRIPE_LIVE_PRICE_ASSOCIATE
+      STRIPE_TEST_PRICE_PARTNER   / STRIPE_LIVE_PRICE_PARTNER
       STRIPE_TEST_PRICE_SOVEREIGN / STRIPE_LIVE_PRICE_SOVEREIGN
-      STRIPE_TEST_PRICE_STARTER / STRIPE_LIVE_PRICE_STARTER
+      STRIPE_TEST_PRICE_STARTER   / STRIPE_LIVE_PRICE_STARTER
+      STRIPE_TEST_PRICE_INVESTIGATION / STRIPE_LIVE_PRICE_INVESTIGATION
 
     Returns empty dict if no env vars are configured (dev mode).
     """
     prefix = "STRIPE_LIVE_PRICE_" if mode == "live" else "STRIPE_TEST_PRICE_"
     definitions = {
-        "ASSOCIATE": {"tier": "associate", "monthly_credits": get_monthly_credits("associate"), "kind": "subscription"},
-        "PARTNER":   {"tier": "partner",   "monthly_credits": get_monthly_credits("partner"),   "kind": "subscription"},
-        "SOVEREIGN": {"tier": "sovereign", "monthly_credits": get_monthly_credits("sovereign"), "kind": "subscription"},
-        "STARTER":   {"tier": "starter",   "monthly_credits": STARTER_PACK["credits"],          "kind": "starter"},
+        "ASSOCIATE":     {"tier": "associate", "monthly_credits": get_monthly_credits("associate"), "kind": "subscription"},
+        "PARTNER":       {"tier": "partner",   "monthly_credits": get_monthly_credits("partner"),   "kind": "subscription"},
+        "SOVEREIGN":     {"tier": "sovereign", "monthly_credits": get_monthly_credits("sovereign"), "kind": "subscription"},
+        "STARTER":       {"tier": "starter",   "monthly_credits": STARTER_PACK["credits"],          "kind": "starter"},
+        "INVESTIGATION": {"tier": "none",      "monthly_credits": INVESTIGATION_PACK["credits"],    "kind": "investigation"},
     }
     price_map: dict[str, dict] = {}
     for name, info in definitions.items():

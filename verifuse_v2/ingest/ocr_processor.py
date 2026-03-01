@@ -338,6 +338,132 @@ def _convert_tiff_to_pdf(tiff_path: Path) -> Path | None:
         return None
 
 
+# ── Vertex AI Gemini 1.5 Flash extraction (primary cloud OCR) ────────────────
+
+def extract_with_gemini(file_path: Path, content_type: str) -> list[dict]:
+    """Extract labeled financial fields via Vertex AI Gemini 1.5 Flash.
+
+    Graceful degradation — returns [] without crashing when:
+      - VERTEX_AI_PROJECT not set (falls through to FORM_PARSER)
+      - google-cloud-aiplatform not installed
+      - Any API error (quota, network failure, malformed response)
+
+    Required env vars:
+      VERTEX_AI_PROJECT  — GCP project ID (e.g. canvas-sum-481614-f6)
+      GEMINI_MODEL       — model ID (default: gemini-1.5-flash-002)
+      GOOGLE_APPLICATION_CREDENTIALS — path to service account JSON
+
+    Force JSON output with strict schema:
+      { overbid_amount: str|null, successful_bid: str|null, total_indebtedness: str|null }
+
+    Returns list of field dicts compatible with _insert_field_evidence().
+    page_number is always 1 (Gemini processes whole document, not per-page).
+    """
+    project_id = os.getenv("VERTEX_AI_PROJECT", "")
+    model_id = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-002")
+    location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
+
+    if not project_id:
+        log.debug(
+            "[gemini] VERTEX_AI_PROJECT not set — skipping Gemini OCR"
+        )
+        return []
+
+    try:
+        import vertexai  # type: ignore[import]
+        from vertexai.generative_models import GenerativeModel, Part, GenerationConfig  # type: ignore[import]
+    except ImportError:
+        log.warning(
+            "[gemini] google-cloud-aiplatform not installed — skipping Gemini OCR. "
+            "pip install google-cloud-aiplatform"
+        )
+        return []
+
+    try:
+        vertexai.init(project=project_id, location=location)
+        model = GenerativeModel(model_id)
+
+        file_bytes = file_path.read_bytes()
+
+        # Determine MIME type for inline data
+        mime = content_type or "application/pdf"
+
+        prompt = (
+            "You are a financial document extractor for Colorado foreclosure surplus cases. "
+            "Extract exactly these three fields from the document and return ONLY a JSON object:\n"
+            '  "overbid_amount"     — the overbid/surplus/excess proceeds amount (e.g. "$12,345.67")\n'
+            '  "successful_bid"     — the winning bid amount at sale\n'
+            '  "total_indebtedness" — total debt / total indebtedness / judgment amount\n\n'
+            "Return null for any field not found. Return only the JSON, no other text.\n"
+            "Example: "
+            '{"overbid_amount": "$12,345.67", "successful_bid": "$210,000.00", "total_indebtedness": "$197,654.33"}'
+        )
+
+        doc_part = Part.from_data(data=file_bytes, mime_type=mime)
+        generation_config = GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.0,
+            max_output_tokens=256,
+        )
+
+        response = model.generate_content(
+            [doc_part, prompt],
+            generation_config=generation_config,
+        )
+
+        import json as _json
+        import re as _re
+        raw_text = response.text.strip()
+
+        # Strip markdown fences the model may include despite response_mime_type
+        if raw_text.startswith("```"):
+            raw_text = _re.sub(r"^```(?:json)?\s*", "", raw_text)
+            raw_text = _re.sub(r"\s*```\s*$", "", raw_text).strip()
+
+        extracted = _json.loads(raw_text)
+
+    except Exception as exc:
+        log.warning("[gemini] Gemini API error for %s: %s", file_path.name, exc)
+        return []
+
+    # Map extracted JSON → canonical field dicts
+    # NOTE: confidence is set to 0.0 — Gemini does not return per-field confidence scores.
+    # ocr_source="gemini_unverified" signals that these values require cross-validation
+    # (pdfplumber parse or human review) before they can promote a lead to GOLD.
+    FIELD_MAP = {
+        "overbid_amount":     _FIELD_OVERBID,
+        "successful_bid":     _FIELD_BID,
+        "total_indebtedness": _FIELD_INDEBTEDNESS,
+    }
+
+    fields: list[dict] = []
+    for json_key, canonical_name in FIELD_MAP.items():
+        value = extracted.get(json_key)
+        if not value:
+            continue
+        # Verify it looks like a currency string
+        if not _CURRENCY_RE.search(str(value)):
+            log.debug("[gemini] Skipping non-currency value for %s: %r", json_key, value)
+            continue
+        fields.append({
+            "field_name":      canonical_name,
+            "extracted_value": str(value).strip(),
+            "confidence":      0.0,   # Model does not return confidence — do not invent one
+            "norm_x1":         0.0,
+            "norm_y1":         0.0,
+            "norm_x2":         1.0,
+            "norm_y2":         1.0,
+            "page_number":     1,
+            "ocr_source":      "gemini_unverified",  # Requires validation before GOLD promotion
+        })
+
+    log.info(
+        "[gemini] %s: %d fields extracted (model=%s)",
+        file_path.name, len(fields), model_id,
+    )
+    return fields
+
+
 # ── Google Document AI FORM_PARSER fallback ───────────────────────────────────
 
 def extract_with_document_ai(file_path: Path, content_type: str) -> list[dict]:
@@ -568,19 +694,25 @@ def process_doc(doc_row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
 
         if use_document_ai:
             log.info(
-                "[ocr] %s: Document AI fallback "
+                "[ocr] %s: cloud OCR fallback "
                 "(has_text_layer=%s, plumber_fields=%d, all_high_conf=%s)",
                 file_path.name, has_text_layer, len(plumber_fields), all_high_confidence,
             )
-            # TIFF → send original to Document AI; PDF → send the plumber path
-            dai_path = file_path if is_tiff else plumber_path
-            dai_fields = extract_with_document_ai(dai_path, content_type)
+            # TIFF → send original; PDF → send the plumber path
+            cloud_path = file_path if is_tiff else plumber_path
 
-            # Prefer Document AI; fall back to pdfplumber if DocAI gracefully degraded
-            final_fields = dai_fields if dai_fields else plumber_fields
+            # Try Gemini 1.5 Flash first (VERTEX_AI_PROJECT env var required)
+            cloud_fields = extract_with_gemini(cloud_path, content_type)
+
+            # Fallback to Document AI FORM_PARSER if Gemini not configured or failed
+            if not cloud_fields:
+                cloud_fields = extract_with_document_ai(cloud_path, content_type)
+
+            # Prefer cloud OCR; fall back to pdfplumber if cloud gracefully degraded
+            final_fields = cloud_fields if cloud_fields else plumber_fields
             if not final_fields:
                 result["notes"] = (
-                    "Document AI unavailable (no creds/config); "
+                    "Cloud OCR unavailable (no Vertex AI or Document AI creds/config); "
                     "no text layer — 0 fields extracted"
                 )
         else:

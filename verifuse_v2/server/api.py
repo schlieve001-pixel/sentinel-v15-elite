@@ -130,6 +130,14 @@ DB_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="vf-db",
 )
 
+# ── ThreadPoolExecutor for CPU-bound PDF generation ──────────────────
+# Separate from DB_EXECUTOR so PDF renders never block DB threads.
+
+PDF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=max(2, (os.cpu_count() or 2) // 2),
+    thread_name_prefix="vf-pdf",
+)
+
 
 def _thread_conn() -> sqlite3.Connection:
     """Open a hardened SQLite connection for use inside DB_EXECUTOR threads."""
@@ -977,6 +985,7 @@ async def startup():
 @app.on_event("shutdown")
 async def _shutdown_db_executor():
     DB_EXECUTOR.shutdown(wait=True)
+    PDF_EXECUTOR.shutdown(wait=False)  # PDF renders are non-critical at exit
 
 
 # ── Health ──────────────────────────────────────────────────────────
@@ -1542,6 +1551,23 @@ async def get_stats():
                        COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total
                 FROM leads
             """).fetchone()
+
+            # Grade breakdown: SILVER, BRONZE, REJECT
+            silver_count = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE data_grade = 'SILVER'"
+            ).fetchone()[0]
+            bronze_count = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE data_grade = 'BRONZE'"
+            ).fetchone()[0]
+            reject_count = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE data_grade = 'REJECT'"
+            ).fetchone()[0]
+
+            # County list from county_profiles (active counties in platform)
+            county_rows = conn.execute(
+                "SELECT county FROM county_profiles ORDER BY county"
+            ).fetchall()
+            county_list = [r[0].title() for r in county_rows] if county_rows else []
         finally:
             conn.close()
 
@@ -1551,6 +1577,10 @@ async def get_stats():
             "attorney_ready": with_surplus,
             "with_surplus": with_surplus,
             "gold_grade": gold_count,
+            "silver_grade": silver_count,
+            "bronze_grade": bronze_count,
+            "reject_grade": reject_count,
+            "county_list": county_list,
             "total_claimable_surplus": round(total_surplus, 2),
             "counties": [dict(r) for r in counties],
             "verified_pipeline": vp_row["cnt"],
@@ -2475,13 +2505,31 @@ async def inventory_health():
 async def admin_leads(
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
+    grade: str = Query("", alias="grade"),
+    county: str = Query("", alias="county"),
+    surplus_stream: str = Query("", alias="surplus_stream"),
 ):
-    """Get all leads with raw data (admin only)."""
-    _require_api_key(request)
+    """Get all leads with raw data (admin only). Supports JWT admin or API key auth."""
+    _require_admin_or_api_key(request)
     conn = _get_conn()
     try:
+        filters = []
+        params: list = []
+        if grade:
+            filters.append("data_grade = ?")
+            params.append(grade.upper())
+        if county:
+            filters.append("lower(county) = lower(?)")
+            params.append(county)
+        if surplus_stream:
+            filters.append("surplus_stream = ?")
+            params.append(surplus_stream.upper())
+        where = ("WHERE " + " AND ".join(filters)) if filters else ""
+        params.append(limit)
         rows = conn.execute(
-            "SELECT * FROM leads ORDER BY COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) DESC LIMIT ?", [limit]
+            f"SELECT * FROM leads {where} "
+            "ORDER BY COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) DESC LIMIT ?",
+            params,
         ).fetchall()
     finally:
         conn.close()
@@ -2505,14 +2553,24 @@ async def admin_quarantine(request: Request):
 
 
 @app.get("/api/admin/users")
-async def admin_users(request: Request):
-    """Get all users (admin only)."""
-    _require_api_key(request)
+async def admin_users(
+    request: Request,
+    attorney_status: str = Query("", alias="attorney_status"),
+):
+    """Get all users (admin only). Supports JWT admin or API key auth."""
+    _require_admin_or_api_key(request)
     conn = _get_conn()
     try:
+        where = ""
+        params: list = []
+        if attorney_status:
+            where = "WHERE upper(attorney_status) = upper(?)"
+            params.append(attorney_status)
         rows = conn.execute(
-            "SELECT user_id, email, full_name, firm_name, tier, credits_remaining, "
-            "is_admin, is_active, email_verified, created_at, last_login_at FROM users"
+            f"SELECT user_id, email, full_name, firm_name, bar_number, bar_state, "
+            f"tier, credits_remaining, attorney_status, role, "
+            f"is_admin, is_active, email_verified, created_at, last_login_at FROM users {where}",
+            params,
         ).fetchall()
     finally:
         conn.close()
@@ -2557,6 +2615,40 @@ async def attorney_verify(request: Request):
     return {"ok": True, "attorney_status": "PENDING"}
 
 
+@app.get("/api/admin/attorney/lookup")
+async def admin_attorney_lookup(request: Request):
+    """Admin: look up any user's attorney status and bar number by email or user_id."""
+    admin = _require_user(request)
+    if not _is_admin(admin):
+        raise HTTPException(status_code=403, detail="Admin required.")
+    params = dict(request.query_params)
+    email = params.get("email", "").strip().lower()
+    user_id = params.get("user_id", "").strip()
+    if not email and not user_id:
+        raise HTTPException(status_code=400, detail="Provide ?email= or ?user_id=")
+    conn = _get_conn()
+    try:
+        if email:
+            row = conn.execute(
+                """SELECT user_id, email, full_name, firm_name, bar_number, bar_state,
+                          attorney_status, attorney_verified_at, role, tier, is_admin, is_active
+                   FROM users WHERE lower(email) = ?""",
+                [email],
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT user_id, email, full_name, firm_name, bar_number, bar_state,
+                          attorney_status, attorney_verified_at, role, tier, is_admin, is_active
+                   FROM users WHERE user_id = ?""",
+                [user_id],
+            ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return dict(row)
+
+
 @app.post("/api/admin/attorney/approve")
 async def admin_attorney_approve(request: Request):
     """Admin: approve attorney verification. Sets status to 'VERIFIED'."""
@@ -2584,6 +2676,35 @@ async def admin_attorney_approve(request: Request):
     finally:
         conn.close()
     return {"ok": True, "attorney_status": "VERIFIED"}
+
+
+@app.post("/api/admin/attorney/reject")
+async def admin_attorney_reject(request: Request):
+    """Admin: reject attorney verification. Sets status to 'REJECTED'."""
+    admin = _require_user(request)
+    if not _is_admin(admin):
+        raise HTTPException(status_code=403, detail="Admin only.")
+    body = await request.json()
+    user_id = body.get("user_id", "")
+    reason = body.get("reason", "")
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required.")
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET attorney_status = 'REJECTED', verified_attorney = 0 WHERE user_id = ?",
+            [user_id],
+        )
+        _audit_log(conn, user_id, "attorney_rejected", {
+            "rejected_by": admin["user_id"],
+            "reason": reason,
+        })
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "attorney_status": "REJECTED"}
 
 
 # ── Attorney Tool Endpoints ───────────────────────────────────────
@@ -3002,7 +3123,7 @@ async def list_asset_evidence(asset_id: str, request: Request):
     user = _get_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required.")
-    if user.get("role") not in ("approved_attorney", "admin"):
+    if user.get("role") not in ("approved_attorney", "admin") and not _effective_admin(user, request):
         raise HTTPException(status_code=403, detail="Attorney or admin role required.")
 
     conn = _get_conn()
@@ -3038,7 +3159,7 @@ async def download_evidence_doc(doc_id: str, request: Request):
     user = _get_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required.")
-    if user.get("role") not in ("approved_attorney", "admin"):
+    if user.get("role") not in ("approved_attorney", "admin") and not _effective_admin(user, request):
         raise HTTPException(status_code=403, detail="Attorney or admin role required.")
 
     conn = _get_conn()
@@ -3074,3 +3195,229 @@ async def download_evidence_doc(doc_id: str, request: Request):
 
     mime = row["content_type"] or "application/octet-stream"
     return FileResponse(str(resolved), filename=row["filename"], media_type=mime)
+
+
+# ── POST /api/assets/{asset_id}/heir-letter — Heir Notification PDF ──────────
+#
+# Generates a Colorado heir notification letter for estate cases (5 credits).
+# Requires: unlocked lead, attorney role or admin.
+#
+
+@app.post("/api/assets/{asset_id:path}/heir-letter")
+@limiter.limit("10/minute")
+async def generate_heir_letter(asset_id: str, request: Request):
+    """Generate a heir notification letter TEMPLATE PDF for an estate case (5 credits).
+
+    Attorney or admin only. Lead must be unlocked by requesting user.
+    Atomically deducts 5 credits (premium_dossier) inside a single BEGIN IMMEDIATE
+    transaction that also writes unlock_spend_journal, transactions, and audit_log.
+    PDF generation runs in PDF_EXECUTOR (CPU-bound — never blocks DB threads).
+
+    HTTP responses:
+      200  — PDF bytes (attorney) or PDF bytes (admin, no credit deduction)
+      402  — Insufficient credits
+      403  — Not attorney/admin, or lead not unlocked by this user
+      404  — Lead not found
+    """
+    from fastapi.responses import Response as FastAPIResponse
+    from verifuse_v2.core.heir_notification import generate_heir_notification_pdf
+
+    # ── Auth — synchronous, reads request.state only ────────────────────────────
+    user = _require_user(request)
+    if user.get("role") not in ("approved_attorney", "admin") and not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Attorney or admin role required.")
+
+    user_id: str = user["user_id"]
+    ip: str = request.client.host if request.client else ""
+    is_admin: bool = _effective_admin(user, request)
+    COST = 5  # premium_dossier
+
+    # ── Step 1: Fetch lead (off event loop via _run_in_db) ──────────────────────
+    def _fetch_lead():
+        conn = _thread_conn()
+        try:
+            return conn.execute(
+                """SELECT l.id, l.county, l.case_number, l.estimated_surplus,
+                          l.overbid_amount, l.sale_date, l.owner_name,
+                          l.property_address,
+                          ar.has_deceased_indicator, ar.owner_mailing_address
+                   FROM leads l
+                   LEFT JOIN asset_registry ar ON ar.asset_id = l.id
+                   WHERE l.id = ?""",
+                [asset_id],
+            ).fetchone()
+        finally:
+            conn.close()
+
+    lead = await _run_in_db(_fetch_lead)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Asset not found.")
+
+    # ── Step 2: Asset-specific unlock check (skip for admin) ────────────────────
+    if not is_admin:
+        def _check_unlock():
+            conn = _thread_conn()
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM asset_unlocks "
+                    "WHERE user_id = ? AND asset_id = ? LIMIT 1",
+                    [user_id, asset_id],
+                ).fetchone()
+                if row:
+                    return True
+                if _HAS_LEAD_UNLOCKS:
+                    row2 = conn.execute(
+                        "SELECT 1 FROM lead_unlocks "
+                        "WHERE user_id = ? AND lead_id = ? LIMIT 1",
+                        [user_id, asset_id],
+                    ).fetchone()
+                    return bool(row2)
+                return False
+            finally:
+                conn.close()
+
+        if not await _run_in_db(_check_unlock):
+            raise HTTPException(
+                status_code=403,
+                detail="Lead must be unlocked before generating a heir notification template.",
+            )
+
+    # ── Step 3: Atomic credit deduction + full billing audit ────────────────────
+    # Single BEGIN IMMEDIATE transaction:
+    #   a) FIFO ledger debit (unlock_ledger_entries)
+    #   b) unlock_spend_journal rows (one per ledger entry touched — dispute proof)
+    #   c) transactions row (type='premium_dossier')
+    #   d) audit_log entry
+    # Returns (charged: bool, balance_after: int)
+
+    if not is_admin:
+        def _charge():
+            import uuid as _u
+            conn = _thread_conn()
+            now_epoch = _epoch_now()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            txn_ref = str(_u.uuid4())  # opaque journal reference for this purchase
+
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+
+                debits = _fifo_spend(conn, user_id, COST)
+                if debits is None:
+                    conn.execute("ROLLBACK")
+                    return False, 0
+
+                balance_after = _ledger_balance(conn, user_id)
+
+                # Billing audit — one journal row per ledger entry touched
+                for d in debits:
+                    conn.execute(
+                        "INSERT INTO unlock_spend_journal "
+                        "(id, unlock_id, ledger_entry_id, credits_consumed) "
+                        "VALUES (?, ?, ?, ?)",
+                        [str(_u.uuid4()), txn_ref, d["entry_id"], d["spent"]],
+                    )
+
+                # Transactions table — single row for the purchase event
+                conn.execute(
+                    "INSERT INTO transactions "
+                    "(id, user_id, type, amount, credits, balance_after, "
+                    "idempotency_key, created_at) "
+                    "VALUES (?, ?, 'premium_dossier', 0, ?, ?, ?, ?)",
+                    [str(_u.uuid4()), user_id, -COST, balance_after,
+                     f"dossier:{user_id}:{asset_id}:{now_epoch}", now_iso],
+                )
+
+                # Audit log
+                _audit_log(conn, user_id, "heir_letter_generated", {
+                    "asset_id": asset_id,
+                    "cost": COST,
+                    "balance_after": balance_after,
+                    "tier": user.get("tier"),
+                    "txn_ref": txn_ref,
+                }, ip)
+
+                conn.execute("COMMIT")
+                return True, balance_after
+
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+            finally:
+                conn.close()
+
+        charged, balance_after = await _run_in_db(_charge)
+        if not charged:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Insufficient credits. {COST} credits required for heir notification template.",
+            )
+
+    # ── Step 4: Generate PDF in dedicated PDF_EXECUTOR (CPU-bound) ──────────────
+    # If generation fails after credits were charged, refund atomically.
+    surplus = float(lead["estimated_surplus"] or lead["overbid_amount"] or 0)
+
+    def _make_pdf():
+        return generate_heir_notification_pdf(
+            owner_name=lead["owner_name"] or "Unknown Owner",
+            property_address=lead["property_address"] or "",
+            county=lead["county"] or "",
+            case_number=lead["case_number"] or asset_id,
+            surplus_amount=surplus,
+            sale_date=lead["sale_date"] or "",
+            mailing_address=lead["owner_mailing_address"] or "",
+        )
+
+    loop = asyncio.get_running_loop()
+    try:
+        pdf_bytes = await loop.run_in_executor(PDF_EXECUTOR, _make_pdf)
+    except Exception as pdf_exc:
+        log.error("[heir-letter] PDF generation failed for %s: %s", asset_id, pdf_exc)
+        # Refund the credits — re-add COST to the newest non-expired ledger entry
+        if not is_admin:
+            def _refund():
+                import uuid as _u
+                conn = _thread_conn()
+                now = _epoch_now()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    # Find the ledger entry that still has room (or just INSERT a refund entry)
+                    conn.execute(
+                        "INSERT INTO unlock_ledger_entries "
+                        "(id, user_id, source, qty_total, qty_remaining, "
+                        "purchased_ts, expires_ts, tier_at_purchase) "
+                        "VALUES (?, ?, 'refund', ?, ?, ?, NULL, ?)",
+                        [str(_u.uuid4()), user_id, COST, COST,
+                         now, user.get("tier", "")],
+                    )
+                    _audit_log(conn, user_id, "heir_letter_refunded", {
+                        "asset_id": asset_id,
+                        "cost": COST,
+                        "reason": str(pdf_exc)[:200],
+                    }, ip)
+                    conn.execute("COMMIT")
+                except Exception as re:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    log.error("[heir-letter] Refund failed for %s: %s", user_id, re)
+                finally:
+                    conn.close()
+            await _run_in_db(_refund)
+        raise HTTPException(
+            status_code=503,
+            detail="PDF generation temporarily unavailable. Credits have been refunded.",
+        ) from pdf_exc
+
+    filename = f"heir_template_{asset_id.replace(':', '_')}.pdf"
+    return FastAPIResponse(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )

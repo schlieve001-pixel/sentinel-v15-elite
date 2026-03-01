@@ -27,17 +27,22 @@ from __future__ import annotations
 import csv
 import hashlib
 import logging
+import os
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import requests
 
-from verifuse_v2.db import database as db
-
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
+
+DB_PATH = os.environ.get(
+    "VERIFUSE_DB_PATH",
+    str(Path(__file__).resolve().parent.parent / "data" / "verifuse_v2.db"),
+)
 
 # County Treasurer contact info and data URLs
 COUNTY_TREASURER_SOURCES = {
@@ -205,13 +210,28 @@ def import_csv(csv_path: str | Path, county: str = "") -> dict:
     return _ingest_tax_lien_records(records)
 
 
+def _db_connect() -> sqlite3.Connection:
+    """Return a connection to the vNEXT leads database."""
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
+
 def _ingest_tax_lien_records(records: list[dict]) -> dict:
-    """Ingest tax lien surplus records into the V2 database."""
-    db.init_db()
+    """Ingest tax lien surplus records into the vNEXT leads table.
+
+    Uses the current leads schema (not the legacy assets/legal_status tables).
+    Sets surplus_stream = 'TAX_LIEN' on all inserted rows.
+    Statute: C.R.S. § 39-11-151 (5-year escheatment from sale date).
+    Idempotent: INSERT OR IGNORE on id = deterministic asset_id.
+    """
     stats = {"total": len(records), "inserted": 0, "skipped": 0, "no_surplus": 0}
     now = datetime.now(timezone.utc).isoformat()
 
-    with db.get_db() as conn:
+    conn = _db_connect()
+    try:
         for rec in records:
             # Compute surplus if not provided
             surplus = _clean_money(str(rec.get("surplus", 0)))
@@ -227,23 +247,18 @@ def _ingest_tax_lien_records(records: list[dict]) -> dict:
 
             county = rec.get("county", "Unknown")
             asset_id = _make_asset_id(county, rec["parcel"])
-            rhash = _record_hash(rec)
 
-            # Check for existing
+            # Idempotency: skip if already present
             existing = conn.execute(
-                "SELECT record_hash FROM assets WHERE asset_id = ?", [asset_id]
+                "SELECT id FROM leads WHERE id = ?", [asset_id]
             ).fetchone()
-            if existing and existing["record_hash"] == rhash:
+            if existing:
                 stats["skipped"] += 1
                 continue
 
             sale_date = _parse_date(rec.get("sale_date", ""))
             owner = rec.get("owner", "")
             address = rec.get("address", "")
-
-            # Grade
-            completeness = 1.0 if all([owner, address, sale_date]) else 0.5
-            confidence = 0.80  # CSV data, not direct from county system
 
             # Tax lien surplus has 5-year escheatment (C.R.S. § 39-11-151)
             days_remaining = None
@@ -255,47 +270,35 @@ def _ingest_tax_lien_records(records: list[dict]) -> dict:
                 except (ValueError, TypeError):
                     pass
 
+            completeness = 1.0 if all([owner, address, sale_date]) else 0.5
             if surplus >= 5000 and completeness >= 1.0 and days_remaining and days_remaining > 90:
                 grade = "GOLD"
-                record_class = "ATTORNEY"
             elif surplus >= 1000 and days_remaining and days_remaining > 0:
                 grade = "SILVER"
-                record_class = "QUALIFIED"
             else:
                 grade = "BRONZE"
-                record_class = "PIPELINE"
 
             try:
-                conn.execute("""
-                    INSERT OR REPLACE INTO assets
-                    (asset_id, county, state, jurisdiction, case_number, asset_type,
-                     source_name, statute_window, days_remaining, owner_of_record,
-                     property_address, sale_date, estimated_surplus, overbid_amount,
-                     completeness_score, confidence_score, data_grade,
-                     record_hash, created_at, updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, [
-                    asset_id, county, "CO", f"{county.lower()}_co", rec["parcel"],
-                    "TAX_LIEN_SURPLUS", "tax_lien_csv_import",
-                    "5 years from sale (C.R.S. § 39-11-151)",
-                    days_remaining, owner, address, sale_date,
-                    surplus, surplus, completeness, confidence, grade,
-                    rhash, now, now,
-                ])
-
-                conn.execute("""
-                    INSERT OR REPLACE INTO legal_status
-                    (asset_id, record_class, data_grade, statute_window, last_evaluated_at)
-                    VALUES (?,?,?,?,?)
-                """, [
-                    asset_id, record_class, grade,
-                    "5 years from sale (C.R.S. § 39-11-151)", now,
-                ])
-
+                conn.execute(
+                    """INSERT OR IGNORE INTO leads
+                       (id, county, case_number, estimated_surplus, overbid_amount,
+                        surplus_amount, sale_date, owner_name, property_address,
+                        data_grade, surplus_stream, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,'TAX_LIEN',?)""",
+                    [
+                        asset_id, county, rec.get("parcel", ""),
+                        surplus, surplus, surplus,
+                        sale_date, owner, address,
+                        grade,
+                        now,
+                    ],
+                )
                 stats["inserted"] += 1
             except Exception as e:
                 log.error("Failed to insert %s: %s", asset_id, e)
                 stats["skipped"] += 1
+    finally:
+        conn.close()
 
     log.info("Tax lien ingestion: %d inserted, %d skipped, %d no surplus",
              stats["inserted"], stats["skipped"], stats["no_surplus"])

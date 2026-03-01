@@ -304,12 +304,32 @@ def run_extraction(asset_id: str, conn=None) -> dict:
 
     try:
         # ── 1. Fetch SALE_INFO snapshot ───────────────────────────────────────
+        # Snapshots may be stored under the canonical asset_id
+        # (FORECLOSURE:CO:{COUNTY}:{case_number}) while the lead uses a
+        # hash-based ID. Try the lead's own ID first, then fall back to the
+        # canonical ID derived from county + case_number in the leads table.
         row = conn.execute(
             """SELECT id, raw_html_gzip FROM html_snapshots
                WHERE asset_id = ? AND snapshot_type = 'SALE_INFO'
                ORDER BY retrieved_ts DESC LIMIT 1""",
             [asset_id],
         ).fetchone()
+
+        if not row:
+            # Resolve canonical ID via leads.county + leads.case_number
+            lead_row = conn.execute(
+                "SELECT county, case_number FROM leads WHERE id = ?", [asset_id]
+            ).fetchone()
+            if lead_row:
+                canonical_id = f"FORECLOSURE:CO:{lead_row['county'].upper()}:{lead_row['case_number']}"
+                row = conn.execute(
+                    """SELECT id, raw_html_gzip FROM html_snapshots
+                       WHERE asset_id = ? AND snapshot_type = 'SALE_INFO'
+                       ORDER BY retrieved_ts DESC LIMIT 1""",
+                    [canonical_id],
+                ).fetchone()
+                if row:
+                    log.info("[extract] %s — resolved snapshot via canonical ID %s", asset_id, canonical_id)
 
         if not row:
             result["processing_status"] = "NEEDS_REVIEW"
@@ -541,14 +561,22 @@ def _write_results(
         r[1] for r in conn.execute("PRAGMA table_info(surplus_math_audit)").fetchall()
     }
 
-    # Derive county + case_number from asset_id (FORECLOSURE:CO:COUNTY:CASE)
+    # Derive county + case_number from asset_id.
+    # Canonical format: FORECLOSURE:CO:COUNTY:CASE — parse directly.
+    # Hash-based / UUID format: look up from leads table.
     parts = asset_id.split(":", 3)
-    if len(parts) != 4:
-        log.warning("[extract] Cannot parse asset_id for leads update: %s", asset_id)
-        return
-
-    county      = parts[2].lower()
-    case_number = parts[3]
+    if len(parts) == 4:
+        county      = parts[2].lower()
+        case_number = parts[3]
+    else:
+        lead_meta = conn.execute(
+            "SELECT county, case_number FROM leads WHERE id = ?", [asset_id]
+        ).fetchone()
+        if not lead_meta:
+            log.warning("[extract] Cannot resolve county/case_number for asset_id: %s", asset_id)
+            return
+        county      = lead_meta["county"]
+        case_number = lead_meta["case_number"]
 
     # ── Absolute GOLD gate (4 conditions, all required) ───────────────────────
     if data_grade == "GOLD":

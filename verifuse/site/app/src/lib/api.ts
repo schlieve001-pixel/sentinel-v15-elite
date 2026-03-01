@@ -182,6 +182,9 @@ export interface Lead {
   // Phase 4: forensic audit data (unlocked leads only)
   surplus_math_audit?: SurplusMathAudit | null;
   equity_resolution_notes?: string | null;
+  // Surplus stream + estate case
+  surplus_stream?: string | null;
+  has_deceased_indicator?: number | null;
 }
 
 export interface LeadsResponse {
@@ -216,13 +219,18 @@ export function getLeadDetail(assetId: string, signal?: AbortSignal): Promise<Le
 
 export interface Stats {
   total_assets: number;
+  total_leads: number;
   attorney_ready: number;
   gold_grade: number;
+  silver_grade: number;
+  bronze_grade: number;
+  reject_grade: number;
   total_claimable_surplus: number;
   verified_pipeline: number;
   verified_pipeline_surplus?: number;
   total_raw_volume: number;
   total_raw_volume_surplus?: number;
+  county_list: string[];
   counties: { county: string; cnt: number; total: number }[];
 }
 

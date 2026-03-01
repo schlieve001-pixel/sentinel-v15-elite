@@ -15,6 +15,11 @@ case "${1:-}" in
     python3 verifuse_v2/migrations/run_migrations.py
     ;;
 
+  seed-counties)
+    DB_PATH="${VERIFUSE_DB_PATH:-verifuse_v2/data/verifuse_v2.db}"
+    python3 verifuse_v2/migrations/run_migrations.py --seed-counties --db "$DB_PATH"
+    ;;
+
   gauntlet)
     python3 -m verifuse_v2.tests.smoke_gauntlet
     ;;
@@ -77,6 +82,20 @@ case "${1:-}" in
     (cd verifuse/site/app && npm ci && npm run build)
     ;;
 
+  # Tax lien surplus activation — C.R.S. § 39-11-151
+  # Runs weekly (Thursdays 08:00 via systemd timer or manual trigger).
+  # Pass --import-csv /path/to/file.csv to ingest county treasurer data.
+  tax-lien-run)
+    shift
+    python3 -m verifuse_v2.scrapers.tax_lien_scraper "$@"
+    ;;
+
+  # Assessor owner lookup — populates owner_mailing_address for GOLD/SILVER leads
+  assessor-lookup)
+    shift
+    python3 -m verifuse_v2.scrapers.assessor_lookup "$@"
+    ;;
+
   deploy)
     echo "[vf deploy] Gate 9 deployment sequence. Run each step manually and verify:"
     echo ""
@@ -98,6 +117,7 @@ Usage: vf COMMAND [args...]
 
 Required commands:
   migrate                 Run all DB migrations (idempotent)
+  seed-counties           Seed county_profiles from counties.yaml (INSERT OR IGNORE)
   gauntlet                Run full smoke gauntlet (target: >= 60 PASS)
   api-start               Start verifuse-api systemd unit
   api-stop                Stop verifuse-api systemd unit

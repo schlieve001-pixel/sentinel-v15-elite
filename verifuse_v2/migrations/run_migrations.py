@@ -395,6 +395,50 @@ def apply_phase12(conn: sqlite3.Connection) -> None:
         log.warning("SQL file not found: %s", sql_file_005)
 
 
+def apply_phase13(conn: sqlite3.Connection) -> None:
+    """Phase 13: Surplus streams, estate cases, owner mailing address columns.
+
+    - leads.surplus_stream TEXT DEFAULT 'FORECLOSURE_OVERBID'
+    - asset_registry.surplus_stream TEXT DEFAULT 'FORECLOSURE_OVERBID'
+    - asset_registry.owner_mailing_address TEXT
+    - asset_registry.has_deceased_indicator INTEGER DEFAULT 0
+    - Backfill existing leads/assets with default surplus_stream
+    """
+    # leads.surplus_stream
+    leads_cols = _get_columns(conn, "leads")
+    if "surplus_stream" not in leads_cols:
+        log.info("  ADD COLUMN leads.surplus_stream")
+        conn.execute(
+            "ALTER TABLE leads ADD COLUMN surplus_stream TEXT DEFAULT 'FORECLOSURE_OVERBID'"
+        )
+        conn.execute(
+            "UPDATE leads SET surplus_stream = 'FORECLOSURE_OVERBID' WHERE surplus_stream IS NULL"
+        )
+
+    # asset_registry columns
+    if _table_exists(conn, "asset_registry"):
+        ar_cols = _get_columns(conn, "asset_registry")
+        for col_name, col_typedef in [
+            ("surplus_stream",        "TEXT DEFAULT 'FORECLOSURE_OVERBID'"),
+            ("owner_mailing_address", "TEXT"),
+            ("has_deceased_indicator", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if col_name not in ar_cols:
+                log.info("  ADD COLUMN asset_registry.%s", col_name)
+                conn.execute(
+                    f"ALTER TABLE asset_registry ADD COLUMN {col_name} {col_typedef}"
+                )
+        # Backfill surplus_stream for existing FORECLOSURE assets
+        conn.execute(
+            "UPDATE asset_registry SET surplus_stream = 'FORECLOSURE_OVERBID' "
+            "WHERE surplus_stream IS NULL"
+        )
+    else:
+        log.warning("  asset_registry not found — skipping column additions")
+
+    log.info("  Phase 13 column additions complete")
+
+
 def apply_phase11(conn: sqlite3.Connection) -> None:
     """Phase 11: Add source_url to html_snapshots and evidence_documents.
 
@@ -565,6 +609,10 @@ def run(db_path: str) -> None:
         apply_phase12(conn)
         conn.commit()
 
+        log.info("=== Phase 13: Surplus streams + estate case columns ===")
+        apply_phase13(conn)
+        conn.commit()
+
         log.info("=== Auto-migrations (006+) ===")
         _apply_auto_migrations(conn)
 
@@ -584,8 +632,91 @@ def run(db_path: str) -> None:
             pass
 
 
+def seed_counties(db_path: str) -> None:
+    """Seed county_profiles from counties.yaml (INSERT OR IGNORE). Idempotent.
+
+    Called by: bin/vf seed-counties
+    Reads: verifuse_v2/config/counties.yaml
+    Inserts platform_type, public_trustee_url (base_url) for each enabled county.
+    """
+    try:
+        import yaml  # type: ignore[import]
+    except ImportError:
+        log.error("PyYAML not installed — cannot read counties.yaml. pip install pyyaml")
+        return
+
+    yaml_path = Path(__file__).resolve().parent.parent / "config" / "counties.yaml"
+    if not yaml_path.exists():
+        log.error("counties.yaml not found: %s", yaml_path)
+        return
+
+    with open(yaml_path) as f:
+        config = yaml.safe_load(f)
+
+    counties_list = config.get("counties", [])
+    if not counties_list:
+        log.warning("No counties found in counties.yaml")
+        return
+
+    # Platform mapping: yaml platform → DB platform_type
+    PLATFORM_MAP = {
+        "gts": "govsoft",
+        "govease": "govease",
+        "realforeclose": "realforeclose",
+        "county_page": "county_page",
+        "manual": "manual",
+    }
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    _harden(conn)
+
+    inserted = 0
+    skipped = 0
+    no_url = 0
+    for c in counties_list:
+        code = c.get("code", "").lower()
+        name = c.get("name", code)
+        platform = PLATFORM_MAP.get(c.get("platform", ""), c.get("platform", "county_page"))
+        base_url = c.get("base_url") or c.get("public_trustee_url") or ""
+
+        # Never insert a placeholder — skip counties with no configured URL
+        if not base_url or base_url.upper() == "CONFIGURE_ME":
+            log.warning("  Skipping county %s (%s) — no base_url configured", code, name)
+            no_url += 1
+            continue
+
+        try:
+            result = conn.execute(
+                """INSERT OR IGNORE INTO county_profiles
+                   (county, platform_type, captcha_mode, requires_accept_terms,
+                    base_url, search_path, detail_path)
+                   VALUES (?, ?, 'none', 0, ?, '/SearchDetails.aspx', '/CaseDetails.aspx')""",
+                [code, platform, base_url],
+            )
+            if result.rowcount:
+                log.info("  Seeded county: %s (%s) base_url=%s", code, platform, base_url[:60])
+                inserted += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            log.warning("  Failed to seed county %s: %s", code, exc)
+
+    conn.commit()
+    conn.close()
+    log.info(
+        "County seed complete: %d inserted, %d skipped (already exist), %d skipped (no URL configured)",
+        inserted, skipped, no_url,
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VeriFuse Migration Runner")
     parser.add_argument("--db", default=DEFAULT_DB, help="Path to SQLite database")
+    parser.add_argument("--seed-counties", action="store_true",
+                        help="Seed county_profiles from counties.yaml (INSERT OR IGNORE)")
     args = parser.parse_args()
-    run(args.db)
+    if args.seed_counties:
+        seed_counties(args.db)
+    else:
+        run(args.db)

@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Dashboard from "./pages/Dashboard";
 import LeadDetail from "./pages/LeadDetail";
+import Admin from "./pages/Admin";
 import "./App.css";
 
 export default function App() {
@@ -19,6 +20,7 @@ export default function App() {
           <Route path="/preview" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
           <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
           <Route path="/lead/:assetId" element={<ErrorBoundary><LeadDetail /></ErrorBoundary>} />
+          <Route path="/admin" element={<ErrorBoundary><Admin /></ErrorBoundary>} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>
