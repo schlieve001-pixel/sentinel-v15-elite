@@ -541,7 +541,7 @@ export default function Dashboard() {
               <KpiCard
                 label="Attorney-Ready"
                 value={stats.attorney_ready}
-                sub="surplus > $1K"
+                sub="GOLD+SILVER+BRONZE, surplus > $1K"
               />
               <KpiCard
                 label="Total Leads in DB"
@@ -562,9 +562,37 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Admin-only county coverage table */}
+      {/* Admin-only county coverage table + revenue streams */}
       {user?.is_admin && simMode !== "user" && stats && (
         <div style={{ padding: "0 20px" }}>
+          {/* Revenue Streams */}
+          {stats.stream_breakdown && stats.stream_breakdown.length > 0 && (
+            <div style={{ marginTop: 20 }}>
+              <h4 style={{ fontSize: "0.75em", letterSpacing: "0.1em", opacity: 0.5, marginBottom: 8 }}>
+                REVENUE STREAMS
+              </h4>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {stats.stream_breakdown.map((s) => {
+                  const label = s.stream === "FORECLOSURE_OVERBID" ? "Foreclosure Overbid (§ 38-38-111)"
+                    : s.stream === "TAX_LIEN" ? "Tax Lien (§ 39-11-151)"
+                    : s.stream === "TAX_DEED" ? "Tax Deed (§ 39-12-111)"
+                    : s.stream === "HOA" ? "HOA (§ 38-33.3-316)"
+                    : s.stream === "UNCLAIMED_PROPERTY" ? "Unclaimed Property (§ 38-13-1304)"
+                    : s.stream;
+                  return (
+                    <div key={s.stream} style={{
+                      background: "#111827", border: "1px solid #374151", borderRadius: 8,
+                      padding: "12px 16px", minWidth: 200,
+                    }}>
+                      <div style={{ fontSize: "0.7em", opacity: 0.5, marginBottom: 4 }}>{label}</div>
+                      <div style={{ fontWeight: 700, color: "#22c55e" }}>{formatCurrencyShort(s.total)}</div>
+                      <div style={{ fontSize: "0.78em", opacity: 0.5 }}>{s.cnt} leads</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <CountyCoverageTable counties={stats.counties} />
         </div>
       )}
@@ -578,7 +606,7 @@ export default function Dashboard() {
         >
           <option value="">ALL COUNTIES</option>
           {countyOptions.map((c) => (
-            <option key={c} value={c}>{c.toUpperCase()}</option>
+            <option key={c} value={c}>{c.replace(/_/g, " ").toUpperCase()}</option>
           ))}
         </select>
 

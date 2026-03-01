@@ -1334,7 +1334,7 @@ async def unlock_lead(lead_id: str, request: Request):
             detail="This lead has expired. Claim deadline has passed.",
         )
 
-    if status == "RESTRICTED":
+    if status == "RESTRICTED" and not _effective_admin(user, request):
         if not _is_verified_attorney(user):
             raise HTTPException(
                 status_code=403,
@@ -1518,22 +1518,33 @@ async def get_stats():
         conn = _thread_conn()
         try:
             total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+            # attorney_ready: excludes REJECT — only actionable pipeline leads
             with_surplus = conn.execute(
-                "SELECT COUNT(*) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 1000"
+                "SELECT COUNT(*) FROM leads WHERE data_grade != 'REJECT' AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 1000"
             ).fetchone()[0]
             gold_count = conn.execute(
                 "SELECT COUNT(*) FROM leads WHERE data_grade = 'GOLD'"
             ).fetchone()[0]
+            # total_claimable_surplus: excludes REJECT — only actionable pipeline
             total_surplus = conn.execute(
-                "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0"
+                "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) FROM leads WHERE data_grade != 'REJECT' AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0"
             ).fetchone()[0]
             counties = conn.execute("""
                 SELECT county, COUNT(*) as cnt,
                        COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total
                 FROM leads
-                WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0
+                WHERE data_grade != 'REJECT' AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0
                 GROUP BY county ORDER BY total DESC
             """).fetchall()
+            # Surplus stream breakdown
+            stream_rows = conn.execute("""
+                SELECT COALESCE(surplus_stream, 'FORECLOSURE_OVERBID') as stream, COUNT(*) as cnt,
+                       COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total
+                FROM leads
+                WHERE data_grade != 'REJECT' AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0
+                GROUP BY stream
+            """).fetchall()
+            stream_breakdown = [dict(r) for r in stream_rows]
 
             # Verified pipeline: GOLD+SILVER+BRONZE, surplus > 100, not expired
             vp_row = conn.execute(f"""
@@ -1567,7 +1578,7 @@ async def get_stats():
             county_rows = conn.execute(
                 "SELECT county FROM county_profiles ORDER BY county"
             ).fetchall()
-            county_list = [r[0].title() for r in county_rows] if county_rows else []
+            county_list = [r[0] for r in county_rows] if county_rows else []
         finally:
             conn.close()
 
@@ -1583,6 +1594,7 @@ async def get_stats():
             "county_list": county_list,
             "total_claimable_surplus": round(total_surplus, 2),
             "counties": [dict(r) for r in counties],
+            "stream_breakdown": stream_breakdown,
             "verified_pipeline": vp_row["cnt"],
             "verified_pipeline_surplus": round(vp_row["total"], 2),
             "total_raw_volume": raw_row["cnt"],

@@ -232,6 +232,7 @@ export interface Stats {
   total_raw_volume_surplus?: number;
   county_list: string[];
   counties: { county: string; cnt: number; total: number }[];
+  stream_breakdown?: { stream: string; cnt: number; total: number }[];
 }
 
 export function getStats(signal?: AbortSignal): Promise<Stats> {
