@@ -2,6 +2,57 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { getStats, type Stats } from "../lib/api";
 
+function RoiCalculator() {
+  const [cases, setCases] = useState(5);
+  const [surplus, setSurplus] = useState(50000);
+  const monthly = Math.round(cases * surplus * 0.10);
+  const roi = monthly > 0 ? Math.round(monthly / 149) : 0;
+  return (
+    <div style={{
+      background: "#0d1117", border: "1px solid #374151", borderRadius: 10,
+      padding: "28px 32px", maxWidth: 580, margin: "0 auto",
+    }}>
+      <h3 style={{ fontSize: "1em", fontWeight: 700, marginTop: 0, marginBottom: 20, letterSpacing: "0.06em" }}>
+        CALCULATE YOUR ROI
+      </h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82em", marginBottom: 6, opacity: 0.7 }}>
+            <span>Cases per month</span>
+            <span style={{ color: "#22c55e", fontWeight: 700 }}>{cases}</span>
+          </div>
+          <input type="range" min={1} max={20} value={cases}
+            onChange={(e) => setCases(Number(e.target.value))}
+            style={{ width: "100%", accentColor: "#22c55e" }} />
+        </div>
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82em", marginBottom: 6, opacity: 0.7 }}>
+            <span>Average surplus per case</span>
+            <span style={{ color: "#22c55e", fontWeight: 700 }}>${surplus.toLocaleString()}</span>
+          </div>
+          <input type="range" min={5000} max={500000} step={5000} value={surplus}
+            onChange={(e) => setSurplus(Number(e.target.value))}
+            style={{ width: "100%", accentColor: "#22c55e" }} />
+        </div>
+      </div>
+      <div style={{ marginTop: 24, padding: "16px", background: "#111827", borderRadius: 8 }}>
+        <div style={{ fontSize: "0.78em", opacity: 0.5, marginBottom: 4 }}>ESTIMATED MONTHLY REVENUE</div>
+        <div style={{ fontSize: "2em", fontWeight: 700, color: "#22c55e" }}>
+          ${monthly.toLocaleString()}/mo
+        </div>
+        <div style={{ fontSize: "0.82em", opacity: 0.6, marginTop: 4 }}>
+          {cases} cases × ${surplus.toLocaleString()} × 10% fee cap (HB25-1224)
+        </div>
+        {roi > 0 && (
+          <div style={{ marginTop: 8, fontSize: "0.85em", color: "#f59e0b", fontWeight: 600 }}>
+            VeriFuse Associate ($149/mo) = {roi}× ROI
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const TIERS = [
   {
     name: "Starter Pack",
@@ -83,21 +134,16 @@ export default function Landing() {
 
       {/* Hero */}
       <section className="landing-hero">
-        <div className="hero-badge">COLORADO SURPLUS INTELLIGENCE</div>
+        <div className="hero-badge">COLORADO FORECLOSURE SURPLUS INTELLIGENCE</div>
         <h1>
-          <span className="text-green">$
-            {stats
-              ? (stats.total_claimable_surplus / 1_000_000).toFixed(1) + "M"
-              : "..."}
-          </span>{" "}
-          in verified surplus.
+          Attorneys miss millions in overbid claims every month.
           <br />
-          Your competitors don't know it exists.
+          <span className="text-green">VeriFuse finds them.</span>
         </h1>
         <p className="hero-sub">
-          VeriFuse monitors Colorado county records in real-time, identifies
-          foreclosure surplus assets, and delivers attorney-ready intelligence
-          packets — so you can file first.
+          VeriFuse validates them, and hands you the filing package.
+          <br />
+          Monitors all Colorado county records in real-time — so you file first.
         </p>
         <div className="hero-actions">
           <Link to="/register" className="btn-primary">
@@ -111,7 +157,7 @@ export default function Landing() {
         {stats && (
           <div className="hero-stats">
             <div className="stat-block">
-              <span className="stat-value">{stats.total_assets}</span>
+              <span className="stat-value">{stats.total_leads ?? stats.total_assets}</span>
               <span className="stat-label">Active Pipeline</span>
             </div>
             <div className="stat-block">
@@ -183,6 +229,15 @@ export default function Landing() {
             </p>
           </div>
         </div>
+      </section>
+
+      {/* ROI Calculator */}
+      <section className="landing-section">
+        <h2>Calculate Your ROI</h2>
+        <p style={{ textAlign: "center", color: "#94a3b8", marginBottom: "2rem" }}>
+          Under HB25-1224, Colorado attorneys earn up to 10% on surplus claims.
+        </p>
+        <RoiCalculator />
       </section>
 
       {/* Pricing */}

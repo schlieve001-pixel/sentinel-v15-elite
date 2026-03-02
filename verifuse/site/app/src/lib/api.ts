@@ -52,6 +52,9 @@ export interface AuthUser {
   firm_name: string;
   tier: string;
   credits_remaining: number;
+  credits_pct_remaining?: number;
+  upgrade_recommended?: boolean;
+  monthly_grant?: number;
   bar_number?: string;
   unlocked_assets?: number;
   is_active?: boolean;
@@ -386,4 +389,38 @@ export function downloadEvidenceDoc(docId: string): Promise<Blob> {
     if (!res.ok) throw new ApiError(res.status, "Evidence download failed");
     return res.blob();
   });
+}
+
+/** Full forensic audit trail for a lead (admin only). */
+export function getLeadAudit(leadId: string, signal?: AbortSignal): Promise<LeadAuditTrail> {
+  return request(`/api/admin/lead-audit/${encodeURIComponent(leadId)}`, {}, signal);
+}
+
+export interface LeadAuditEntry {
+  id: string;
+  user_email?: string;
+  action: string;
+  created_at: string;
+  ip?: string;
+  meta?: Record<string, unknown>;
+  meta_json?: string;
+}
+
+export interface LeadAuditDoc {
+  id: string;
+  filename: string;
+  doc_family?: string;
+  bytes?: number;
+  retrieved_ts?: number;
+}
+
+export interface LeadAuditTrail {
+  lead: Record<string, unknown>;
+  math_audit: Record<string, unknown> | null;
+  equity_resolution: Record<string, unknown> | null;
+  field_evidence: Record<string, unknown>[];
+  evidence_docs: LeadAuditDoc[];
+  pipeline_events: Record<string, unknown>[];
+  audit_entries: LeadAuditEntry[];
+  unlock_history: Record<string, unknown>[];
 }

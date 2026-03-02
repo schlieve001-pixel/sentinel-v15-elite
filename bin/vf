@@ -57,6 +57,13 @@ case "${1:-}" in
     flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --date-window "$@"
     ;;
 
+  scraper-enum)
+    # Sequential case enumerator — bypasses GovSoft search form for historical backfills.
+    # Usage: bin/vf scraper-enum --county jefferson --prefix J24 --start-num 1 --end-num 9999
+    shift
+    flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --sequential-enum "$@"
+    ;;
+
   status)
     systemctl status verifuse-api verifuse-scrapers.timer
     ;;
@@ -80,6 +87,24 @@ case "${1:-}" in
 
   rebuild-frontend)
     (cd verifuse/site/app && npm ci && npm run build)
+    ;;
+
+  # Gate 4 batch extraction — promotes BRONZE leads with html_snapshots to GOLD/SILVER
+  # Usage: bin/vf extract-batch [--county jefferson] [--limit 535]
+  extract-batch)
+    shift
+    python3 -c "
+import sys, os; sys.path.insert(0, os.getcwd())
+from verifuse_v2.ingest.govsoft_extract import run_extraction_batch
+county = None; limit = 500
+for arg in sys.argv[1:]:
+    if arg.startswith('--county='): county = arg.split('=',1)[1]
+    elif arg.startswith('--limit='): limit = int(arg.split('=',1)[1])
+r = run_extraction_batch(county=county, limit=limit)
+print(f'Processed: {r[\"processed\"]} | GOLD: {r[\"gold\"]} | SILVER: {r[\"silver\"]} | BRONZE: {r[\"bronze\"]} | Errors: {r[\"errors\"]}')
+for lead in r['leads']:
+    print(f'  {lead[\"grade\"]}: {lead[\"id\"]}')
+" "$@"
     ;;
 
   # Tax lien surplus activation — C.R.S. § 39-11-151
@@ -126,6 +151,8 @@ Required commands:
   logs-scraper            Tail scraper logs (journalctl -f)
   scraper-run-single      Run single-case ingest (flock; pass --county --case-number)
   scraper-run-window      Run date-window ingest (flock; pass --county --days N)
+  scraper-enum            Sequential case enumerator (flock; --county --prefix --start-num --end-num)
+  extract-batch           Gate 4 batch extraction on BRONZE leads (--county --limit)
   status                  Show API + scraper timer systemd status
   backup-db               SQLite online backup (timestamped .bak file)
 

@@ -710,6 +710,62 @@ def _write_results(
         raise
 
 
+# ── Batch extraction runner ───────────────────────────────────────────────────
+
+
+def run_extraction_batch(county: str | None = None, limit: int = 500) -> dict:
+    """Run Gate 4 extraction on all BRONZE leads that have html_snapshots.
+
+    Args:
+        county: Optional county slug to filter (e.g. 'jefferson'). None = all.
+        limit:  Max leads to process per run.
+
+    Returns dict with keys: processed, gold, silver, bronze, errors, leads (list of promoted).
+    """
+    import sqlite3
+
+    db_path = _default_db_path()
+    conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        filter_county = f"AND l.county = '{county}'" if county else ""
+        rows = conn.execute(f"""
+            SELECT DISTINCT l.id, l.county, l.case_number
+            FROM leads l
+            WHERE l.data_grade = 'BRONZE'
+            {filter_county}
+            AND (
+                EXISTS (SELECT 1 FROM html_snapshots hs WHERE hs.asset_id = l.id)
+                OR EXISTS (SELECT 1 FROM html_snapshots hs
+                    WHERE hs.asset_id = 'FORECLOSURE:CO:' || UPPER(l.county) || ':' || l.case_number)
+            )
+            LIMIT ?
+        """, [limit]).fetchall()
+    finally:
+        conn.close()
+
+    results: dict = {"processed": 0, "gold": 0, "silver": 0, "bronze": 0, "errors": 0, "leads": []}
+    for row in rows:
+        lead_id = row["id"]
+        try:
+            r = run_extraction(lead_id)
+            grade = (r.get("data_grade") or r.get("grade") or "BRONZE").lower()
+            results["processed"] += 1
+            if grade == "gold":
+                results["gold"] += 1
+                results["leads"].append({"id": lead_id, "grade": "GOLD"})
+            elif grade == "silver":
+                results["silver"] += 1
+                results["leads"].append({"id": lead_id, "grade": "SILVER"})
+            else:
+                results["bronze"] += 1
+        except Exception as exc:
+            results["errors"] += 1
+            log.warning("Batch extraction error %s: %s", lead_id, exc)
+
+    return results
+
+
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

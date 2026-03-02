@@ -1057,6 +1057,7 @@ async def public_config():
         content={
             "stripe_mode": STRIPE_MODE,
             "stripe_publishable_key": STRIPE_PUBLISHABLE_KEY,
+            "stripe_configured": bool(STRIPE_SECRET_KEY),
             "build_id": _BUILD_ID,
         },
         headers={"Cache-Control": "no-store"},
@@ -1328,7 +1329,7 @@ async def unlock_lead(lead_id: str, request: Request):
     lead = dict(row)
     status = _compute_status(lead)
 
-    if status == "EXPIRED":
+    if status == "EXPIRED" and not _effective_admin(user, request):
         raise HTTPException(
             status_code=410,
             detail="This lead has expired. Claim deadline has passed.",
@@ -1578,7 +1579,7 @@ async def get_stats():
             county_rows = conn.execute(
                 "SELECT county FROM county_profiles ORDER BY county"
             ).fetchall()
-            county_list = [r[0] for r in county_rows] if county_rows else []
+            county_list = [r[0].replace("_", " ").title() for r in county_rows] if county_rows else []
         finally:
             conn.close()
 
@@ -1676,6 +1677,9 @@ async def api_me(request: Request):
         balance = _ledger_balance(conn, user["user_id"])
     finally:
         conn.close()
+    from verifuse_v2.server.pricing import get_monthly_credits
+    monthly_grant = get_monthly_credits(user["tier"])
+    credits_pct = round(balance / max(monthly_grant, 1) * 100, 1)
     return {
         "user_id": user["user_id"],
         "email": user["email"],
@@ -1684,6 +1688,9 @@ async def api_me(request: Request):
         "tier": user["tier"],
         "credits_remaining": balance,
         "ledger_balance": balance,
+        "credits_pct_remaining": credits_pct,
+        "upgrade_recommended": credits_pct < 20.0,
+        "monthly_grant": monthly_grant,
         "role": user.get("role", "public"),
         "attorney_status": user.get("attorney_status", "NONE"),
         "is_admin": bool(user.get("is_admin", 0)),
@@ -1820,15 +1827,22 @@ async def get_lead_detail(lead_id: str, request: Request):
                 except Exception:
                     pass  # Equity data is supplemental
 
-            # ── Check unlock status ───────────────────────────────────────────
-            is_unlocked = False
-            if user_id:
-                u_row = conn.execute(
-                    "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
-                    [user_id, lead_id]
-                ).fetchone()
-                is_unlocked = bool(u_row)
-            result["unlocked_by_me"] = is_unlocked
+            # ── Admin auto-unlock: return full PII data without click ────────
+            if is_eff_admin:
+                full = _row_to_full(dict(row))
+                result.update(full)
+                result["unlocked_by_me"] = True
+                is_unlocked = True
+            else:
+                # ── Check unlock status ───────────────────────────────────────────
+                is_unlocked = False
+                if user_id:
+                    u_row = conn.execute(
+                        "SELECT 1 FROM lead_unlocks WHERE user_id = ? AND lead_id = ?",
+                        [user_id, lead_id]
+                    ).fetchone()
+                    is_unlocked = bool(u_row)
+                result["unlocked_by_me"] = is_unlocked
 
             # ── Forensic audit data (Phase 4 — unlocked leads only) ──────────
             # surplus_math_audit: math proof behind the GOLD grade
@@ -2044,25 +2058,79 @@ async def billing_checkout(request: Request):
     user = _require_user(request)
     body = await request.json()
     tier = body.get("tier", "").lower()
+    billing_period = body.get("billing_period", "monthly").lower()
+    if billing_period not in ("monthly", "annual"):
+        billing_period = "monthly"
 
-    if tier not in ("scout", "operator", "sovereign"):
+    if tier not in ("associate", "partner", "sovereign"):
         raise HTTPException(
             status_code=400,
-            detail="Invalid tier. Choose from: scout, operator, sovereign",
+            detail="Invalid tier. Choose from: associate, partner, sovereign",
         )
 
     try:
         from verifuse_v2.server.billing import create_checkout_session
-        checkout_url = create_checkout_session(
-            user_id=user["user_id"],
-            email=user["email"],
-            tier=tier,
-        )
+        import inspect as _inspect
+        _ccs_sig = _inspect.signature(create_checkout_session)
+        _kwargs = dict(user_id=user["user_id"], email=user["email"], tier=tier)
+        if "billing_period" in _ccs_sig.parameters:
+            _kwargs["billing_period"] = billing_period
+        checkout_url = create_checkout_session(**_kwargs)
         return {"checkout_url": checkout_url}
     except HTTPException:
         raise
     except Exception as e:
         log.error("Checkout failed: %s", e)
+        raise HTTPException(status_code=503, detail="Billing service unavailable.")
+
+
+# ── POST /api/billing/one-time — Any one-time pack purchase ─────────
+
+_ONE_TIME_SKUS = {
+    "starter":          {"env_key": "STARTER",          "credits": 10, "name": "Starter Pack"},
+    "investigation":    {"env_key": "INVESTIGATION",     "credits": 25, "name": "Investigation Pack"},
+    "filing_pack":      {"env_key": "FILING_PACK",       "credits": 3,  "name": "Filing Pack"},
+    "premium_dossier":  {"env_key": "PREMIUM_DOSSIER",   "credits": 5,  "name": "Premium Dossier"},
+}
+
+@app.post("/api/billing/one-time")
+@limiter.limit("10/minute")
+async def billing_one_time(request: Request):
+    """Create a Stripe checkout session for any one-time product (starter, investigation, filing_pack, premium_dossier)."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Billing not configured.")
+    user = _require_user(request)
+    body = await request.json()
+    sku = body.get("sku", "").lower()
+    meta = _ONE_TIME_SKUS.get(sku)
+    if not meta:
+        raise HTTPException(status_code=400, detail=f"Unknown SKU '{sku}'. Choose: {list(_ONE_TIME_SKUS.keys())}")
+
+    price_id = os.environ.get(f"{_price_prefix}{meta['env_key']}", "")
+    if not price_id:
+        raise HTTPException(status_code=503, detail=f"{meta['name']} not configured in Stripe.")
+
+    try:
+        import stripe as _stripe
+        _stripe.api_key = STRIPE_SECRET_KEY
+        session = _stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            customer_email=user["email"],
+            client_reference_id=user["user_id"],
+            metadata={
+                "sku": sku,
+                "user_id": user["user_id"],
+                "price_id": price_id,
+                "credits": str(meta["credits"]),
+            },
+            line_items=[{"price": price_id, "quantity": 1}],
+            success_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/dashboard?pack=success",
+            cancel_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/pricing",
+        )
+        return {"checkout_url": session.url}
+    except Exception as e:
+        log.error("One-time checkout failed: %s", e)
         raise HTTPException(status_code=503, detail="Billing service unavailable.")
 
 
@@ -2596,6 +2664,395 @@ async def admin_coverage(request: Request):
     from verifuse_v2.scripts.coverage_report import generate_report
     report = generate_report()
     return {"count": len(report), "counties": report}
+
+
+@app.get("/api/admin/system-stats")
+async def admin_system_stats(request: Request):
+    """Comprehensive system stats for admin System tab (admin only)."""
+    _require_admin_or_api_key(request)
+
+    import os as _os
+
+    conn = _get_conn()
+    try:
+        # DB file size
+        db_size_bytes = 0
+        try:
+            db_size_bytes = _os.path.getsize(VERIFUSE_DB_PATH)
+        except Exception:
+            pass
+
+        # WAL info
+        wal_pages = 0
+        try:
+            wal_info = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            wal_pages = wal_info[1] if wal_info else 0
+        except Exception:
+            pass
+
+        # Leads scoreboard
+        scoreboard_rows = conn.execute("""
+            SELECT data_grade,
+                   COUNT(*) as lead_count,
+                   COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total_surplus
+            FROM leads
+            GROUP BY data_grade
+            ORDER BY CASE data_grade
+                WHEN 'GOLD' THEN 1 WHEN 'SILVER' THEN 2
+                WHEN 'BRONZE' THEN 3 WHEN 'REJECT' THEN 4 ELSE 5
+            END
+        """).fetchall()
+        scoreboard = [
+            {
+                "data_grade": r["data_grade"] or "UNGRADED",
+                "lead_count": r["lead_count"],
+                "total_surplus": round(r["total_surplus"], 2),
+            }
+            for r in scoreboard_rows
+        ]
+
+        # Total leads
+        total_leads = sum(r["lead_count"] for r in scoreboard)
+
+        # Verified pipeline (GOLD+SILVER, surplus > 0)
+        vp_row = conn.execute(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total "
+            "FROM leads WHERE data_grade IN ('GOLD','SILVER') AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0"
+        ).fetchone()
+
+        # Recent audit log
+        audit_rows = []
+        try:
+            audit_rows = conn.execute("""
+                SELECT al.id, al.user_id, al.action, al.meta_json, al.created_at, al.ip,
+                       u.email as user_email
+                FROM audit_log al
+                LEFT JOIN users u ON u.user_id = al.user_id
+                ORDER BY al.created_at DESC
+                LIMIT 50
+            """).fetchall()
+        except Exception:
+            pass
+
+        recent_audit = []
+        for r in audit_rows:
+            entry = {
+                "id": r["id"],
+                "user_email": r["user_email"] or r["user_id"] or "system",
+                "action": r["action"],
+                "created_at": r["created_at"],
+                "ip": r["ip"],
+            }
+            if r["meta_json"]:
+                try:
+                    entry["meta"] = json.loads(r["meta_json"])
+                except Exception:
+                    entry["meta"] = {}
+            recent_audit.append(entry)
+
+        # User counts
+        user_counts = conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN attorney_status='VERIFIED' THEN 1 ELSE 0 END) as verified_attorneys,
+                SUM(CASE WHEN attorney_status='PENDING' THEN 1 ELSE 0 END) as pending_attorneys,
+                SUM(CASE WHEN tier='sovereign' THEN 1 ELSE 0 END) as sovereign_users,
+                SUM(CASE WHEN tier='partner' THEN 1 ELSE 0 END) as partner_users,
+                SUM(CASE WHEN tier='associate' THEN 1 ELSE 0 END) as associate_users
+            FROM users
+        """).fetchone()
+
+    finally:
+        conn.close()
+
+    # Stripe status
+    stripe_configured = bool(STRIPE_SECRET_KEY)
+    stripe_publishable_configured = bool(STRIPE_PUBLISHABLE_KEY)
+
+    return {
+        "db_path": VERIFUSE_DB_PATH,
+        "db_size_mb": round(db_size_bytes / 1024 / 1024, 2),
+        "wal_pages": wal_pages,
+        "total_leads": total_leads,
+        "scoreboard": scoreboard,
+        "verified_pipeline_count": vp_row["cnt"],
+        "verified_pipeline_surplus": round(vp_row["total"], 2),
+        "recent_audit": recent_audit,
+        "user_counts": dict(user_counts) if user_counts else {},
+        "stripe_configured": stripe_configured,
+        "stripe_publishable_configured": stripe_publishable_configured,
+        "stripe_mode": STRIPE_MODE,
+        "build_id": _BUILD_ID,
+        "verifuse_env": os.environ.get("VERIFUSE_ENV", "production"),
+        "api_key_configured": bool(VERIFUSE_API_KEY),
+    }
+
+
+_TIER_MONTHLY_CENTS = {"associate": 14900, "partner": 39900, "sovereign": 89900}
+
+
+@app.get("/api/admin/revenue-metrics")
+async def admin_revenue_metrics(request: Request):
+    """MRR/ARR, tier breakdown, credit utilization, churn (admin only)."""
+    _require_admin_or_api_key(request)
+    conn = _get_conn()
+    try:
+        # Active subscriptions by tier
+        tier_rows = conn.execute(
+            "SELECT tier, COUNT(*) as cnt FROM users WHERE is_active=1 "
+            "AND tier IN ('associate','partner','sovereign') GROUP BY tier"
+        ).fetchall()
+        by_tier: dict = {}
+        mrr_cents = 0
+        for r in tier_rows:
+            price = _TIER_MONTHLY_CENTS.get(r["tier"], 0)
+            by_tier[r["tier"]] = {"count": r["cnt"], "mrr_cents": price * r["cnt"]}
+            mrr_cents += price * r["cnt"]
+
+        # New subscribers last 30 days (audit_log events)
+        new_30d = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action='subscription_activated' "
+            "AND created_at > datetime('now','-30 days')"
+        ).fetchone()[0]
+
+        # Churn last 30 days
+        churn_30d = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action IN ('subscription_cancelled','subscription_canceled') "
+            "AND created_at > datetime('now','-30 days')"
+        ).fetchone()[0]
+
+        # Credit utilization — total granted vs total consumed
+        total_credits_granted = conn.execute(
+            "SELECT COALESCE(SUM(qty_total), 0) FROM unlock_ledger_entries"
+        ).fetchone()[0] or 0
+        total_credits_remaining = conn.execute(
+            "SELECT COALESCE(SUM(qty_remaining), 0) FROM unlock_ledger_entries"
+        ).fetchone()[0] or 0
+        total_credits_used = total_credits_granted - total_credits_remaining
+        utilization_pct = round(total_credits_used / max(total_credits_granted, 1) * 100, 1)
+
+        # Founding attorneys (founders_pricing flag)
+        founding_count = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE founders_pricing = 1"
+        ).fetchone()[0]
+
+    finally:
+        conn.close()
+
+    return {
+        "mrr_cents": mrr_cents,
+        "arr_cents": mrr_cents * 12,
+        "active_subscriptions": sum(v["count"] for v in by_tier.values()),
+        "by_tier": by_tier,
+        "new_subscribers_30d": new_30d,
+        "churn_30d": churn_30d,
+        "credit_utilization_pct": utilization_pct,
+        "total_credits_granted": total_credits_granted,
+        "total_credits_used": total_credits_used,
+        "founding_spots_claimed": founding_count,
+        "founding_spots_total": 10,
+    }
+
+
+@app.get("/api/admin/audit-log")
+async def admin_audit_log(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    action: str = Query(""),
+    user_email: str = Query(""),
+):
+    """Paginated audit log for admin (admin only)."""
+    _require_admin_or_api_key(request)
+    conn = _get_conn()
+    try:
+        wheres = []
+        params: list = []
+        if action:
+            wheres.append("al.action LIKE ?")
+            params.append(f"%{action}%")
+        if user_email:
+            wheres.append("LOWER(u.email) LIKE ?")
+            params.append(f"%{user_email.lower()}%")
+        where_sql = f"WHERE {' AND '.join(wheres)}" if wheres else ""
+        rows = conn.execute(f"""
+            SELECT al.id, al.user_id, al.action, al.meta_json, al.created_at, al.ip,
+                   u.email as user_email
+            FROM audit_log al
+            LEFT JOIN users u ON u.user_id = al.user_id
+            {where_sql}
+            ORDER BY al.created_at DESC
+            LIMIT ? OFFSET ?
+        """, params + [limit, offset]).fetchall()
+        total = conn.execute(f"""
+            SELECT COUNT(*) FROM audit_log al
+            LEFT JOIN users u ON u.user_id = al.user_id
+            {where_sql}
+        """, params).fetchone()[0]
+    finally:
+        conn.close()
+
+    entries = []
+    for r in rows:
+        entry = {
+            "id": r["id"],
+            "user_email": r["user_email"] or r["user_id"] or "system",
+            "action": r["action"],
+            "created_at": r["created_at"],
+            "ip": r["ip"],
+        }
+        if r["meta_json"]:
+            try:
+                entry["meta"] = json.loads(r["meta_json"])
+            except Exception:
+                entry["meta"] = {}
+        entries.append(entry)
+
+    return {"total": total, "entries": entries, "limit": limit, "offset": offset}
+
+
+@app.get("/api/admin/lead-audit/{lead_id}")
+async def admin_lead_audit(lead_id: str, request: Request):
+    """Full forensic audit trail for a single lead (admin only).
+
+    Returns all DB records touching this lead:
+    - lead row (all raw fields)
+    - surplus_math_audit record
+    - equity_resolution record
+    - pipeline_events for this asset
+    - field_evidence records
+    - audit_log entries that reference this lead_id
+    - unlock history (asset_unlocks)
+    """
+    _require_admin_or_api_key(request)
+    conn = _get_conn()
+    try:
+        # Lead row (all fields)
+        lead_row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+        if not lead_row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Lead not found.")
+        lead = dict(lead_row)
+
+        county = lead.get("county", "")
+        case_number = lead.get("case_number", "")
+        asset_id_canonical = f"FORECLOSURE:CO:{county.upper()}:{case_number}" if county and case_number else None
+
+        # Surplus math audit
+        math_audit = None
+        if asset_id_canonical:
+            row = conn.execute(
+                "SELECT * FROM surplus_math_audit WHERE asset_id = ? ORDER BY audit_ts DESC LIMIT 1",
+                [asset_id_canonical],
+            ).fetchone()
+            if row:
+                math_audit = dict(row)
+
+        # Equity resolution
+        equity = None
+        if asset_id_canonical:
+            row = conn.execute(
+                "SELECT * FROM equity_resolution WHERE asset_id = ?",
+                [asset_id_canonical],
+            ).fetchone()
+            if row:
+                equity = dict(row)
+
+        # Field evidence — join via evidence_documents to get asset_id
+        field_evidence = []
+        if asset_id_canonical:
+            try:
+                rows = conn.execute(
+                    """SELECT fe.* FROM field_evidence fe
+                       JOIN evidence_documents ed ON ed.id = fe.evidence_doc_id
+                       WHERE ed.asset_id = ?
+                       ORDER BY fe.created_ts DESC""",
+                    [asset_id_canonical],
+                ).fetchall()
+                field_evidence = [dict(r) for r in rows]
+            except Exception:
+                pass
+
+        # Evidence documents
+        evidence_docs = []
+        if asset_id_canonical:
+            try:
+                rows = conn.execute(
+                    "SELECT id, asset_id, filename, doc_family, bytes, retrieved_ts FROM evidence_documents WHERE asset_id = ? ORDER BY retrieved_ts DESC",
+                    [asset_id_canonical],
+                ).fetchall()
+                evidence_docs = [dict(r) for r in rows]
+            except Exception:
+                pass
+
+        # Pipeline events
+        pipeline_events = []
+        if asset_id_canonical:
+            try:
+                tc = conn.execute("PRAGMA table_info(pipeline_events)").fetchall()
+                col_names = [c[1] for c in tc]
+                time_col = "created_at" if "created_at" in col_names else "timestamp"
+                rows = conn.execute(
+                    f"SELECT * FROM pipeline_events WHERE asset_id = ? OR asset_id LIKE ? ORDER BY {time_col} DESC LIMIT 50",
+                    [asset_id_canonical, f"%{case_number}%"],
+                ).fetchall()
+                pipeline_events = [dict(r) for r in rows]
+            except Exception:
+                pass
+
+        # Audit log entries for this lead
+        audit_entries = []
+        try:
+            rows = conn.execute(
+                """SELECT al.*, u.email as user_email FROM audit_log al
+                   LEFT JOIN users u ON u.user_id = al.user_id
+                   WHERE al.meta_json LIKE ?
+                   ORDER BY al.created_at DESC LIMIT 50""",
+                [f"%{lead_id}%"],
+            ).fetchall()
+            for r in rows:
+                entry = dict(r)
+                if entry.get("meta_json"):
+                    try:
+                        entry["meta"] = json.loads(entry["meta_json"])
+                    except Exception:
+                        pass
+                audit_entries.append(entry)
+        except Exception:
+            pass
+
+        # Unlock history
+        unlock_history = []
+        try:
+            rows = conn.execute(
+                """SELECT au.*, u.email as user_email FROM asset_unlocks au
+                   LEFT JOIN users u ON u.user_id = au.user_id
+                   WHERE au.asset_id = ?
+                   ORDER BY au.unlocked_at DESC""",
+                [lead_id],
+            ).fetchall()
+            unlock_history = [dict(r) for r in rows]
+        except Exception:
+            pass
+
+    finally:
+        conn.close()
+
+    # Add computed status
+    status = _compute_status(lead)
+    lead["_computed_status"] = status
+    lead["_asset_id_canonical"] = asset_id_canonical
+
+    return {
+        "lead": lead,
+        "math_audit": math_audit,
+        "equity_resolution": equity,
+        "field_evidence": field_evidence,
+        "evidence_docs": evidence_docs,
+        "pipeline_events": pipeline_events[:20],
+        "audit_entries": audit_entries,
+        "unlock_history": unlock_history,
+    }
 
 
 # ── Attorney Verification Endpoints ──────────────────────────────

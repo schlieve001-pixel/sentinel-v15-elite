@@ -562,6 +562,33 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Credits progress bar (user-facing, not admin-mode) */}
+      {user && !isPreview && simMode !== "user" && !user.is_admin && (
+        <div style={{ padding: "12px 20px 0" }}>
+          {(() => {
+            const pct = user.credits_pct_remaining ?? (user.monthly_grant ? Math.round(user.credits_remaining / user.monthly_grant * 100) : 100);
+            const barColor = pct > 50 ? "#22c55e" : pct > 20 ? "#f59e0b" : "#ef4444";
+            const nextTier = user.tier === "associate" ? "Partner" : user.tier === "partner" ? "Sovereign" : null;
+            return (
+              <div style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 8, padding: "12px 16px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.78em", marginBottom: 6 }}>
+                  <span style={{ opacity: 0.5 }}>CREDITS REMAINING</span>
+                  <span style={{ color: barColor, fontWeight: 700 }}>{user.credits_remaining} / {user.monthly_grant ?? "—"}</span>
+                </div>
+                <div style={{ background: "#1f2937", borderRadius: 4, height: 6, overflow: "hidden" }}>
+                  <div style={{ background: barColor, width: `${Math.min(pct, 100)}%`, height: "100%", transition: "width 0.3s" }} />
+                </div>
+                {user.upgrade_recommended && nextTier && (
+                  <div style={{ marginTop: 8, fontSize: "0.75em", color: "#f59e0b" }}>
+                    Running low — <a href="/pricing" style={{ color: "#22c55e", textDecoration: "underline" }}>upgrade to {nextTier}</a> for more credits
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* Admin-only county coverage table + revenue streams */}
       {user?.is_admin && simMode !== "user" && stats && (
         <div style={{ padding: "0 20px" }}>
