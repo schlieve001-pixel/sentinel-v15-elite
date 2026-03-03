@@ -1737,73 +1737,183 @@ class GovSoftEngine:
                 total = await self._extract_total_count(page)
                 log.info("[pending] %s — %s active/pending cases found", self.county, total)
 
-                # Paginate and process all active cases
-                while True:
-                    _store_snapshot(
-                        self._conn,
-                        f"FORECLOSURE:CO:{self.county.upper()}:SEARCH",
-                        "SEARCH_RESULTS",
-                        await page.content(),
-                        source_url=page.url,
+                # ── Sort by ActualPendingSaleDate (ascending = soonest first) ────
+                # This ensures we capture the most immediately actionable cases first.
+                try:
+                    sale_date_sort = page.locator(
+                        "a[href*='Sort$ActualPendingSaleDate'], "
+                        "a[href*='ActualPendingSaleDate']"
                     )
+                    if await sale_date_sort.count() > 0:
+                        await sale_date_sort.first.click()
+                        await asyncio.sleep(2)
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                        log.info("[pending] %s — sorted by ActualPendingSaleDate", self.county)
+                except Exception:
+                    pass  # Sort is a nice-to-have; continue without it
 
-                    rows = await page.locator(
+                # ── Phase 1: Collect case numbers from paginated results ─────────
+                # max_pages prevents processing stale historical "Active" cases
+                # (cases 1+ year old that are still technically "Active").
+                # Default 200 pages = 5000 cases — enough for any county's backlog.
+                max_pages = 200
+                collected_case_numbers: list[str] = []
+                page_num = 0
+                current_page_num = 1
+                while page_num < max_pages:
+                    page_num += 1
+                    rows_loc = await page.locator(
                         self._sel("results_table", SEL_RESULTS_TABLE)
                     ).first.locator("tbody tr").all()
 
-                    case_entries: list[tuple[str, str]] = []
-                    for row in rows:
+                    page_found = 0
+                    for row in rows_loc:
                         try:
                             cells = await row.locator("td").all_inner_texts()
-                            case_number = ""
                             for cell_text in cells[:4]:
                                 txt = cell_text.strip()
-                                if txt and len(txt) >= 4:
-                                    case_number = txt
+                                # Valid case numbers: 4-30 chars, no whitespace,
+                                # at least one digit. Filters pagination control rows.
+                                if (txt and 4 <= len(txt) <= 30
+                                        and not any(c in txt for c in (' ', '\t', '\n'))
+                                        and any(c.isdigit() for c in txt)):
+                                    collected_case_numbers.append(txt)
+                                    page_found += 1
                                     break
-                            if not case_number:
-                                continue
-                            link_el = row.locator("a").first
-                            href = ""
-                            if await link_el.count() > 0:
-                                href = (await link_el.get_attribute("href")) or ""
-                            case_entries.append((case_number, href))
                         except Exception:
                             continue
 
-                    for case_number, _href in case_entries:
-                        asset_id_val = _asset_id(self.county, case_number)
+                    log.info("[pending] %s page %d — collected %d case numbers (total=%d)",
+                             self.county, page_num, page_found, len(collected_case_numbers))
+
+                    if page_found == 0:
+                        break
+
+                    # ── Pagination: GovSoft uses numbered page links, not "Next" ──
+                    # Try 1: Standard __doPostBack Next text link (some counties)
+                    next_link = page.locator(SEL_DOPOSTBACK + ":has-text('Next')")
+                    if await next_link.count() > 0:
+                        await next_link.first.click()
+                        await asyncio.sleep(2)
+                        await page.wait_for_load_state("networkidle", timeout=20000)
+                        current_page_num += 1
+                        continue
+
+                    # Try 2: Numbered page link for next page
+                    current_page_num += 1
+                    next_page_link = page.locator(
+                        f"a[href*='__doPostBack'][href*='Page']:not([aria-current='page'])"
+                    )
+                    found_next = False
+                    for i in range(await next_page_link.count()):
+                        txt = (await next_page_link.nth(i).inner_text()).strip()
+                        if txt == str(current_page_num):
+                            await next_page_link.nth(i).click()
+                            await asyncio.sleep(2)
+                            await page.wait_for_load_state("networkidle", timeout=20000)
+                            found_next = True
+                            break
+
+                    if not found_next:
+                        # Try 3: Last-page navigation — we're done if no next page visible
+                        break
+
+            finally:
+                await context.close()
+                await browser.close()
+
+        log.info("[pending] %s — Phase 1 complete: %d case numbers collected",
+                 self.county, len(collected_case_numbers))
+
+        if not collected_case_numbers:
+            log.info("[pending] No active/pending cases found for %s", self.county)
+            return stats
+
+        # ── Phase 2: Navigate directly to each case detail URL ──────────────────
+        # Batch processing with fresh browser every 20 cases (memory + session health)
+        BATCH = 20
+        base = self.base_url.rstrip("/")
+        # Build the correct CaseDetail.aspx prefix.
+        # When search_path is a subdirectory (e.g. /GTSSearch/), CaseDetail lives under it.
+        # When search_path is / (root), CaseDetail.aspx is directly under base_url.
+        _spath = self.search_path.strip("/")
+        _case_detail_base = f"{base}/{_spath}/" if _spath else f"{base}/"
+
+        for batch_start in range(0, len(collected_case_numbers), BATCH):
+            batch = collected_case_numbers[batch_start: batch_start + BATCH]
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=HEADLESS)
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    )
+                )
+                try:
+                    page2 = await context.new_page()
+
+                    # Accept terms once per browser session
+                    if self.requires_accept_terms:
+                        await page2.goto(search_url, wait_until="networkidle", timeout=30000)
+                        await asyncio.sleep(2)
                         try:
-                            case_link = page.locator(f"a:has-text('{case_number}')").first
-                            if await case_link.count() == 0:
+                            chk_el = page2.locator("input[id*='chk'][type='checkbox']")
+                            if await chk_el.count() > 0:
+                                await chk_el.first.click()
+                                await asyncio.sleep(1)
+                            accept_btn = page2.locator(
+                                "#MainContent_CustomContentPlaceHolder_btnAcceptTerms, "
+                                "input[id*='btnAccept'][type='submit']"
+                            )
+                            if await accept_btn.count() > 0:
+                                await accept_btn.first.click()
+                                await page2.wait_for_load_state("networkidle", timeout=20000)
+                                await asyncio.sleep(2)
+                        except Exception:
+                            pass
+
+                    for case_number in batch:
+                        asset_id_val = _asset_id(self.county, case_number)
+                        detail_url = f"{_case_detail_base}CaseDetail.aspx?CaseNo={case_number}"
+                        try:
+                            await page2.goto(detail_url, wait_until="networkidle", timeout=30000)
+                            await asyncio.sleep(2)
+
+                            # Skip if we ended up on a page that's NOT a case detail.
+                            # Robust check: require CaseDetail in URL OR current URL
+                            # differs from search URL (handles Jefferson SPA redirect).
+                            cur_url = page2.url.lower()
+                            if ("casedetail" not in cur_url
+                                    and detail_url.split("?")[0].lower() not in cur_url):
+                                log.debug("[pending] %s/%s — not on case detail (url=%s)",
+                                          self.county, case_number, page2.url)
                                 stats["cases_failed"] += 1
                                 continue
 
-                            await case_link.click()
-                            await asyncio.sleep(2)
-                            await page.wait_for_load_state("networkidle", timeout=20000)
-
                             # Capture CASE_DETAIL
-                            html = await page.content()
-                            _store_snapshot(self._conn, asset_id_val, "CASE_DETAIL", html, source_url=page.url)
+                            html = await page2.content()
+                            _store_snapshot(self._conn, asset_id_val, "CASE_DETAIL", html, source_url=page2.url)
                             fields = _parse_presale_html(html)
 
-                            # Try to click SALE_INFO tab for scheduled date + opening bid
+                            # Try SALE_INFO tab for scheduled date + opening bid
                             try:
-                                tabs = page.locator(self._sel("nav_tabs", SEL_NAV_TABS))
+                                tabs = page2.locator(self._sel("nav_tabs", SEL_NAV_TABS))
                                 for i in range(await tabs.count()):
                                     tab_txt = (await tabs.nth(i).inner_text()).strip().lower()
                                     if any(lbl in tab_txt for lbl in TAB_SALE_INFO):
                                         await tabs.nth(i).click()
                                         await asyncio.sleep(2)
-                                        await page.wait_for_load_state("networkidle", timeout=15000)
-                                        sale_html = await page.content()
-                                        _store_snapshot(self._conn, asset_id_val, "SALE_INFO", sale_html, source_url=page.url)
+                                        await page2.wait_for_load_state("networkidle", timeout=15000)
+                                        sale_html = await page2.content()
+                                        _store_snapshot(self._conn, asset_id_val, "SALE_INFO", sale_html,
+                                                        source_url=page2.url)
                                         sale_fields = _parse_presale_html(sale_html)
                                         fields.update({k: v for k, v in sale_fields.items() if v})
                                         break
                             except Exception as tab_exc:
-                                log.debug("[pending] SALE_INFO tab failed for %s/%s: %s", self.county, case_number, tab_exc)
+                                log.debug("[pending] SALE_INFO tab failed %s/%s: %s",
+                                          self.county, case_number, tab_exc)
 
                             action = _upsert_presale(case_number, fields)
                             stats[f"leads_{action}"] = stats.get(f"leads_{action}", 0) + 1
@@ -1817,55 +1927,15 @@ class GovSoftEngine:
                             log.warning("[pending] %s/%s failed: %s", self.county, case_number, exc)
                             stats["cases_failed"] += 1
 
-                        try:
-                            await page.go_back(wait_until="domcontentloaded", timeout=15000)
-                            await asyncio.sleep(2)
-                            await page.wait_for_load_state("networkidle", timeout=15000)
-                            if await page.locator(SEL_RESULTS_TABLE).count() == 0:
-                                raise Exception("lost results")
-                        except Exception:
-                            # Re-navigate to active search
-                            await page.goto(search_url, wait_until="networkidle", timeout=30000)
-                            await asyncio.sleep(2)
-                            if self.requires_accept_terms:
-                                try:
-                                    chk_el = page.locator("input[id*='chk'][type='checkbox']")
-                                    if await chk_el.count() > 0:
-                                        await chk_el.first.click()
-                                        await asyncio.sleep(1)
-                                    accept_btn = page.locator("#MainContent_CustomContentPlaceHolder_btnAcceptTerms")
-                                    if await accept_btn.count() > 0:
-                                        await accept_btn.first.click()
-                                        await page.wait_for_load_state("networkidle", timeout=20000)
-                                        await asyncio.sleep(2)
-                                except Exception:
-                                    pass
-                            dd_loc2 = page.locator(self._sel("dd_status", "[id$='ddStatus']"))
-                            if await dd_loc2.count() > 0:
-                                for sv in ["Active", "Pending"]:
-                                    try:
-                                        await dd_loc2.select_option(sv)
-                                        break
-                                    except Exception:
-                                        continue
-                            show_all2 = page.locator(self._sel("show_all_btn", SEL_SHOW_ALL_BTN))
-                            if await show_all2.count() > 0:
-                                await show_all2.first.click()
-                                await asyncio.sleep(3)
-                                await page.wait_for_load_state("networkidle", timeout=30000)
+                        await asyncio.sleep(random.uniform(1.0, 2.0))
 
-                        await asyncio.sleep(random.uniform(1.0, 2.5))
+                finally:
+                    await context.close()
+                    await browser.close()
 
-                    next_link = page.locator(SEL_DOPOSTBACK + ":has-text('Next')")
-                    if await next_link.count() == 0:
-                        break
-                    await next_link.first.click()
-                    await asyncio.sleep(2)
-                    await page.wait_for_load_state("networkidle", timeout=20000)
-
-            finally:
-                await context.close()
-                await browser.close()
+            log.info("[pending] %s batch %d-%d done | processed=%d failed=%d",
+                     self.county, batch_start, batch_start + len(batch),
+                     stats["cases_processed"], stats["cases_failed"])
 
         log.info("[pending] Complete for %s: %s", self.county, stats)
         return stats
@@ -1921,6 +1991,14 @@ class GovSoftEngine:
         BATCH = 20  # re-launch browser every N cases
         case_numbers = [r["case_number"] for r in rows]
 
+        # Build correct CaseDetail.aspx prefix (respects search_path subdirectory)
+        _spath_bf = self.search_path.strip("/")
+        _case_detail_base_bf = (
+            f"{self.base_url.rstrip('/')}/{_spath_bf}/"
+            if _spath_bf
+            else f"{self.base_url.rstrip('/')}/"
+        )
+
         for batch_start in range(0, len(case_numbers), BATCH):
             batch = case_numbers[batch_start: batch_start + BATCH]
             async with async_playwright() as pw:
@@ -1959,7 +2037,7 @@ class GovSoftEngine:
                     for case_number in batch:
                         asset_id_val = _asset_id(self.county, case_number)
                         detail_url = (
-                            f"{self.base_url.rstrip('/')}/CaseDetail.aspx?CaseNo={case_number}"
+                            f"{_case_detail_base_bf}CaseDetail.aspx?CaseNo={case_number}"
                         )
                         try:
                             await page.goto(detail_url, wait_until="networkidle", timeout=30000)
@@ -1967,16 +2045,19 @@ class GovSoftEngine:
 
                             body = await page.inner_text("body")
                             if any(p in body.lower() for p in (
-                                "case not found", "no case", "invalid case", "case number not found"
+                                "case not found", "no case", "invalid case", "resource cannot be found"
                             )):
                                 log.debug("[backfill] %s/%s — not found", self.county, case_number)
                                 stats["cases_failed"] += 1
                                 continue
 
                             # Check we're not on the search form
-                            search_page_check = self.search_path.split("/")[-1].lower()
-                            if search_page_check and search_page_check in page.url.lower():
-                                log.debug("[backfill] %s/%s — redirected to search", self.county, case_number)
+                            # Robust redirect check: require CaseDetail in current URL
+                            bf_cur_url = page.url.lower()
+                            if ("casedetail" not in bf_cur_url
+                                    and detail_url.split("?")[0].lower() not in bf_cur_url):
+                                log.debug("[backfill] %s/%s — redirected (url=%s)",
+                                          self.county, case_number, page.url)
                                 stats["cases_failed"] += 1
                                 continue
 
