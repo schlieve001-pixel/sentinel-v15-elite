@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
-import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, getAssetEvidence, downloadEvidenceDoc, type Lead, type UnlockResponse, type EvidenceDoc, ApiError } from "../lib/api";
+import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, getAssetEvidence, downloadEvidenceDoc, getLeadAudit, type Lead, type UnlockResponse, type EvidenceDoc, type LeadAuditTrail, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import ClassificationBadge from "../components/ClassificationBadge";
 
@@ -40,6 +40,9 @@ export default function LeadDetail() {
   const [evidenceDocs, setEvidenceDocs] = useState<EvidenceDoc[]>([]);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [evidenceError, setEvidenceError] = useState("");
+  const [auditTrail, setAuditTrail] = useState<LeadAuditTrail | null>(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [showAudit, setShowAudit] = useState(false);
 
   useEffect(() => {
     if (!assetId) return;
@@ -611,6 +614,167 @@ export default function LeadDetail() {
                     </p>
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Admin: Case Audit Trail */}
+        {user?.is_admin && assetId && (
+          <div style={{ margin: "20px 0", padding: "14px 18px", border: "1px solid #1e3a2e", borderRadius: 8, background: "rgba(17,24,39,0.8)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: showAudit ? 16 : 0 }}>
+              <h4 style={{ margin: 0, fontSize: "0.78em", letterSpacing: "0.1em", color: "#22c55e" }}>
+                ⚑ ADMIN — CASE AUDIT TRAIL
+              </h4>
+              <button
+                className="btn-outline-sm"
+                style={{ fontSize: "0.75em" }}
+                onClick={async () => {
+                  if (!showAudit && !auditTrail) {
+                    setAuditLoading(true);
+                    try {
+                      const data = await getLeadAudit(assetId!);
+                      setAuditTrail(data);
+                    } catch (e) {
+                      console.error("Audit load failed", e);
+                    } finally {
+                      setAuditLoading(false);
+                    }
+                  }
+                  setShowAudit((v) => !v);
+                }}
+              >
+                {showAudit ? "HIDE" : "SHOW AUDIT"}
+              </button>
+              {auditLoading && <span style={{ fontSize: "0.75em", opacity: 0.5 }}>Loading...</span>}
+            </div>
+
+            {showAudit && auditTrail && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+                {/* Raw Lead Fields */}
+                <div>
+                  <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>RAW DB RECORD</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.8em" }}>
+                    {Object.entries(auditTrail.lead).filter(([k]) => !k.startsWith("_")).map(([k, v]) => (
+                      <div key={k} style={{ display: "flex", gap: 6 }}>
+                        <span style={{ opacity: 0.45, minWidth: 160, flexShrink: 0 }}>{k}:</span>
+                        <span style={{ color: v == null ? "#6b7280" : "#e5e7eb", wordBreak: "break-all" }}>
+                          {v == null ? "null" : String(v)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: "0.78em" }}>
+                    <span style={{ opacity: 0.5 }}>Computed status: </span>
+                    <span style={{ color: "#f59e0b", fontWeight: 700 }}>{String(auditTrail.lead._computed_status || "—")}</span>
+                    <span style={{ opacity: 0.5, marginLeft: 16 }}>Canonical ID: </span>
+                    <span style={{ fontFamily: "monospace", color: "#94a3b8" }}>{String(auditTrail.lead._asset_id_canonical || "—")}</span>
+                  </div>
+                </div>
+
+                {/* Math Audit */}
+                {auditTrail.math_audit && (
+                  <div>
+                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>SURPLUS MATH AUDIT</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.8em" }}>
+                      {Object.entries(auditTrail.math_audit).map(([k, v]) => (
+                        <div key={k} style={{ display: "flex", gap: 6 }}>
+                          <span style={{ opacity: 0.45, minWidth: 160, flexShrink: 0 }}>{k}:</span>
+                          <span style={{ color: v == null ? "#6b7280" : "#e5e7eb" }}>{v == null ? "null" : String(v)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Equity Resolution */}
+                {auditTrail.equity_resolution && (
+                  <div>
+                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>EQUITY RESOLUTION</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.8em" }}>
+                      {Object.entries(auditTrail.equity_resolution).map(([k, v]) => (
+                        <div key={k} style={{ display: "flex", gap: 6 }}>
+                          <span style={{ opacity: 0.45, minWidth: 160, flexShrink: 0 }}>{k}:</span>
+                          <span style={{ color: v == null ? "#6b7280" : "#e5e7eb" }}>{v == null ? "null" : String(v)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Evidence Documents */}
+                {auditTrail.evidence_docs.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>
+                      EVIDENCE DOCUMENTS ({auditTrail.evidence_docs.length})
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      {auditTrail.evidence_docs.map((d) => (
+                        <div key={d.id} style={{ display: "flex", gap: 12, fontSize: "0.8em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
+                          <span style={{ opacity: 0.45, minWidth: 80 }}>{d.doc_family || "—"}</span>
+                          <span style={{ flex: 1, fontFamily: "monospace" }}>{d.filename}</span>
+                          <span style={{ opacity: 0.4 }}>{d.bytes ? `${Math.round(d.bytes / 1024)} KB` : ""}</span>
+                          <span style={{ opacity: 0.4 }}>{d.retrieved_ts ? new Date(d.retrieved_ts * 1000).toLocaleDateString() : ""}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Field Evidence */}
+                {auditTrail.field_evidence.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>
+                      FIELD EVIDENCE ({auditTrail.field_evidence.length} extractions)
+                    </div>
+                    {auditTrail.field_evidence.map((fe, i) => (
+                      <div key={i} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 4, fontSize: "0.78em", padding: "6px 0", borderBottom: "1px solid #1f2937", marginBottom: 4 }}>
+                        {Object.entries(fe).map(([k, v]) => (
+                          <div key={k} style={{ display: "flex", gap: 4 }}>
+                            <span style={{ opacity: 0.4, minWidth: 120, flexShrink: 0 }}>{k}:</span>
+                            <span style={{ color: v == null ? "#6b7280" : "#e5e7eb", wordBreak: "break-all" }}>{v == null ? "null" : String(v)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Audit Log */}
+                {auditTrail.audit_entries.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>
+                      AUDIT LOG ({auditTrail.audit_entries.length} entries)
+                    </div>
+                    {auditTrail.audit_entries.map((e) => (
+                      <div key={e.id} style={{ display: "flex", gap: 12, fontSize: "0.78em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
+                        <span style={{ opacity: 0.4, whiteSpace: "nowrap" }}>{e.created_at?.slice(0, 16).replace("T", " ")}</span>
+                        <span style={{ opacity: 0.6, minWidth: 140 }}>{e.user_email || "system"}</span>
+                        <span style={{ color: "#22c55e", fontFamily: "monospace" }}>{e.action}</span>
+                        {e.ip && <span style={{ opacity: 0.3 }}>{e.ip}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Unlock History */}
+                {auditTrail.unlock_history.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>
+                      UNLOCK HISTORY ({auditTrail.unlock_history.length} unlocks)
+                    </div>
+                    {auditTrail.unlock_history.map((u, i) => (
+                      <div key={i} style={{ display: "flex", gap: 12, fontSize: "0.78em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
+                        <span style={{ opacity: 0.4 }}>{String(u["unlocked_at"] || "—")}</span>
+                        <span style={{ opacity: 0.7 }}>{String(u["user_email"] || u["user_id"] || "—")}</span>
+                        <span style={{ opacity: 0.5 }}>{String(u["tier_at_unlock"] || "—")}</span>
+                        <span style={{ color: "#22c55e" }}>{String(u["credits_spent"] || 0)} credits</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
               </div>
             )}
           </div>

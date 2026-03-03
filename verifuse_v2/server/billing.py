@@ -42,18 +42,37 @@ TIER_TO_PRICE: dict[str, str] = {
     "sovereign": os.getenv(f"{_price_prefix}SOVEREIGN", "") or os.getenv("STRIPE_PRICE_SOVEREIGN", ""),
 }
 
+TIER_TO_ANNUAL_PRICE: dict[str, str] = {
+    "associate": os.getenv(f"{_price_prefix}ASSOCIATE_ANNUAL", ""),
+    "partner":   os.getenv(f"{_price_prefix}PARTNER_ANNUAL", ""),
+    "sovereign": os.getenv(f"{_price_prefix}SOVEREIGN_ANNUAL", ""),
+}
+
+# Map price_id → tier (supports both monthly and annual prices)
 PRICE_TO_TIER: dict[str, str] = {v: k for k, v in TIER_TO_PRICE.items() if v}
+PRICE_TO_TIER.update({v: k for k, v in TIER_TO_ANNUAL_PRICE.items() if v})
 
 
 # ── Checkout ─────────────────────────────────────────────────────────
 
-def create_checkout_session(user_id: str, email: str, tier: str) -> str:
+def create_checkout_session(user_id: str, email: str, tier: str,
+                            billing_period: str = "monthly") -> str:
     """Create a Stripe Checkout session. Returns the checkout URL.
+
+    billing_period: "monthly" (default) or "annual" (saves ~10%)
 
     The user is redirected to Stripe, pays, and Stripe sends a webhook
     back to /api/webhooks/stripe to activate their subscription.
     """
-    price_id = TIER_TO_PRICE.get(tier)
+    if billing_period == "annual":
+        price_id = TIER_TO_ANNUAL_PRICE.get(tier)
+        if not price_id:
+            # Fall back to monthly if annual not configured
+            log.warning("No annual price for tier=%s, falling back to monthly", tier)
+            price_id = TIER_TO_PRICE.get(tier)
+    else:
+        price_id = TIER_TO_PRICE.get(tier)
+
     if not price_id:
         raise HTTPException(
             status_code=400,
@@ -70,7 +89,7 @@ def create_checkout_session(user_id: str, email: str, tier: str) -> str:
         mode="subscription",
         payment_method_types=["card"],
         customer_email=email,
-        metadata={"user_id": user_id, "tier": tier},
+        metadata={"user_id": user_id, "tier": tier, "billing_period": billing_period},
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=f"{BASE_URL}/dashboard?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{BASE_URL}/pricing",
@@ -142,7 +161,7 @@ def _handle_subscription_updated(subscription: dict) -> None:
     Tier rank: scout < operator < sovereign.
     Only update if new_rank >= current_rank to prevent accidental downgrades.
     """
-    TIER_RANK = {"scout": 0, "operator": 1, "sovereign": 2}
+    TIER_RANK = {"associate": 0, "partner": 1, "sovereign": 2}
 
     customer_id = subscription.get("customer", "")
     # Find user by stripe_customer_id
@@ -182,7 +201,7 @@ def _handle_subscription_deleted(subscription: dict) -> None:
     customer_id = subscription.get("customer", "")
     with db.get_db() as conn:
         conn.execute(
-            "UPDATE users SET is_active = 0, tier = 'scout', credits_remaining = 0, "
+            "UPDATE users SET is_active = 1, tier = 'associate', credits_remaining = 0, "
             "subscription_status = 'canceled' "
             "WHERE stripe_customer_id = ?",
             [customer_id],

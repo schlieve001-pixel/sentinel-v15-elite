@@ -107,6 +107,14 @@ for lead in r['leads']:
 " "$@"
     ;;
 
+  # Denver County Public Trustee PDF scraper — real auction results + excess funds
+  # Data: Current_Sales_Results.pdf (weekly) + excess-funds-list (monthly) from denvergov.org
+  # Usage: bin/vf denver-scrape [--dry-run]
+  denver-scrape)
+    shift
+    python3 -m verifuse_v2.scrapers.adapters.denver_scraper "$@"
+    ;;
+
   # Tax lien surplus activation — C.R.S. § 39-11-151
   # Runs weekly (Thursdays 08:00 via systemd timer or manual trigger).
   # Pass --import-csv /path/to/file.csv to ingest county treasurer data.
@@ -116,6 +124,7 @@ for lead in r['leads']:
     ;;
 
   # Assessor owner lookup — populates owner_mailing_address for GOLD/SILVER leads
+
   assessor-lookup)
     shift
     python3 -m verifuse_v2.scrapers.assessor_lookup "$@"
@@ -153,6 +162,7 @@ Required commands:
   scraper-run-window      Run date-window ingest (flock; pass --county --days N)
   scraper-enum            Sequential case enumerator (flock; --county --prefix --start-num --end-num)
   extract-batch           Gate 4 batch extraction on BRONZE leads (--county --limit)
+  denver-scrape           Denver Public Trustee PDF scraper (--dry-run to preview)
   status                  Show API + scraper timer systemd status
   backup-db               SQLite online backup (timestamped .bak file)
 

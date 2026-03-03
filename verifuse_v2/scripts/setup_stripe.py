@@ -25,6 +25,39 @@ from __future__ import annotations
 import os
 import sys
 
+ANNUAL_SUBSCRIPTION_PRODUCTS = [
+    {
+        "name": "VeriFuse Associate — Annual",
+        "description": "30 credits/month billed annually. Save $179 vs monthly.",
+        "price_cents": 160900,  # $1,609/yr = $134.08/mo
+        "tier": "associate",
+        "credits": 30,
+        "env_key": "ASSOCIATE_ANNUAL",
+        "recurring": True,
+        "interval": "year",
+    },
+    {
+        "name": "VeriFuse Partner — Annual",
+        "description": "100 credits/month billed annually. Save $479 vs monthly.",
+        "price_cents": 430900,  # $4,309/yr = $359.08/mo
+        "tier": "partner",
+        "credits": 100,
+        "env_key": "PARTNER_ANNUAL",
+        "recurring": True,
+        "interval": "year",
+    },
+    {
+        "name": "VeriFuse Sovereign — Annual",
+        "description": "250 credits/month billed annually. Save $1,079 vs monthly.",
+        "price_cents": 970900,  # $9,709/yr = $809.08/mo
+        "tier": "sovereign",
+        "credits": 250,
+        "env_key": "SOVEREIGN_ANNUAL",
+        "recurring": True,
+        "interval": "year",
+    },
+]
+
 SUBSCRIPTION_PRODUCTS = [
     {
         "name": "VeriFuse Associate",
@@ -131,7 +164,24 @@ def create_products(stripe) -> dict[str, str]:
     """Create all Stripe products and prices. Returns {env_key: price_id} map."""
     price_ids: dict[str, str] = {}
 
-    print("\n── Subscription Products ──────────────────────────────────────────")
+    print("\n── Annual Subscription Products ───────────────────────────────────")
+    for p in ANNUAL_SUBSCRIPTION_PRODUCTS:
+        product = stripe.Product.create(
+            name=p["name"],
+            description=p["description"],
+            metadata={"tier": p["tier"], "credits": str(p["credits"]), "billing": "annual"},
+        )
+        price = stripe.Price.create(
+            product=product.id,
+            unit_amount=p["price_cents"],
+            currency="usd",
+            recurring={"interval": "year"},
+            metadata={"tier": p["tier"], "credits": str(p["credits"]), "billing": "annual"},
+        )
+        price_ids[p["env_key"]] = price.id
+        print(f"  {p['name']:40s} → {price.id}")
+
+    print("\n── Monthly Subscription Products ──────────────────────────────────")
     for p in SUBSCRIPTION_PRODUCTS:
         product = stripe.Product.create(
             name=p["name"],
@@ -212,14 +262,32 @@ if __name__ == "__main__":
 
     mode = "test" if (secret_key or "").startswith("sk_test_") else "live"
 
-    if "--create" not in sys.argv and "--webhook" not in sys.argv:
+    if "--create" not in sys.argv and "--create-annual" not in sys.argv and "--webhook" not in sys.argv:
         print_instructions()
         sys.exit(0)
 
     price_ids: dict[str, str] = {}
     webhook_secret: str | None = None
 
-    if "--create" in sys.argv:
+    if "--create-annual" in sys.argv:
+        # Only create annual prices (add to existing Stripe products)
+        print("\n── Creating Annual Prices Only ────────────────────────────────────")
+        for p in ANNUAL_SUBSCRIPTION_PRODUCTS:
+            product = _stripe.Product.create(
+                name=p["name"],
+                description=p["description"],
+                metadata={"tier": p["tier"], "credits": str(p["credits"]), "billing": "annual"},
+            )
+            price = _stripe.Price.create(
+                product=product.id,
+                unit_amount=p["price_cents"],
+                currency="usd",
+                recurring={"interval": "year"},
+                metadata={"tier": p["tier"], "credits": str(p["credits"]), "billing": "annual"},
+            )
+            price_ids[p["env_key"]] = price.id
+            print(f"  {p['name']:40s} → {price.id}")
+    elif "--create" in sys.argv:
         price_ids = create_products(_stripe)
 
     if "--webhook" in sys.argv:

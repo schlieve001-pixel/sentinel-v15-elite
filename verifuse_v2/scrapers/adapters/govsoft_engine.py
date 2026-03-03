@@ -108,6 +108,33 @@ def _parse_sale_date(html: str) -> str | None:
         return None
 
 
+# ── Quick overbid-amount extractor (used before document downloads) ───────────
+
+_OVERBID_AMOUNT_RE = re.compile(
+    r'(?:overbid\s+at\s+sale|overbid\s+amount|surplus\s+(?:funds|amount)|'
+    r'excess\s*proceeds|funds\s*available)'
+    r'(?:(?:<[^>]*>)|[^<\d$])*\$?([\d,]+(?:\.\d{2})?)',
+    re.IGNORECASE,
+)
+
+
+def _parse_overbid_from_sale_info(html: str) -> float | None:
+    """Quick overbid dollar extraction from raw SALE_INFO HTML.
+
+    Returns float amount (0.0 if zero, positive if >0), or None if field not found.
+    Used to skip document downloads when SALE_INFO confirms overbid = $0.
+    """
+    if not html:
+        return None
+    m = _OVERBID_AMOUNT_RE.search(html)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -515,22 +542,24 @@ class GovSoftEngine:
         return None
 
     async def _navigate_and_search(
-        self, page, date_from: str, date_to: str
+        self, page, date_from: str, date_to: str, status: str = "Sold"
     ) -> None:
-        """Navigate to search page, select ddStatus='Sold', fill date fields, click Search.
+        """Navigate to search page, select ddStatus, fill date fields, click Search.
 
         date_from / date_to: MM/DD/YYYY strings.
+        status: GovSoft ddStatus value — "Sold" for active redemption-period cases,
+                "Deeded" for mature cases where the deed has already been issued.
         Raises on fatal navigation failure.
         """
-        # Step 1: Select ddStatus='Sold' to target sold/auctioned cases.
+        # Step 1: Select ddStatus to target cases in the given status.
         dd_status_loc = page.locator(
             self._sel("dd_status", "[id$='ddStatus']")
         )
         if await dd_status_loc.count() > 0:
-            await dd_status_loc.select_option("Sold")
+            await dd_status_loc.select_option(status)
             await asyncio.sleep(1)
             await page.wait_for_load_state("networkidle", timeout=10000)
-            log.info("[engine] ddStatus='Sold' selected for %s", self.county)
+            log.info("[engine] ddStatus=%r selected for %s", status, self.county)
         else:
             log.warning(
                 "[engine] ddStatus dropdown not found for %s — "
@@ -745,6 +774,17 @@ class GovSoftEngine:
             except Exception as exc:
                 log.warning("Tab %s failed for %s/%s: %s",
                             snap_type, self.county, case_number, exc)
+
+        # Optimization: skip document downloads when SALE_INFO confirms overbid = $0.
+        # El Paso publishes .tif files that cause 30-second Playwright timeouts per file.
+        # If the HTML "Overbid at Sale" field is $0 there is no surplus to OCR-validate.
+        _parsed_overbid = _parse_overbid_from_sale_info(sale_info_html)
+        if _parsed_overbid is not None and _parsed_overbid == 0:
+            log.info(
+                "[engine] %s/%s — overbid=$0 (SALE_INFO HTML); skipping document downloads",
+                self.county, case_number,
+            )
+            docs_html = ""  # suppresses the `if docs_html:` download block below
 
         # Document downloads
         if docs_html:
@@ -1097,6 +1137,137 @@ class GovSoftEngine:
 
         return result
 
+    async def _run_status_pass(
+        self,
+        page,
+        date_from: str,
+        date_to: str,
+        status: str,
+        stats: dict,
+        seen_cases: set,
+    ) -> None:
+        """Paginate through search results for one status pass and process each case.
+
+        Mutates stats in-place. Skips cases already in seen_cases (cross-status dedup).
+        Called from run_date_window() for each status ("Sold", "Deeded").
+        """
+        while True:
+            _store_snapshot(
+                self._conn,
+                f"FORECLOSURE:CO:{self.county.upper()}:SEARCH",
+                "SEARCH_RESULTS",
+                await page.content(),
+                source_url=page.url,
+            )
+
+            rows = await page.locator(
+                self._sel("results_table", SEL_RESULTS_TABLE)
+            ).first.locator("tbody tr").all()
+
+            case_entries: list[tuple[str, str]] = []  # (case_number, href)
+            for row in rows:
+                try:
+                    cells = await row.locator("td").all_inner_texts()
+                    case_number = ""
+                    for cell_text in cells[:4]:
+                        txt = cell_text.strip()
+                        if txt and len(txt) >= 4:
+                            case_number = txt
+                            break
+                    if not case_number:
+                        continue
+                    link_el = row.locator("a").first
+                    href = ""
+                    if await link_el.count() > 0:
+                        href = (await link_el.get_attribute("href")) or ""
+                    case_entries.append((case_number, href))
+                except Exception:
+                    continue
+
+            for case_number, _href in case_entries:
+                if case_number in seen_cases:
+                    log.debug(
+                        "Skipping already-processed case %s/%s (seen in prior status pass)",
+                        self.county, case_number,
+                    )
+                    continue
+                seen_cases.add(case_number)
+                asset_id_val = _asset_id(self.county, case_number)
+                try:
+                    # Re-locate the case link on the current page (locators are
+                    # refreshed after go_back / search re-run to avoid stale refs).
+                    case_link = page.locator(
+                        f"a:has-text('{case_number}')"
+                    ).first
+                    if await case_link.count() == 0:
+                        log.warning(
+                            "Case link %s not in results (stale?); skipping",
+                            case_number,
+                        )
+                        stats["cases_failed"] += 1
+                        continue
+
+                    await case_link.click()
+                    await asyncio.sleep(2)
+                    await page.wait_for_load_state("networkidle", timeout=20000)
+
+                    log.info("Opened case detail: %s/%s url=%s",
+                             self.county, case_number, page.url)
+
+                    await self._capture_case_detail_on_page(
+                        page, case_number, asset_id_val
+                    )
+                    stats["cases_processed"] += 1
+
+                except Exception as exc:
+                    log.error("Case %s/%s failed in date-window: %s",
+                              self.county, case_number, exc)
+                    stats["cases_failed"] += 1
+                    try:
+                        _upsert_lead(
+                            self._conn, self.county, case_number, asset_id_val,
+                            overbid_amount=None, sale_date=None,
+                            data_grade="BRONZE", processing_status="NEEDS_REVIEW",
+                        )
+                    except Exception as ue:
+                        log.warning(
+                            "BRONZE fallback write failed for %s/%s: %s",
+                            self.county, case_number, ue,
+                        )
+
+                # Navigate back to the results page (within same session).
+                # Use go_back() first; if that loses the results, re-run the search.
+                try:
+                    await page.go_back(
+                        wait_until="domcontentloaded", timeout=15000
+                    )
+                    await asyncio.sleep(2)
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                    if await page.locator(SEL_RESULTS_TABLE).count() == 0:
+                        raise Exception("Results table missing after go_back")
+                except Exception:
+                    log.info(
+                        "Results page lost for %s — re-running %s search",
+                        self.county, status,
+                    )
+                    try:
+                        await self._navigate_and_search(
+                            page, date_from, date_to, status=status
+                        )
+                    except Exception as re_exc:
+                        log.error("Search re-run failed for %s: %s",
+                                  self.county, re_exc)
+
+                await asyncio.sleep(random.uniform(1.0, 2.5))
+
+            # Next page via __doPostBack
+            next_link = page.locator(SEL_DOPOSTBACK + ":has-text('Next')")
+            if await next_link.count() == 0:
+                break
+            await next_link.first.click()
+            await asyncio.sleep(2)
+            await page.wait_for_load_state("networkidle", timeout=20000)
+
     async def run_date_window(self, date_from: str, date_to: str) -> dict:
         """Scrape all cases in a date range.
 
@@ -1159,140 +1330,195 @@ class GovSoftEngine:
                     except Exception:
                         pass
 
-                try:
-                    await self._navigate_and_search(page, date_from, date_to)
-                except Exception as exc:
-                    log.error("Date-range search failed for %s: %s", self.county, exc)
-                    return stats
+                # Run two status passes: "Sold" (active redemption period) then
+                # "Deeded" (mature cases where the deed has already been issued).
+                # seen_cases deduplicates across passes in case a case appears in both.
+                seen_cases: set[str] = set()
+                for _status in ("Sold", "Deeded"):
+                    try:
+                        await self._navigate_and_search(
+                            page, date_from, date_to, status=_status
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "Date-range search failed for %s status=%r: %s",
+                            self.county, _status, exc,
+                        )
+                        continue  # try next status
 
-                # Paginate through results — process each case INLINE within this
-                # browser session. Do NOT call run_single_case() here: post-sale
-                # cases don't appear in a fresh case-number search (the default form
-                # shows Active/Pending only). We click each row directly from the
-                # sold-date results, capture the detail, then navigate back.
-                while True:
-                    _store_snapshot(
-                        self._conn,
-                        f"FORECLOSURE:CO:{self.county.upper()}:SEARCH",
-                        "SEARCH_RESULTS",
-                        await page.content(),
-                        source_url=page.url,
+                    await self._run_status_pass(
+                        page, date_from, date_to, _status, stats, seen_cases
                     )
 
-                    # Collect (case_number, row_link_href) pairs from this results page.
-                    # Collect upfront so row locators don't go stale after navigation.
-                    # Use .first.locator() chaining — plain string concatenation of a
-                    # comma-separated selector with " tbody tr" only appends the
-                    # descendant to the LAST alternative, causing the whole table to
-                    # be matched by the first alternative instead of individual rows.
-                    rows = await page.locator(
-                        self._sel("results_table", SEL_RESULTS_TABLE)
-                    ).first.locator("tbody tr").all()
+            finally:
+                await context.close()
+                await browser.close()
 
-                    case_entries: list[tuple[str, str]] = []  # (case_number, href)
-                    for row in rows:
+        return stats
+
+    async def run_sequential_enum(
+        self,
+        prefix: str,
+        start_num: int,
+        end_num: int,
+        *,
+        batch_size: int = 50,
+    ) -> dict:
+        """Enumerate case numbers sequentially and process each detail page directly.
+
+        Bypasses the GovSoft date-filter search form entirely. Used for historical
+        backfills where the search form returns 0 results for old "Deeded" cases.
+
+        Args:
+            prefix:     Case-number prefix, e.g. "J24" for Jefferson 2024.
+            start_num:  First numeric suffix to attempt (inclusive).
+            end_num:    Last numeric suffix to attempt (inclusive).
+            batch_size: Re-launch browser every N cases to avoid memory leaks.
+
+        Returns:
+            {cases_found, cases_processed, cases_failed, cases_not_found}
+        """
+        if self.base_url == "CONFIGURE_ME":
+            raise RuntimeError(
+                f"county={self.county!r} base_url is not configured. "
+                f"Set GOVSOFT_{self.county.upper()}_URL env var and re-run migrations."
+            )
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError(
+                "playwright not installed. Run: pip install 'playwright>=1.45.0' "
+                "&& playwright install chromium"
+            )
+
+        stats = {
+            "cases_found": 0,
+            "cases_processed": 0,
+            "cases_failed": 0,
+            "cases_not_found": 0,
+        }
+
+        total = end_num - start_num + 1
+        pad_len = max(len(str(end_num)), 4)
+        case_numbers = [
+            f"{prefix}{str(n).zfill(pad_len)}" for n in range(start_num, end_num + 1)
+        ]
+
+        log.info(
+            "[enum] Starting sequential enumeration for %s: prefix=%s num=%d..%d (%d cases)",
+            self.county, prefix, start_num, end_num, total,
+        )
+
+        # Process in batches; fresh browser per batch prevents memory leaks.
+        for batch_start in range(0, len(case_numbers), batch_size):
+            batch = case_numbers[batch_start : batch_start + batch_size]
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=HEADLESS)
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    )
+                )
+                try:
+                    page = await context.new_page()
+                    search_url = f"{self.base_url.rstrip('/')}{self.search_path}"
+
+                    # Accept terms once per browser session if required
+                    if self.requires_accept_terms:
+                        await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                        await asyncio.sleep(2)
                         try:
-                            cells = await row.locator("td").all_inner_texts()
-                            case_number = ""
-                            for cell_text in cells[:4]:
-                                txt = cell_text.strip()
-                                if txt and len(txt) >= 4:
-                                    case_number = txt
-                                    break
-                            if not case_number:
-                                continue
-                            # Capture the row link href for direct navigation
-                            link_el = row.locator("a").first
-                            href = ""
-                            if await link_el.count() > 0:
-                                href = (await link_el.get_attribute("href")) or ""
-                            case_entries.append((case_number, href))
+                            chk_el = page.locator("input[id*='chk'][type='checkbox']")
+                            if await chk_el.count() > 0:
+                                await chk_el.first.click()
+                                await asyncio.sleep(1)
+                            accept_btn = page.locator(
+                                "#MainContent_CustomContentPlaceHolder_btnAcceptTerms, "
+                                "input[id*='btnAccept'][type='submit'], "
+                                "input[value*='Accept Terms'][type='submit']"
+                            )
+                            if await accept_btn.count() > 0:
+                                await accept_btn.first.click()
+                                await page.wait_for_load_state("networkidle", timeout=20000)
+                                await asyncio.sleep(2)
                         except Exception:
-                            continue
+                            pass
 
-                    results_page_content = await page.content()
-
-                    for case_number, _href in case_entries:
+                    for case_number in batch:
                         asset_id_val = _asset_id(self.county, case_number)
+                        # Direct URL to case detail page — bypasses the search form
+                        detail_url = (
+                            f"{self.base_url.rstrip('/')}"
+                            f"/CaseDetail.aspx?CaseNo={case_number}"
+                        )
                         try:
-                            # Re-locate the case link on the current page (locators are
-                            # refreshed after go_back / search re-run to avoid stale refs).
-                            case_link = page.locator(
-                                f"a:has-text('{case_number}')"
-                            ).first
-                            if await case_link.count() == 0:
-                                log.warning(
-                                    "Case link %s not in results (stale?); skipping",
-                                    case_number,
+                            await page.goto(
+                                detail_url, wait_until="networkidle", timeout=30000
+                            )
+                            await asyncio.sleep(2)
+
+                            # Detect "case not found" responses
+                            body_text = await page.inner_text("body")
+                            if any(
+                                phrase in body_text.lower()
+                                for phrase in (
+                                    "case not found", "no case", "invalid case",
+                                    "case number not found",
                                 )
-                                stats["cases_failed"] += 1
+                            ):
+                                log.debug(
+                                    "[enum] %s/%s — not found (page text)",
+                                    self.county, case_number,
+                                )
+                                stats["cases_not_found"] += 1
                                 continue
 
-                            url_before = page.url
-                            await case_link.click()
-                            await asyncio.sleep(2)
-                            await page.wait_for_load_state("networkidle", timeout=20000)
+                            # Detect redirect back to search form (case not found)
+                            search_page = self.search_path.split("/")[-1].lower()
+                            if search_page and search_page in page.url.lower():
+                                log.debug(
+                                    "[enum] %s/%s — redirected to search (not found)",
+                                    self.county, case_number,
+                                )
+                                stats["cases_not_found"] += 1
+                                continue
 
-                            log.info("Opened case detail: %s/%s url=%s",
-                                     self.county, case_number, page.url)
+                            log.info(
+                                "[enum] %s/%s — found, capturing detail",
+                                self.county, case_number,
+                            )
+                            stats["cases_found"] += 1
 
-                            # Capture all detail tabs, documents, and write DB rows
                             await self._capture_case_detail_on_page(
                                 page, case_number, asset_id_val
                             )
                             stats["cases_processed"] += 1
 
                         except Exception as exc:
-                            log.error("Case %s/%s failed in date-window: %s",
-                                      self.county, case_number, exc)
+                            log.warning(
+                                "[enum] %s/%s failed: %s",
+                                self.county, case_number, exc,
+                            )
                             stats["cases_failed"] += 1
-                            try:
-                                _upsert_lead(
-                                    self._conn, self.county, case_number, asset_id_val,
-                                    overbid_amount=None, sale_date=None,
-                                    data_grade="BRONZE", processing_status="NEEDS_REVIEW",
-                                )
-                            except Exception as ue:
-                                log.warning(
-                                    "BRONZE fallback write failed for %s/%s: %s",
-                                    self.county, case_number, ue,
-                                )
 
-                        # Navigate back to the results page (within same session).
-                        # Use go_back() first; if that loses the results, re-run the search.
-                        try:
-                            await page.go_back(
-                                wait_until="domcontentloaded", timeout=15000
-                            )
-                            await asyncio.sleep(2)
-                            await page.wait_for_load_state("networkidle", timeout=15000)
-                            # Verify results table is still present
-                            if await page.locator(SEL_RESULTS_TABLE).count() == 0:
-                                raise Exception("Results table missing after go_back")
-                        except Exception:
-                            log.info(
-                                "Results page lost for %s — re-running sold-date search",
-                                self.county,
-                            )
-                            # Re-run the sold-date search to restore the results page
-                            try:
-                                await self._navigate_and_search(page, date_from, date_to)
-                            except Exception as re_exc:
-                                log.error("Search re-run failed for %s: %s",
-                                          self.county, re_exc)
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
 
-                        await asyncio.sleep(random.uniform(1.0, 2.5))
+                finally:
+                    await context.close()
+                    await browser.close()
 
-                    # Next page via __doPostBack
-                    next_link = page.locator(SEL_DOPOSTBACK + ":has-text('Next')")
-                    if await next_link.count() == 0:
-                        break
-                    await next_link.first.click()
-                    await asyncio.sleep(2)
-                    await page.wait_for_load_state("networkidle", timeout=20000)
+            log.info(
+                "[enum] Batch %d/%d done — found=%d processed=%d failed=%d not_found=%d",
+                min(batch_start + batch_size, len(case_numbers)),
+                len(case_numbers),
+                stats["cases_found"],
+                stats["cases_processed"],
+                stats["cases_failed"],
+                stats["cases_not_found"],
+            )
 
-            finally:
-                await context.close()
-                await browser.close()
-
+        log.info("[enum] Complete for %s: %s", self.county, stats)
         return stats

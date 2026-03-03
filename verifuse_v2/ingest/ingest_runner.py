@@ -192,6 +192,59 @@ async def _run_date_window(conn, county: str, date_from: str, date_to: str) -> d
     }
 
 
+async def _run_sequential_enum(
+    conn, county: str, prefix: str, start_num: int, end_num: int
+) -> dict:
+    """Execute a sequential case enumeration run with ingestion_runs tracking."""
+    from verifuse_v2.scrapers.adapters.govsoft_engine import GovSoftEngine
+
+    run_id = str(uuid4())
+    conn.execute(
+        """INSERT INTO ingestion_runs
+           (run_id, county, start_ts, status, cases_processed, cases_failed, notes)
+           VALUES (?,?,?,'RUNNING',0,0,?)
+        """,
+        [run_id, county, int(time.time()), f"sequential_enum:{prefix}{start_num}..{prefix}{end_num}"],
+    )
+    log.info(
+        "ingestion_run started: run_id=%s county=%s mode=sequential_enum prefix=%s num=%d..%d",
+        run_id, county, prefix, start_num, end_num,
+    )
+
+    cases_processed = 0
+    cases_failed = 0
+    final_status = "FAILED"
+
+    try:
+        engine = GovSoftEngine(county, db_conn=conn)
+        enum_stats = await engine.run_sequential_enum(prefix, start_num, end_num)
+        cases_processed = enum_stats.get("cases_processed", 0)
+        cases_failed = enum_stats.get("cases_failed", 0)
+        final_status = "SUCCESS" if cases_failed == 0 else "PARTIAL"
+    except Exception as exc:
+        final_status = "FAILED"
+        log.exception("Sequential enum run failed: %s", exc)
+    finally:
+        conn.execute(
+            """UPDATE ingestion_runs
+               SET end_ts=?, status=?, cases_processed=?, cases_failed=?
+               WHERE run_id=?
+            """,
+            [int(time.time()), final_status, cases_processed, cases_failed, run_id],
+        )
+
+    log.info(
+        "ingestion_run complete: run_id=%s status=%s processed=%d failed=%d",
+        run_id, final_status, cases_processed, cases_failed,
+    )
+    return {
+        "run_id": run_id,
+        "status": final_status,
+        "cases_processed": cases_processed,
+        "cases_failed": cases_failed,
+    }
+
+
 def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="VeriFuse vNEXT GovSoft Ingestion Runner"
@@ -201,6 +254,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
                       help="Scrape a single case by case number")
     mode.add_argument("--date-window", action="store_true",
                       help="Scrape all cases in a date range")
+    mode.add_argument("--sequential-enum", action="store_true",
+                      help="Enumerate case numbers sequentially (bypass search form)")
 
     parser.add_argument("--county", required=True,
                         help="County slug (e.g. jefferson, arapahoe)")
@@ -212,6 +267,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
                         help="End date MM/DD/YYYY for --date-window")
     parser.add_argument("--days", type=int,
                         help="Rolling window: scrape last N days (--date-window)")
+    parser.add_argument("--prefix",
+                        help="Case number prefix for --sequential-enum (e.g. J24)")
+    parser.add_argument("--start-num", type=int,
+                        help="Start number for --sequential-enum (inclusive)")
+    parser.add_argument("--end-num", type=int,
+                        help="End number for --sequential-enum (inclusive)")
     parser.add_argument("--db", default=DB_PATH,
                         help="Path to SQLite database")
     return parser.parse_args(argv)
@@ -238,6 +299,16 @@ def main(argv=None) -> int:
             return 1
         result = asyncio.run(
             _run_single_case(conn, args.county, args.case_number)
+        )
+
+    elif args.sequential_enum:
+        if not args.prefix or args.start_num is None or args.end_num is None:
+            log.error("--sequential-enum requires --prefix, --start-num, --end-num")
+            return 1
+        result = asyncio.run(
+            _run_sequential_enum(
+                conn, args.county, args.prefix, args.start_num, args.end_num
+            )
         )
 
     else:  # date-window

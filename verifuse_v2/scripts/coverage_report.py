@@ -63,6 +63,17 @@ def generate_report() -> list[dict]:
     conn = _get_conn()
     time_col = _detect_time_col(conn)
 
+    # Query lead counts per county
+    county_lead_counts: dict[str, int] = {}
+    try:
+        lead_rows = conn.execute(
+            "SELECT LOWER(county) as county, COUNT(*) as cnt FROM leads GROUP BY LOWER(county)"
+        ).fetchall()
+        for row in lead_rows:
+            county_lead_counts[row["county"]] = row["cnt"]
+    except Exception as e:
+        log.warning("Could not query lead counts: %s", e)
+
     # Query all scrape events from last 24h
     events_query = f"""
         SELECT asset_id, event_type, reason, metadata_json, {time_col} as event_time
@@ -138,12 +149,18 @@ def generate_report() -> list[dict]:
 
         silent_24h = enabled and not ran_24h
 
+        leads_count = county_lead_counts.get(code, 0)
         report.append({
             "county_code": code,
+            "county": name or code,          # alias for frontend
             "name": name,
             "enabled": enabled,
+            "active": enabled,               # alias for frontend
             "platform": platform,
+            "platform_type": platform,       # alias for frontend
             "last_run": last_run,
+            "last_scraped_at": last_run,     # alias for frontend
+            "leads_count": leads_count,
             "duration_sec": duration_sec,
             "pdfs_found": pdfs_found,
             "pdfs_downloaded": pdfs_downloaded,

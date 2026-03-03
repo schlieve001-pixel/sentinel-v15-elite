@@ -7,6 +7,7 @@ import Register from "./pages/Register";
 import Dashboard from "./pages/Dashboard";
 import LeadDetail from "./pages/LeadDetail";
 import Admin from "./pages/Admin";
+import Pricing from "./pages/Pricing";
 import "./App.css";
 
 export default function App() {
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
           <Route path="/lead/:assetId" element={<ErrorBoundary><LeadDetail /></ErrorBoundary>} />
           <Route path="/admin" element={<ErrorBoundary><Admin /></ErrorBoundary>} />
+          <Route path="/pricing" element={<ErrorBoundary><Pricing /></ErrorBoundary>} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>
