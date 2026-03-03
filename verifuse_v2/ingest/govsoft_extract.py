@@ -386,31 +386,34 @@ def run_extraction(asset_id: str, conn=None) -> dict:
         # This prevents HTML math from overriding the authoritative voucher doc.
         voucher_overbid: Decimal | None = None
         voucher_doc_id: str | None = None
-        ob_doc = conn.execute(
+        # Fetch ALL OB voucher docs (duplicates can exist from multiple scrape runs).
+        # Check field_evidence across all of them — prefer the one with OCR data.
+        ob_docs = conn.execute(
             """SELECT ed.id FROM evidence_documents ed
                WHERE ed.asset_id = ?
                  AND ed.doc_family = 'OB'
                  AND (UPPER(ed.filename) LIKE '%OBCLAIM%'
                       OR UPPER(ed.filename) LIKE '%OBCKREQ%'
                       OR UPPER(ed.filename) LIKE '%CKREQ%')
-               LIMIT 1""",
+               ORDER BY ed.id""",
             [asset_id],
-        ).fetchone()
+        ).fetchall()
         # CERTQH (Certificate of Qualified Holder) is present in ALL sold cases
         # and is NOT an overbid voucher. Only OBCLAIM/OBCKREQ/CKREQ are true
         # overbid vouchers that require Gate 5 OCR confirmation.
-        has_voucher_doc = ob_doc is not None
-        if ob_doc:
-            voucher_doc_id = ob_doc["id"]
-            # Try to read voucher amount from field_evidence (Gate 5 OCR data).
-            # field_evidence rows are inserted by govsoft_extract Gate 5 with
-            # field_name in ('overbid_amount', 'surplus_amount', 'overbid').
+        has_voucher_doc = len(ob_docs) > 0
+        if ob_docs:
+            voucher_doc_id = ob_docs[0]["id"]
+            # Try to read voucher amount from field_evidence (Gate 5 OCR data)
+            # across ALL ob voucher doc variants — handles duplicate doc entries.
+            ob_doc_ids = [d["id"] for d in ob_docs]
+            _ph = ",".join(["?"] * len(ob_doc_ids))
             fev = conn.execute(
-                """SELECT extracted_value FROM field_evidence
-                   WHERE evidence_doc_id = ?
+                f"""SELECT extracted_value FROM field_evidence
+                   WHERE evidence_doc_id IN ({_ph})
                      AND field_name = 'overbid_amount'
                    ORDER BY confidence DESC LIMIT 1""",
-                [ob_doc["id"]],
+                ob_doc_ids,
             ).fetchone()
             if fev and fev["extracted_value"]:
                 voucher_overbid = parse_currency(fev["extracted_value"])
