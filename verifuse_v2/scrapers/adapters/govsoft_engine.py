@@ -1522,3 +1522,492 @@ class GovSoftEngine:
 
         log.info("[enum] Complete for %s: %s", self.county, stats)
         return stats
+
+    # ── Pre-sale / pending cases ─────────────────────────────────────────────
+
+    async def run_pending_sales(self) -> dict:
+        """Scrape Active/Pending cases (pre-sale: scheduled auction date in future).
+
+        GovSoft ddStatus='Active' returns cases where the trustee's sale has NOT yet
+        occurred — typically 10-120 days before the scheduled auction date.
+        These become PRE_SALE leads with opening_bid and scheduled_sale_date populated.
+
+        Pre-sale surplus estimate:
+            pre_sale_estimated_surplus = max(0, estimated_appraised_value - opening_bid)
+        where estimated_appraised_value is sourced from county assessor.
+
+        Returns {cases_processed, cases_failed, leads_inserted, leads_upgraded}.
+        """
+        if self.base_url == "CONFIGURE_ME":
+            raise RuntimeError(
+                f"county={self.county!r} base_url not configured."
+            )
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError("playwright not installed.")
+
+        stats = {
+            "cases_processed": 0, "cases_failed": 0,
+            "leads_inserted": 0, "leads_upgraded": 0,
+        }
+
+        # Regex helpers for pre-sale CASE_DETAIL parsing
+        _amount_re = re.compile(
+            r'(?:amount|opening.{0,10}bid|total.{0,10}indebtedness)'
+            r'(?:(?:<[^>]*>)|[^<$\d])*\$?([\d,]+(?:\.\d{2})?)',
+            re.IGNORECASE,
+        )
+        _sched_date_re = re.compile(
+            r'(?:scheduled.{0,20}date|sale.{0,10}date|hearing.{0,10}date)'
+            r'(?:(?:<[^>]*>)|[^<\d])*(\d{1,2}/\d{1,2}/\d{4})',
+            re.IGNORECASE,
+        )
+        _owner_re = re.compile(
+            r'(?:grantor|trustor|borrower|owner|defendant)'
+            r'(?:(?:<[^>]*>)|[^<])*?<dd[^>]*>([^<]{3,80})</dd>',
+            re.IGNORECASE,
+        )
+        _address_re = re.compile(
+            r'(?:property\s+address|street\s+address|situs)'
+            r'(?:(?:<[^>]*>)|[^<])*?<dd[^>]*>([^<]{5,120})</dd>',
+            re.IGNORECASE,
+        )
+        _lender_re = re.compile(
+            r'(?:beneficiary|lender|holder|creditor)'
+            r'(?:(?:<[^>]*>)|[^<])*?<dd[^>]*>([^<]{3,100})</dd>',
+            re.IGNORECASE,
+        )
+
+        def _parse_presale_html(html: str) -> dict:
+            """Extract pre-sale fields from CASE_DETAIL or SALE_INFO HTML."""
+            result: dict = {}
+            m = _amount_re.search(html)
+            if m:
+                try:
+                    result["opening_bid"] = float(m.group(1).replace(",", ""))
+                except ValueError:
+                    pass
+            m = _sched_date_re.search(html)
+            if m:
+                try:
+                    result["scheduled_sale_date"] = datetime.strptime(
+                        m.group(1), "%m/%d/%Y"
+                    ).strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+            m = _owner_re.search(html)
+            if m:
+                result["owner_name"] = m.group(1).strip()[:120]
+            m = _address_re.search(html)
+            if m:
+                result["property_address"] = m.group(1).strip()[:250]
+            m = _lender_re.search(html)
+            if m:
+                result["lender_name"] = m.group(1).strip()[:120]
+            return result
+
+        def _upsert_presale(case_number: str, fields: dict) -> str:
+            """Insert or upgrade a PRE_SALE lead. Returns 'inserted'|'upgraded'|'skipped'."""
+            asset_id_val = _asset_id(self.county, case_number)
+            existing = self._conn.execute(
+                "SELECT id, data_grade FROM leads WHERE county=? AND case_number=?",
+                [self.county, case_number],
+            ).fetchone()
+
+            # Don't downgrade post-sale leads
+            if existing and existing["data_grade"] in ("GOLD", "SILVER"):
+                return "skipped"
+
+            opening_bid = fields.get("opening_bid", 0.0) or 0.0
+            sched_date = fields.get("scheduled_sale_date")
+            owner_name = fields.get("owner_name", "")
+            prop_addr = fields.get("property_address", "")
+            lender_name = fields.get("lender_name", "")
+            now_ts = datetime.now(timezone.utc).isoformat()
+
+            if existing:
+                self._conn.execute(
+                    """UPDATE leads SET
+                        processing_status=?,
+                        scheduled_sale_date=COALESCE(?,scheduled_sale_date),
+                        opening_bid=COALESCE(NULLIF(?,0), opening_bid),
+                        owner_name=COALESCE(NULLIF(?,'')||NULLIF('',NULLIF(?,''))||NULL, owner_name),
+                        property_address=COALESCE(NULLIF(?,'')||(NULLIF('',NULLIF(?,'')))||NULL, property_address),
+                        lender_name=COALESCE(NULLIF(?,'')||(NULLIF('',NULLIF(?,'')))||NULL, lender_name),
+                        ned_source='govsoft_active',
+                        updated_at=?
+                       WHERE county=? AND case_number=?""",
+                    [
+                        "PRE_SALE",
+                        sched_date, opening_bid,
+                        owner_name, owner_name,
+                        prop_addr, prop_addr,
+                        lender_name, lender_name,
+                        now_ts, self.county, case_number,
+                    ],
+                )
+                return "upgraded"
+
+            from uuid import uuid4 as _uuid4
+            data_grade = "BRONZE"  # Pre-sale — no confirmed overbid yet
+            self._conn.execute(
+                """INSERT INTO leads
+                    (id, county, case_number, owner_name, property_address, lender_name,
+                     opening_bid, scheduled_sale_date, data_grade, processing_status,
+                     ned_source, ingestion_source, surplus_stream, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    str(_uuid4()), self.county, case_number,
+                    owner_name, prop_addr, lender_name,
+                    opening_bid, sched_date,
+                    data_grade, "PRE_SALE",
+                    "govsoft_active", "govsoft",
+                    "FORECLOSURE_OVERBID", now_ts,
+                ],
+            )
+            return "inserted"
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=HEADLESS)
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                )
+            )
+            try:
+                page = await context.new_page()
+                search_url = f"{self.base_url.rstrip('/')}{self.search_path}"
+                await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                await asyncio.sleep(3)
+
+                # Accept terms if required
+                if self.requires_accept_terms:
+                    try:
+                        chk_el = page.locator("input[id*='chk'][type='checkbox']")
+                        if await chk_el.count() > 0:
+                            await chk_el.first.click()
+                            await asyncio.sleep(1)
+                        accept_btn = page.locator(
+                            "#MainContent_CustomContentPlaceHolder_btnAcceptTerms, "
+                            "input[id*='btnAccept'][type='submit']"
+                        )
+                        if await accept_btn.count() > 0:
+                            await accept_btn.first.click()
+                            await page.wait_for_load_state("networkidle", timeout=20000)
+                            await asyncio.sleep(2)
+                    except Exception:
+                        pass
+
+                # Set ddStatus to "Active" to get pre-sale cases
+                dd_loc = page.locator(self._sel("dd_status", "[id$='ddStatus']"))
+                if await dd_loc.count() > 0:
+                    for status_val in ["Active", "Pending", "active", "pending"]:
+                        try:
+                            await dd_loc.select_option(status_val)
+                            await asyncio.sleep(1)
+                            await page.wait_for_load_state("networkidle", timeout=10000)
+                            log.info("[pending] ddStatus=%r set for %s", status_val, self.county)
+                            break
+                        except Exception:
+                            continue
+                else:
+                    log.warning("[pending] ddStatus not found for %s", self.county)
+
+                # Use "Show All" to bypass date filter for Active cases
+                show_all = page.locator(self._sel("show_all_btn", SEL_SHOW_ALL_BTN))
+                if await show_all.count() > 0:
+                    # Clear case number field first to avoid filtering
+                    ci_el = page.locator(self._sel("case_input", "input[id*='Case'], input[name*='case']"))
+                    if await ci_el.count() > 0:
+                        await ci_el.first.fill("")
+                    await show_all.first.click()
+                    await asyncio.sleep(3)
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    log.info("[pending] Show All clicked for %s", self.county)
+                else:
+                    # Fallback: submit search with no dates
+                    await page.click(self._sel("search_btn", SEL_SEARCH_BTN))
+                    await asyncio.sleep(2)
+                    await page.wait_for_load_state("networkidle", timeout=20000)
+
+                total = await self._extract_total_count(page)
+                log.info("[pending] %s — %s active/pending cases found", self.county, total)
+
+                # Paginate and process all active cases
+                while True:
+                    _store_snapshot(
+                        self._conn,
+                        f"FORECLOSURE:CO:{self.county.upper()}:SEARCH",
+                        "SEARCH_RESULTS",
+                        await page.content(),
+                        source_url=page.url,
+                    )
+
+                    rows = await page.locator(
+                        self._sel("results_table", SEL_RESULTS_TABLE)
+                    ).first.locator("tbody tr").all()
+
+                    case_entries: list[tuple[str, str]] = []
+                    for row in rows:
+                        try:
+                            cells = await row.locator("td").all_inner_texts()
+                            case_number = ""
+                            for cell_text in cells[:4]:
+                                txt = cell_text.strip()
+                                if txt and len(txt) >= 4:
+                                    case_number = txt
+                                    break
+                            if not case_number:
+                                continue
+                            link_el = row.locator("a").first
+                            href = ""
+                            if await link_el.count() > 0:
+                                href = (await link_el.get_attribute("href")) or ""
+                            case_entries.append((case_number, href))
+                        except Exception:
+                            continue
+
+                    for case_number, _href in case_entries:
+                        asset_id_val = _asset_id(self.county, case_number)
+                        try:
+                            case_link = page.locator(f"a:has-text('{case_number}')").first
+                            if await case_link.count() == 0:
+                                stats["cases_failed"] += 1
+                                continue
+
+                            await case_link.click()
+                            await asyncio.sleep(2)
+                            await page.wait_for_load_state("networkidle", timeout=20000)
+
+                            # Capture CASE_DETAIL
+                            html = await page.content()
+                            _store_snapshot(self._conn, asset_id_val, "CASE_DETAIL", html, source_url=page.url)
+                            fields = _parse_presale_html(html)
+
+                            # Try to click SALE_INFO tab for scheduled date + opening bid
+                            try:
+                                tabs = page.locator(self._sel("nav_tabs", SEL_NAV_TABS))
+                                for i in range(await tabs.count()):
+                                    tab_txt = (await tabs.nth(i).inner_text()).strip().lower()
+                                    if any(lbl in tab_txt for lbl in TAB_SALE_INFO):
+                                        await tabs.nth(i).click()
+                                        await asyncio.sleep(2)
+                                        await page.wait_for_load_state("networkidle", timeout=15000)
+                                        sale_html = await page.content()
+                                        _store_snapshot(self._conn, asset_id_val, "SALE_INFO", sale_html, source_url=page.url)
+                                        sale_fields = _parse_presale_html(sale_html)
+                                        fields.update({k: v for k, v in sale_fields.items() if v})
+                                        break
+                            except Exception as tab_exc:
+                                log.debug("[pending] SALE_INFO tab failed for %s/%s: %s", self.county, case_number, tab_exc)
+
+                            action = _upsert_presale(case_number, fields)
+                            stats[f"leads_{action}"] = stats.get(f"leads_{action}", 0) + 1
+                            stats["cases_processed"] += 1
+                            log.info("[pending] %s/%s — %s | sched=%s | bid=$%s",
+                                     self.county, case_number, action,
+                                     fields.get("scheduled_sale_date", "?"),
+                                     fields.get("opening_bid", "?"))
+
+                        except Exception as exc:
+                            log.warning("[pending] %s/%s failed: %s", self.county, case_number, exc)
+                            stats["cases_failed"] += 1
+
+                        try:
+                            await page.go_back(wait_until="domcontentloaded", timeout=15000)
+                            await asyncio.sleep(2)
+                            await page.wait_for_load_state("networkidle", timeout=15000)
+                            if await page.locator(SEL_RESULTS_TABLE).count() == 0:
+                                raise Exception("lost results")
+                        except Exception:
+                            # Re-navigate to active search
+                            await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                            await asyncio.sleep(2)
+                            if self.requires_accept_terms:
+                                try:
+                                    chk_el = page.locator("input[id*='chk'][type='checkbox']")
+                                    if await chk_el.count() > 0:
+                                        await chk_el.first.click()
+                                        await asyncio.sleep(1)
+                                    accept_btn = page.locator("#MainContent_CustomContentPlaceHolder_btnAcceptTerms")
+                                    if await accept_btn.count() > 0:
+                                        await accept_btn.first.click()
+                                        await page.wait_for_load_state("networkidle", timeout=20000)
+                                        await asyncio.sleep(2)
+                                except Exception:
+                                    pass
+                            dd_loc2 = page.locator(self._sel("dd_status", "[id$='ddStatus']"))
+                            if await dd_loc2.count() > 0:
+                                for sv in ["Active", "Pending"]:
+                                    try:
+                                        await dd_loc2.select_option(sv)
+                                        break
+                                    except Exception:
+                                        continue
+                            show_all2 = page.locator(self._sel("show_all_btn", SEL_SHOW_ALL_BTN))
+                            if await show_all2.count() > 0:
+                                await show_all2.first.click()
+                                await asyncio.sleep(3)
+                                await page.wait_for_load_state("networkidle", timeout=30000)
+
+                        await asyncio.sleep(random.uniform(1.0, 2.5))
+
+                    next_link = page.locator(SEL_DOPOSTBACK + ":has-text('Next')")
+                    if await next_link.count() == 0:
+                        break
+                    await next_link.first.click()
+                    await asyncio.sleep(2)
+                    await page.wait_for_load_state("networkidle", timeout=20000)
+
+            finally:
+                await context.close()
+                await browser.close()
+
+        log.info("[pending] Complete for %s: %s", self.county, stats)
+        return stats
+
+    async def run_sale_info_backfill(self, limit: int = 50) -> dict:
+        """Re-scrape BRONZE leads that are missing a SALE_INFO snapshot.
+
+        Each case is accessed via direct CaseDetail.aspx URL (same as sequential enum),
+        which captures all tabs including SALE_INFO. After capture, Gate 4 extraction
+        runs automatically, potentially promoting the lead to GOLD or SILVER.
+
+        Returns {cases_attempted, cases_captured, cases_promoted_gold,
+                 cases_promoted_silver, cases_failed}.
+        """
+        # Find BRONZE leads for this county without SALE_INFO snapshots
+        rows = self._conn.execute(
+            """
+            SELECT l.id, l.case_number
+            FROM leads l
+            WHERE l.county = ?
+              AND l.data_grade = 'BRONZE'
+              AND NOT EXISTS (
+                  SELECT 1 FROM html_snapshots hs
+                  WHERE hs.asset_id = 'FORECLOSURE:CO:' || UPPER(l.county) || ':' || l.case_number
+                    AND hs.snapshot_type = 'SALE_INFO'
+              )
+            LIMIT ?
+            """,
+            [self.county, limit],
+        ).fetchall()
+
+        stats = {
+            "cases_attempted": len(rows),
+            "cases_captured": 0,
+            "cases_promoted_gold": 0,
+            "cases_promoted_silver": 0,
+            "cases_failed": 0,
+        }
+
+        if not rows:
+            log.info("[backfill] No BRONZE cases missing SALE_INFO for %s", self.county)
+            return stats
+
+        log.info("[backfill] %s — will attempt %d cases (limit=%d)", self.county, len(rows), limit)
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError("playwright not installed.")
+
+        from verifuse_v2.ingest.govsoft_extract import run_extraction
+
+        BATCH = 20  # re-launch browser every N cases
+        case_numbers = [r["case_number"] for r in rows]
+
+        for batch_start in range(0, len(case_numbers), BATCH):
+            batch = case_numbers[batch_start: batch_start + BATCH]
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=HEADLESS)
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    )
+                )
+                try:
+                    page = await context.new_page()
+                    search_url = f"{self.base_url.rstrip('/')}{self.search_path}"
+
+                    # Accept terms once per browser session
+                    if self.requires_accept_terms:
+                        await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                        await asyncio.sleep(2)
+                        try:
+                            chk_el = page.locator("input[id*='chk'][type='checkbox']")
+                            if await chk_el.count() > 0:
+                                await chk_el.first.click()
+                                await asyncio.sleep(1)
+                            accept_btn = page.locator(
+                                "#MainContent_CustomContentPlaceHolder_btnAcceptTerms, "
+                                "input[id*='btnAccept'][type='submit']"
+                            )
+                            if await accept_btn.count() > 0:
+                                await accept_btn.first.click()
+                                await page.wait_for_load_state("networkidle", timeout=20000)
+                                await asyncio.sleep(2)
+                        except Exception:
+                            pass
+
+                    for case_number in batch:
+                        asset_id_val = _asset_id(self.county, case_number)
+                        detail_url = (
+                            f"{self.base_url.rstrip('/')}/CaseDetail.aspx?CaseNo={case_number}"
+                        )
+                        try:
+                            await page.goto(detail_url, wait_until="networkidle", timeout=30000)
+                            await asyncio.sleep(2)
+
+                            body = await page.inner_text("body")
+                            if any(p in body.lower() for p in (
+                                "case not found", "no case", "invalid case", "case number not found"
+                            )):
+                                log.debug("[backfill] %s/%s — not found", self.county, case_number)
+                                stats["cases_failed"] += 1
+                                continue
+
+                            # Check we're not on the search form
+                            search_page_check = self.search_path.split("/")[-1].lower()
+                            if search_page_check and search_page_check in page.url.lower():
+                                log.debug("[backfill] %s/%s — redirected to search", self.county, case_number)
+                                stats["cases_failed"] += 1
+                                continue
+
+                            await self._capture_case_detail_on_page(page, case_number, asset_id_val)
+                            stats["cases_captured"] += 1
+
+                            # Gate 4 — check if promoted
+                            grade_row = self._conn.execute(
+                                "SELECT data_grade FROM leads WHERE county=? AND case_number=?",
+                                [self.county, case_number],
+                            ).fetchone()
+                            if grade_row:
+                                grade = grade_row["data_grade"]
+                                if grade == "GOLD":
+                                    stats["cases_promoted_gold"] += 1
+                                    log.info("[backfill] GOLD: %s/%s", self.county, case_number)
+                                elif grade == "SILVER":
+                                    stats["cases_promoted_silver"] += 1
+                                    log.info("[backfill] SILVER: %s/%s", self.county, case_number)
+
+                        except Exception as exc:
+                            log.warning("[backfill] %s/%s failed: %s", self.county, case_number, exc)
+                            stats["cases_failed"] += 1
+
+                        await asyncio.sleep(random.uniform(1.0, 2.5))
+
+                finally:
+                    await context.close()
+                    await browser.close()
+
+            log.info("[backfill] Batch %d/%d — %s", batch_start + BATCH, len(case_numbers), stats)
+
+        log.info("[backfill] Complete for %s: %s", self.county, stats)
+        return stats

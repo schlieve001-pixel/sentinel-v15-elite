@@ -544,6 +544,12 @@ export default function Dashboard() {
                 sub="GOLD+SILVER+BRONZE, surplus > $1K"
               />
               <KpiCard
+                label="Pre-Sale Pipeline"
+                value={stats.pre_sale_count ?? 0}
+                sub="upcoming auctions"
+                grade="bronze"
+              />
+              <KpiCard
                 label="Total Leads in DB"
                 value={stats.total_leads ?? stats.total_raw_volume ?? 0}
               />

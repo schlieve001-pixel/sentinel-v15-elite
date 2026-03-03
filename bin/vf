@@ -107,6 +107,32 @@ for lead in r['leads']:
 " "$@"
     ;;
 
+  # Pre-sale foreclosure pipeline — scrapes Active/Pending cases from GovSoft
+  # Returns upcoming auctions with opening bid + scheduled sale date
+  # Covers all 12 GovSoft counties: adams, arapahoe, boulder, broomfield, douglas,
+  #   eagle, el_paso, gilpin, jefferson, larimer, mesa, weld
+  # Usage: bin/vf pending-sales --county jefferson
+  #         bin/vf pending-sales --all-counties
+  pending-sales)
+    shift
+    if [[ "${1:-}" == "--all-counties" ]]; then
+      for county in adams arapahoe boulder broomfield douglas eagle el_paso gilpin jefferson larimer mesa weld; do
+        echo "[pending-sales] Running county=$county ..."
+        flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --pending-sales --county "$county" || true
+      done
+    else
+      flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --pending-sales "$@"
+    fi
+    ;;
+
+  # SALE_INFO backfill — re-scrapes BRONZE leads missing SALE_INFO tab
+  # Promotes leads to GOLD/SILVER when overbid is confirmed
+  # Usage: bin/vf sale-info-backfill --county jefferson [--limit 50]
+  sale-info-backfill)
+    shift
+    flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --sale-info-backfill "$@"
+    ;;
+
   # Denver County Public Trustee PDF scraper — real auction results + excess funds
   # Data: Current_Sales_Results.pdf (weekly) + excess-funds-list (monthly) from denvergov.org
   # Usage: bin/vf denver-scrape [--dry-run]
@@ -162,6 +188,8 @@ Required commands:
   scraper-run-window      Run date-window ingest (flock; pass --county --days N)
   scraper-enum            Sequential case enumerator (flock; --county --prefix --start-num --end-num)
   extract-batch           Gate 4 batch extraction on BRONZE leads (--county --limit)
+  pending-sales           Scrape Active/Pending pre-sale cases (--county or --all-counties)
+  sale-info-backfill      Re-scrape BRONZE leads missing SALE_INFO (--county --limit)
   denver-scrape           Denver Public Trustee PDF scraper (--dry-run to preview)
   status                  Show API + scraper timer systemd status
   backup-db               SQLite online backup (timestamped .bak file)

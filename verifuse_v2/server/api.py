@@ -1575,6 +1575,15 @@ async def get_stats():
                 "SELECT COUNT(*) FROM leads WHERE data_grade = 'REJECT'"
             ).fetchone()[0]
 
+            # Pre-sale pipeline: upcoming auctions not yet sold
+            pre_sale_count = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE processing_status = 'PRE_SALE'"
+            ).fetchone()[0]
+            pre_sale_surplus = conn.execute(
+                "SELECT COALESCE(SUM(COALESCE(pre_sale_estimated_surplus, opening_bid, 0)), 0) "
+                "FROM leads WHERE processing_status = 'PRE_SALE' AND opening_bid > 0"
+            ).fetchone()[0]
+
             # County list from county_profiles (active counties in platform)
             county_rows = conn.execute(
                 "SELECT county FROM county_profiles ORDER BY county"
@@ -1600,6 +1609,8 @@ async def get_stats():
             "verified_pipeline_surplus": round(vp_row["total"], 2),
             "total_raw_volume": raw_row["cnt"],
             "total_raw_volume_surplus": round(raw_row["total"], 2),
+            "pre_sale_count": pre_sale_count,
+            "pre_sale_pipeline_surplus": round(pre_sale_surplus, 2),
         }
 
     return await _run_in_db(_run)

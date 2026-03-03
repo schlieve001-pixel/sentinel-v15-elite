@@ -236,6 +236,8 @@ export interface Stats {
   county_list: string[];
   counties: { county: string; cnt: number; total: number }[];
   stream_breakdown?: { stream: string; cnt: number; total: number }[];
+  pre_sale_count?: number;
+  pre_sale_pipeline_surplus?: number;
 }
 
 export function getStats(signal?: AbortSignal): Promise<Stats> {

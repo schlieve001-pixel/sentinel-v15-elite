@@ -245,6 +245,104 @@ async def _run_sequential_enum(
     }
 
 
+async def _run_pending_sales(conn, county: str) -> dict:
+    """Scrape Active/Pending cases (pre-sale pipeline) for a county."""
+    from verifuse_v2.scrapers.adapters.govsoft_engine import GovSoftEngine
+
+    run_id = str(uuid4())
+    conn.execute(
+        """INSERT INTO ingestion_runs
+           (run_id, county, start_ts, status, cases_processed, cases_failed, notes)
+           VALUES (?,?,?,'RUNNING',0,0,'pending_sales')
+        """,
+        [run_id, county, int(time.time())],
+    )
+    log.info("ingestion_run started: run_id=%s county=%s mode=pending_sales", run_id, county)
+
+    cases_processed = 0
+    cases_failed = 0
+    final_status = "FAILED"
+
+    try:
+        engine = GovSoftEngine(county, db_conn=conn)
+        stats = await engine.run_pending_sales()
+        cases_processed = stats.get("cases_processed", 0)
+        cases_failed = stats.get("cases_failed", 0)
+        final_status = "SUCCESS" if cases_failed == 0 else "PARTIAL"
+        log.info(
+            "[pending_sales] %s — inserted=%d upgraded=%d",
+            county,
+            stats.get("leads_inserted", 0),
+            stats.get("leads_upgraded", 0),
+        )
+    except Exception as exc:
+        final_status = "FAILED"
+        log.exception("Pending-sales run failed for %s: %s", county, exc)
+    finally:
+        conn.execute(
+            """UPDATE ingestion_runs
+               SET end_ts=?, status=?, cases_processed=?, cases_failed=?
+               WHERE run_id=?
+            """,
+            [int(time.time()), final_status, cases_processed, cases_failed, run_id],
+        )
+
+    return {"run_id": run_id, "status": final_status,
+            "cases_processed": cases_processed, "cases_failed": cases_failed}
+
+
+async def _run_sale_info_backfill(conn, county: str, limit: int = 50) -> dict:
+    """Re-scrape BRONZE leads missing SALE_INFO to attempt GOLD/SILVER promotion."""
+    from verifuse_v2.scrapers.adapters.govsoft_engine import GovSoftEngine
+
+    run_id = str(uuid4())
+    conn.execute(
+        """INSERT INTO ingestion_runs
+           (run_id, county, start_ts, status, cases_processed, cases_failed, notes)
+           VALUES (?,?,?,'RUNNING',0,0,?)
+        """,
+        [run_id, county, int(time.time()), f"sale_info_backfill:limit={limit}"],
+    )
+    log.info(
+        "ingestion_run started: run_id=%s county=%s mode=sale_info_backfill limit=%d",
+        run_id, county, limit,
+    )
+
+    cases_processed = 0
+    cases_failed = 0
+    final_status = "FAILED"
+
+    try:
+        engine = GovSoftEngine(county, db_conn=conn)
+        stats = await engine.run_sale_info_backfill(limit=limit)
+        cases_processed = stats.get("cases_captured", 0)
+        cases_failed = stats.get("cases_failed", 0)
+        final_status = "SUCCESS" if cases_failed == 0 else "PARTIAL"
+        log.info(
+            "[backfill] %s — attempted=%d captured=%d GOLD=%d SILVER=%d failed=%d",
+            county,
+            stats.get("cases_attempted", 0),
+            stats.get("cases_captured", 0),
+            stats.get("cases_promoted_gold", 0),
+            stats.get("cases_promoted_silver", 0),
+            stats.get("cases_failed", 0),
+        )
+    except Exception as exc:
+        final_status = "FAILED"
+        log.exception("Sale-info backfill failed for %s: %s", county, exc)
+    finally:
+        conn.execute(
+            """UPDATE ingestion_runs
+               SET end_ts=?, status=?, cases_processed=?, cases_failed=?
+               WHERE run_id=?
+            """,
+            [int(time.time()), final_status, cases_processed, cases_failed, run_id],
+        )
+
+    return {"run_id": run_id, "status": final_status,
+            "cases_processed": cases_processed, "cases_failed": cases_failed}
+
+
 def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="VeriFuse vNEXT GovSoft Ingestion Runner"
@@ -256,6 +354,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
                       help="Scrape all cases in a date range")
     mode.add_argument("--sequential-enum", action="store_true",
                       help="Enumerate case numbers sequentially (bypass search form)")
+    mode.add_argument("--pending-sales", action="store_true",
+                      help="Scrape Active/Pending cases (pre-sale pipeline)")
+    mode.add_argument("--sale-info-backfill", action="store_true",
+                      help="Re-scrape BRONZE leads missing SALE_INFO (promotes to GOLD/SILVER)")
 
     parser.add_argument("--county", required=True,
                         help="County slug (e.g. jefferson, arapahoe)")
@@ -275,6 +377,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
                         help="End number for --sequential-enum (inclusive)")
     parser.add_argument("--db", default=DB_PATH,
                         help="Path to SQLite database")
+    parser.add_argument("--limit", type=int, default=50,
+                        help="Max cases for --sale-info-backfill (default: 50)")
     return parser.parse_args(argv)
 
 
@@ -310,6 +414,12 @@ def main(argv=None) -> int:
                 conn, args.county, args.prefix, args.start_num, args.end_num
             )
         )
+
+    elif args.pending_sales:
+        result = asyncio.run(_run_pending_sales(conn, args.county))
+
+    elif args.sale_info_backfill:
+        result = asyncio.run(_run_sale_info_backfill(conn, args.county, limit=args.limit))
 
     else:  # date-window
         if args.days:
