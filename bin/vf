@@ -156,6 +156,64 @@ for lead in r['leads']:
     python3 -m verifuse_v2.scrapers.assessor_lookup "$@"
     ;;
 
+  # Promote SILVER → GOLD for leads whose 6-month restriction window has expired.
+  # Targets leads with data_grade='SILVER', non-null sale_date, and
+  # sale_date + 6 calendar months <= today. Safe to run at any frequency.
+  # Usage: bin/vf promote-eligible [--dry-run]
+  promote-eligible)
+    shift
+    DRY_RUN=""
+    for arg in "$@"; do [[ "$arg" == "--dry-run" ]] && DRY_RUN="--dry-run"; done
+    python3 - $DRY_RUN <<'PYEOF'
+import sys, sqlite3
+from datetime import date, timedelta
+try:
+    from dateutil.relativedelta import relativedelta
+    DELTA = relativedelta(months=6)
+except ImportError:
+    DELTA = timedelta(days=182)
+
+dry_run = "--dry-run" in sys.argv
+DB = "verifuse_v2/data/verifuse_v2.db"
+conn = sqlite3.connect(DB)
+conn.row_factory = sqlite3.Row
+today = date.today()
+
+candidates = conn.execute(
+    "SELECT id, county, case_number, sale_date, overbid_amount FROM leads "
+    "WHERE data_grade='SILVER' AND sale_date IS NOT NULL"
+).fetchall()
+
+promoted = []
+for r in candidates:
+    try:
+        sale = date.fromisoformat(str(r["sale_date"])[:10])
+        eligible = sale + DELTA
+        if today >= eligible:
+            promoted.append(r)
+    except (ValueError, TypeError):
+        pass
+
+if not promoted:
+    print("promote-eligible: no SILVER leads have expired restriction (nothing to do)")
+else:
+    print(f"promote-eligible: {len(promoted)} lead(s) eligible for GOLD promotion:")
+    for r in promoted:
+        sale = date.fromisoformat(str(r["sale_date"])[:10])
+        print(f"  {r['county']:12s} {r['case_number']:12s} sale={r['sale_date']} "
+              f"overbid=${r['overbid_amount']} restriction_end={sale + DELTA}")
+    if dry_run:
+        print("(dry-run — no changes made)")
+    else:
+        ids = [r["id"] for r in promoted]
+        ph = ",".join(["?"] * len(ids))
+        conn.execute(f"UPDATE leads SET data_grade='GOLD', updated_at=strftime('%s','now') WHERE id IN ({ph})", ids)
+        conn.commit()
+        print(f"promote-eligible: promoted {len(promoted)} lead(s) to GOLD")
+conn.close()
+PYEOF
+    ;;
+
   deploy)
     echo "[vf deploy] Gate 9 deployment sequence. Run each step manually and verify:"
     echo ""
@@ -191,6 +249,7 @@ Required commands:
   pending-sales           Scrape Active/Pending pre-sale cases (--county or --all-counties)
   sale-info-backfill      Re-scrape BRONZE leads missing SALE_INFO (--county --limit)
   denver-scrape           Denver Public Trustee PDF scraper (--dry-run to preview)
+  promote-eligible        Promote SILVER → GOLD when 6-month restriction expires (--dry-run)
   status                  Show API + scraper timer systemd status
   backup-db               SQLite online backup (timestamped .bak file)
 

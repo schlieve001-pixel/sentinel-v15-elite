@@ -1476,9 +1476,16 @@ class GovSoftEngine:
                                 stats["cases_not_found"] += 1
                                 continue
 
-                            # Detect redirect back to search form (case not found)
-                            search_page = self.search_path.split("/")[-1].lower()
-                            if search_page and search_page in page.url.lower():
+                            # Detect redirect back to search form (case not found).
+                            # Primary check: CaseDetail.aspx must still be in the URL.
+                            # Fallback: search_path filename (e.g. "PTForeclosureSearch.aspx")
+                            # — skipped when search_path='/' which gives an empty string.
+                            redirected = "CaseDetail.aspx" not in page.url
+                            if not redirected:
+                                search_page = self.search_path.split("/")[-1].lower()
+                                if search_page and search_page in page.url.lower():
+                                    redirected = True
+                            if redirected:
                                 log.debug(
                                     "[enum] %s/%s — redirected to search (not found)",
                                     self.county, case_number,
