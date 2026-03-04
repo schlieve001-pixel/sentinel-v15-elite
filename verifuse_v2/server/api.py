@@ -3335,6 +3335,156 @@ async def admin_attorney_reject(request: Request):
     return {"ok": True, "attorney_status": "REJECTED"}
 
 
+# ── Admin: User Management Actions ──────────────────────────────────────────
+
+@app.post("/api/admin/users/{user_id}/deactivate")
+async def admin_deactivate_user(user_id: str, request: Request):
+    """Admin: deactivate a user account (prevents login)."""
+    admin = _require_user(request)
+    if not _is_admin(admin):
+        raise HTTPException(status_code=403, detail="Admin only.")
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT email, is_admin FROM users WHERE user_id = ?", [user_id]).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        if row["is_admin"]:
+            raise HTTPException(status_code=400, detail="Cannot deactivate admin accounts.")
+        conn.execute("UPDATE users SET is_active = 0 WHERE user_id = ?", [user_id])
+        _audit_log(conn, user_id, "user_deactivated", {"by": admin["user_id"], "email": row["email"]})
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "is_active": False}
+
+
+@app.post("/api/admin/users/{user_id}/activate")
+async def admin_activate_user(user_id: str, request: Request):
+    """Admin: reactivate a deactivated user account."""
+    admin = _require_user(request)
+    if not _is_admin(admin):
+        raise HTTPException(status_code=403, detail="Admin only.")
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT email FROM users WHERE user_id = ?", [user_id]).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        conn.execute("UPDATE users SET is_active = 1 WHERE user_id = ?", [user_id])
+        _audit_log(conn, user_id, "user_activated", {"by": admin["user_id"], "email": row["email"]})
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "is_active": True}
+
+
+@app.post("/api/admin/users/{user_id}/adjust-credits")
+async def admin_adjust_credits(user_id: str, request: Request):
+    """Admin: add or subtract credits from a user's wallet (delta can be negative)."""
+    admin = _require_user(request)
+    if not _is_admin(admin):
+        raise HTTPException(status_code=403, detail="Admin only.")
+    body = await request.json()
+    delta = int(body.get("delta", 0))
+    note = str(body.get("note", "Admin adjustment"))[:200]
+    if delta == 0:
+        raise HTTPException(status_code=400, detail="delta must be non-zero.")
+
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT email FROM users WHERE user_id = ?", [user_id]).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Insert a non-expiring ledger entry for positive, or consume from balance for negative
+        if delta > 0:
+            conn.execute(
+                "INSERT INTO unlock_ledger_entries "
+                "(user_id, qty_total, qty_remaining, source, expires_at, created_at) "
+                "VALUES (?, ?, ?, 'admin_adjustment', NULL, ?)",
+                [user_id, delta, delta, now_iso],
+            )
+        else:
+            # Burn credits: reduce qty_remaining across entries
+            remove = abs(delta)
+            entries = conn.execute(
+                "SELECT id, qty_remaining FROM unlock_ledger_entries "
+                "WHERE user_id = ? AND qty_remaining > 0 "
+                "ORDER BY CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END, expires_at, created_at",
+                [user_id],
+            ).fetchall()
+            for e in entries:
+                if remove <= 0:
+                    break
+                take = min(e["qty_remaining"], remove)
+                conn.execute(
+                    "UPDATE unlock_ledger_entries SET qty_remaining = qty_remaining - ? WHERE id = ?",
+                    [take, e["id"]],
+                )
+                remove -= take
+        _audit_log(conn, user_id, "credits_adjusted", {
+            "by": admin["user_id"], "delta": delta, "note": note, "email": row["email"],
+        })
+        conn.commit()
+        new_balance = _ledger_balance(conn, user_id)
+    finally:
+        conn.close()
+    return {"ok": True, "delta": delta, "new_balance": new_balance}
+
+
+@app.post("/api/admin/users/{user_id}/set-role")
+async def admin_set_role(user_id: str, request: Request):
+    """Admin: change a user's role (public / approved_attorney / admin)."""
+    admin = _require_user(request)
+    if not _is_admin(admin):
+        raise HTTPException(status_code=403, detail="Admin only.")
+    body = await request.json()
+    new_role = str(body.get("role", "")).strip()
+    allowed = ("public", "approved_attorney", "admin")
+    if new_role not in allowed:
+        raise HTTPException(status_code=400, detail=f"role must be one of: {', '.join(allowed)}")
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT email FROM users WHERE user_id = ?", [user_id]).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        conn.execute("UPDATE users SET role = ? WHERE user_id = ?", [new_role, user_id])
+        _audit_log(conn, user_id, "role_changed", {
+            "by": admin["user_id"], "new_role": new_role, "email": row["email"],
+        })
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "role": new_role}
+
+
+@app.post("/api/admin/leads/{lead_id}/set-grade")
+async def admin_set_lead_grade(lead_id: str, request: Request):
+    """Admin: manually override a lead's data_grade."""
+    admin = _require_user(request)
+    if not _is_admin(admin):
+        raise HTTPException(status_code=403, detail="Admin only.")
+    body = await request.json()
+    new_grade = str(body.get("grade", "")).strip().upper()
+    allowed_grades = ("GOLD", "SILVER", "BRONZE", "REJECT")
+    if new_grade not in allowed_grades:
+        raise HTTPException(status_code=400, detail=f"grade must be one of: {', '.join(allowed_grades)}")
+    reason = str(body.get("reason", "Admin override"))[:500]
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT county, case_number, data_grade FROM leads WHERE id = ?", [lead_id]).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Lead not found.")
+        conn.execute("UPDATE leads SET data_grade = ?, updated_at = datetime('now') WHERE id = ?", [new_grade, lead_id])
+        _audit_log(conn, admin["user_id"], "grade_override", {
+            "lead_id": lead_id, "old_grade": row["data_grade"], "new_grade": new_grade,
+            "reason": reason, "county": row["county"], "case_number": row["case_number"],
+        })
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "lead_id": lead_id, "grade": new_grade}
+
+
 # ── Attorney Tool Endpoints ───────────────────────────────────────
 
 def _check_lead_unlocked(user: dict, lead_id: str, doc_type: str = "UNKNOWN", request: Request = None) -> None:
