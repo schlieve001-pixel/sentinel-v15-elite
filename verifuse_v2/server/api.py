@@ -1439,11 +1439,12 @@ async def unlock_lead(lead_id: str, request: Request):
         # Phase 5: source_doc_count for UI evidence lock
         try:
             _sc2 = _get_conn()
+            _lead_id2 = dict(row).get("id", "")
             _county2 = dict(row).get("county", "")
             _case2 = dict(row).get("case_number", "")
             _asset_key2 = f"FORECLOSURE:CO:{_county2.upper()}:{_case2.upper()}"
             _snap_ct2 = _sc2.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key2]).fetchone()[0]
-            _pdf_ct2 = _sc2.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_asset_key2]).fetchone()[0]
+            _pdf_ct2 = _sc2.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_lead_id2]).fetchone()[0]
             result["source_doc_count"] = _snap_ct2 + _pdf_ct2
             _sc2.close()
         except Exception:
@@ -1509,11 +1510,12 @@ async def unlock_lead(lead_id: str, request: Request):
             result = _row_to_full(lead)
             # Phase 5: source_doc_count for UI evidence lock
             try:
+                _lead_id3 = lead.get("id", "")
                 _county3 = lead.get("county", "")
                 _case3 = lead.get("case_number", "")
                 _asset_key3 = f"FORECLOSURE:CO:{_county3.upper()}:{_case3.upper()}"
                 _snap_ct3 = conn.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key3]).fetchone()[0]
-                _pdf_ct3 = conn.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_asset_key3]).fetchone()[0]
+                _pdf_ct3 = conn.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_lead_id3]).fetchone()[0]
                 result["source_doc_count"] = _snap_ct3 + _pdf_ct3
             except Exception:
                 result["source_doc_count"] = 0
@@ -1593,11 +1595,12 @@ async def unlock_lead(lead_id: str, request: Request):
     # Phase 5: source_doc_count for UI evidence lock
     try:
         _sc = _get_conn()
+        _lead_uuid = lead.get("id", "")
         _county = lead.get("county", "")
         _case = lead.get("case_number", "")
         _asset_key = f"FORECLOSURE:CO:{_county.upper()}:{_case.upper()}"
         _snap_ct = _sc.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key]).fetchone()[0]
-        _pdf_ct = _sc.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_asset_key]).fetchone()[0]
+        _pdf_ct = _sc.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_lead_uuid]).fetchone()[0]
         result["source_doc_count"] = _snap_ct + _pdf_ct
         _sc.close()
     except Exception:
@@ -3140,36 +3143,34 @@ async def admin_lead_audit(lead_id: str, request: Request):
             if row:
                 equity = dict(row)
 
-        # Field evidence — join via evidence_documents to get asset_id
+        # Field evidence — evidence_documents.asset_id = lead.id (UUID)
         field_evidence = []
-        if asset_id_canonical:
-            try:
-                rows = conn.execute(
-                    """SELECT fe.* FROM field_evidence fe
-                       JOIN evidence_documents ed ON ed.id = fe.evidence_doc_id
-                       WHERE ed.asset_id = ?
-                       ORDER BY fe.created_ts DESC""",
-                    [asset_id_canonical],
-                ).fetchall()
-                field_evidence = [dict(r) for r in rows]
-            except Exception:
-                pass
+        try:
+            rows = conn.execute(
+                """SELECT fe.* FROM field_evidence fe
+                   JOIN evidence_documents ed ON ed.id = fe.evidence_doc_id
+                   WHERE ed.asset_id = ?
+                   ORDER BY fe.created_ts DESC""",
+                [lead_id],
+            ).fetchall()
+            field_evidence = [dict(r) for r in rows]
+        except Exception:
+            pass
 
-        # Evidence documents
+        # Evidence documents — asset_id = lead.id (UUID), not canonical key
         evidence_docs = []
-        if asset_id_canonical:
-            try:
-                rows = conn.execute(
-                    "SELECT id, asset_id, filename, doc_family, bytes, retrieved_ts FROM evidence_documents WHERE asset_id = ? ORDER BY retrieved_ts DESC",
-                    [asset_id_canonical],
-                ).fetchall()
-                evidence_docs = []
-                for r in rows:
-                    d = dict(r)
-                    d["doc_family_label"] = DOC_FAMILY_LABELS.get(d.get("doc_family", ""), d.get("doc_family") or "Supporting Document")
-                    evidence_docs.append(d)
-            except Exception:
-                pass
+        try:
+            rows = conn.execute(
+                "SELECT id, asset_id, filename, doc_family, bytes, retrieved_ts FROM evidence_documents WHERE asset_id = ? ORDER BY retrieved_ts DESC",
+                [lead_id],
+            ).fetchall()
+            evidence_docs = []
+            for r in rows:
+                d = dict(r)
+                d["doc_family_label"] = DOC_FAMILY_LABELS.get(d.get("doc_family", ""), d.get("doc_family") or "Supporting Document")
+                evidence_docs.append(d)
+        except Exception:
+            pass
 
         # Pipeline events
         pipeline_events = []
@@ -4030,13 +4031,15 @@ async def list_asset_evidence(asset_id: str, request: Request):
                     "SELECT id FROM leads WHERE lower(county) = ? AND case_number = ?",
                     [county_key, case_num],
                 ).fetchone()
+        # Use resolved lead UUID for evidence_documents lookup (asset_id = lead.id)
+        evidence_asset_id = lead_row["id"] if lead_row else None
         rows = conn.execute(
             """SELECT id, asset_id, filename, doc_type, doc_family,
                       file_path, file_sha256, bytes, content_type, retrieved_ts
                FROM evidence_documents
                WHERE asset_id = ?
                ORDER BY doc_family, filename""",
-            [asset_id],
+            [evidence_asset_id or asset_id],
         ).fetchall()
     finally:
         conn.close()

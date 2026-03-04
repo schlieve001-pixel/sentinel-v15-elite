@@ -179,11 +179,26 @@ def extract_sale_fields(gzip_html: bytes) -> dict:
     # Full-text overbid presence detection (secondary signal)
     has_overbid_text = bool(OVERBID_RE.search(html))
 
+    # Extract sale_date from "Sale Information for Sale Scheduled on M/D/YYYY" header
+    sale_date_iso: str | None = None
+    sale_date_match = re.search(
+        r"Sale (?:Information for Sale )?Scheduled on (\d{1,2}/\d{1,2}/\d{4})",
+        html,
+        re.IGNORECASE,
+    )
+    if sale_date_match:
+        from datetime import datetime as _dt
+        try:
+            sale_date_iso = _dt.strptime(sale_date_match.group(1), "%m/%d/%Y").strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
     return {
         "successful_bid":     parse_currency(successful_bid_text),
         "total_indebtedness": parse_currency(total_indebtedness_text),
         "overbid_at_sale":    parse_currency(overbid_at_sale_text),
         "has_overbid_text":   has_overbid_text,
+        "sale_date":          sale_date_iso,
         "raw_pairs":          pairs,
     }
 
@@ -346,10 +361,11 @@ def run_extraction(asset_id: str, conn=None) -> dict:
         successful_bid     = fields["successful_bid"]
         total_indebtedness = fields["total_indebtedness"]
         overbid_at_sale    = fields["overbid_at_sale"]
+        extracted_sale_date = fields.get("sale_date")  # ISO yyyy-mm-dd or None
 
         log.info(
-            "[extract] %s → bid=%s  debt=%s  overbid=%s",
-            asset_id, successful_bid, total_indebtedness, overbid_at_sale,
+            "[extract] %s → bid=%s  debt=%s  overbid=%s  sale_date=%s",
+            asset_id, successful_bid, total_indebtedness, overbid_at_sale, extracted_sale_date,
         )
 
         # ── 3. Mark EXTRACTED on asset_registry + extraction_events ──────────
@@ -466,6 +482,7 @@ def run_extraction(asset_id: str, conn=None) -> dict:
             total_indebtedness_cents=int(total_indebtedness * 100),
             voucher_overbid_cents=(int(voucher_overbid * 100) if voucher_overbid is not None else None),
             notes=notes,
+            sale_date=extracted_sale_date,
         )
 
     except Exception as exc:
@@ -528,6 +545,7 @@ def _write_results(
     total_indebtedness_cents: int = 0,
     voucher_overbid_cents: int | None = None,
     notes: str = "",
+    sale_date: str | None = None,   # ISO yyyy-mm-dd extracted from SALE_INFO HTML
 ) -> None:
     """Write validated extraction results to asset_registry, extraction_events, leads,
     and surplus_math_audit.
@@ -584,11 +602,13 @@ def _write_results(
     # ── Absolute GOLD gate (4 conditions, all required) ───────────────────────
     if data_grade == "GOLD":
         gate_fails = []
+        # Accept sale_date from SALE_INFO extraction OR existing DB value
         existing = conn.execute(
             "SELECT sale_date FROM leads WHERE county=? AND case_number=?",
             [county, case_number]
         ).fetchone()
-        if not existing or not existing[0]:
+        effective_sale_date = sale_date or (existing[0] if existing else None)
+        if not effective_sale_date:
             gate_fails.append("sale_date IS NULL")
         if total_indebtedness_cents <= 0:
             gate_fails.append("total_debt not extracted")
@@ -644,6 +664,10 @@ def _write_results(
     if "total_debt" in leads_cols:
         leads_updates.append("total_debt = ?")
         leads_params.append(round(total_indebtedness_cents / 100, 2) if total_indebtedness_cents > 0 else None)
+    # Write extracted sale_date only when non-null (preserve existing if already set)
+    if "sale_date" in leads_cols and sale_date:
+        leads_updates.append("sale_date = ?")
+        leads_params.append(sale_date)
 
     # Compute derived audit fields
     computed_surplus = successful_bid_cents - total_indebtedness_cents
