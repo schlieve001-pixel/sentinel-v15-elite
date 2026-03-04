@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { Link, useSearchParams, useLocation, useNavigate } from "react-router-dom";
 import {
   getLeads, getStats, downloadSecure, downloadSample, getPreviewLeads,
@@ -41,26 +41,18 @@ interface KpiProps {
   sub?: string;
   accent?: boolean;
   grade?: "gold" | "silver" | "bronze";
+  href?: string;
 }
 
-function KpiCard({ label, value, sub, accent, grade }: KpiProps) {
+function KpiCard({ label, value, sub, accent, grade, href }: KpiProps) {
   const borderColor = grade === "gold" ? "#f59e0b"
     : grade === "silver" ? "#94a3b8"
     : grade === "bronze" ? "#b45309"
     : accent ? "#22c55e"
     : "#374151";
 
-  return (
-    <div style={{
-      background: "#111827",
-      border: `1px solid ${borderColor}`,
-      borderRadius: 8,
-      padding: "16px 20px",
-      display: "flex",
-      flexDirection: "column",
-      gap: 4,
-      minWidth: 0,
-    }}>
+  const inner = (
+    <>
       <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.55, textTransform: "uppercase" }}>
         {label}
       </div>
@@ -79,8 +71,27 @@ function KpiCard({ label, value, sub, accent, grade }: KpiProps) {
       {sub && (
         <div style={{ fontSize: "0.78em", opacity: 0.5 }}>{sub}</div>
       )}
-    </div>
+    </>
   );
+
+  const cardStyle: React.CSSProperties = {
+    background: "#111827",
+    border: `1px solid ${borderColor}`,
+    borderRadius: 8,
+    padding: "16px 20px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    minWidth: 0,
+    textDecoration: "none",
+    color: "inherit",
+    cursor: href ? "pointer" : "default",
+  };
+
+  if (href) {
+    return <Link to={href} style={cardStyle}>{inner}</Link>;
+  }
+  return <div style={cardStyle}>{inner}</div>;
 }
 
 // ── Skeleton Card ──────────────────────────────────────────────────
@@ -175,6 +186,12 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
 
       {lead.address_hint && (
         <div className="address-hint">{lead.address_hint}</div>
+      )}
+
+      {lead.data_age_days != null && lead.data_age_days > 30 && (
+        <div style={{ fontSize: "0.7em", color: "#f59e0b", opacity: 0.7, marginBottom: 2 }}>
+          Data {lead.data_age_days}d old
+        </div>
       )}
 
       {lead.owner_img ? (
@@ -546,8 +563,9 @@ export default function Dashboard() {
               <KpiCard
                 label="Pre-Sale Pipeline"
                 value={stats.pre_sale_count ?? 0}
-                sub="upcoming auctions"
+                sub="upcoming auctions — click to explore"
                 grade="bronze"
+                href="/pre-sale"
               />
               <KpiCard
                 label="Total Leads in DB"
@@ -639,7 +657,7 @@ export default function Dashboard() {
         >
           <option value="">ALL COUNTIES</option>
           {countyOptions.map((c) => (
-            <option key={c} value={c}>{c.replace(/_/g, " ").toUpperCase()}</option>
+            <option key={c} value={c.toLowerCase().replace(/ /g, "_")}>{c.replace(/_/g, " ").toUpperCase()}</option>
           ))}
         </select>
 

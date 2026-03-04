@@ -300,7 +300,7 @@ def generate_dossier(
         pdf.cell(55, 7, "Total Indebtedness:", 0, 0, 'L')
         pdf.set_text_color(245, 158, 11)
         pdf.set_font('Arial', 'I', 8)
-        pdf.cell(0, 7, "NOT AVAILABLE — verify with Public Trustee", 0, 1, 'L')
+        pdf.cell(0, 7, "Not confirmed — verify with Public Trustee before filing", 0, 1, 'L')
 
     # Math proof
     pdf.ln(3)
@@ -317,7 +317,7 @@ def generate_dossier(
                  0, 1, 'L')
     else:
         pdf.cell(0, 5,
-                 f"  Winning Bid ({_fmt_money(gross)}) - Total Indebtedness (UNKNOWN) "
+                 f"  Winning Bid ({_fmt_money(gross)}) - Total Indebtedness (Not confirmed) "
                  f"= Surplus ({_fmt_money(surplus)}) [UNVERIFIED]",
                  0, 1, 'L')
 

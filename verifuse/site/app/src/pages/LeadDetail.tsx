@@ -147,7 +147,17 @@ export default function LeadDetail() {
             <div className="detail-header">
               <div>
                 <span className="county-badge">{lead.county}</span>
-                <span className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`} style={{ marginLeft: 8 }}>
+                <span
+                  className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`}
+                  style={{ marginLeft: 8 }}
+                  title={
+                    lead.data_grade === "GOLD" ? "GOLD: Math-confirmed overbid with provenance document"
+                    : lead.data_grade === "SILVER" ? "SILVER: Probable overbid, pending full validation"
+                    : lead.data_grade === "BRONZE" ? "BRONZE: Pre-validation — math or provenance unconfirmed"
+                    : lead.data_grade === "REJECT" ? "REJECT: Insufficient evidence or $0 overbid"
+                    : "Grade pending"
+                  }
+                >
                   {lead.data_grade}
                 </span>
                 {!lead.surplus_verified && (
@@ -261,6 +271,18 @@ export default function LeadDetail() {
                   {isRestricted ? "DATA ACCESS ONLY" : isExpired ? "EXPIRED" : "ESCROW ENDED"}
                 </span>
               </div>
+              {lead.sale_status && (
+                <div className="detail-field">
+                  <label>Sale Status</label>
+                  <span style={{ fontSize: "0.85em", opacity: 0.8 }}>{lead.sale_status}</span>
+                </div>
+              )}
+              {lead.data_age_days != null && lead.data_age_days > 30 && (
+                <div className="detail-field">
+                  <label>Data Age</label>
+                  <span style={{ color: "#f59e0b", fontSize: "0.85em" }}>Data {lead.data_age_days}d old</span>
+                </div>
+              )}
             </div>
 
             {/* Obfuscated Owner */}
@@ -435,8 +457,10 @@ export default function LeadDetail() {
                           borderRadius: 4,
                           fontSize: "0.82em",
                         }}>
-                          <span style={{ opacity: 0.5, minWidth: 40, fontSize: "0.9em" }}>{doc.doc_family}</span>
-                          <span style={{ flex: 1, opacity: 0.85 }}>{doc.filename}</span>
+                          <span style={{ opacity: 0.75, minWidth: 120, fontSize: "0.85em" }} title={doc.filename}>
+                            {doc.doc_family_label || doc.doc_family} {doc.doc_family && doc.doc_family_label ? `(${doc.doc_family})` : ""}
+                          </span>
+                          <span style={{ flex: 1, opacity: 0.6, fontSize: "0.85em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{doc.filename}</span>
                           <span style={{ opacity: 0.45, fontSize: "0.85em" }}>
                             {doc.bytes > 0 ? `${Math.round(doc.bytes / 1024)} KB` : ""}
                           </span>
@@ -540,8 +564,15 @@ export default function LeadDetail() {
                   {user?.bar_number && (
                     <button
                       className="btn-outline"
-                      style={{ fontSize: "0.85em" }}
+                      style={{ fontSize: "0.85em", opacity: lead!.ready_to_file === false ? 0.4 : 1, cursor: lead!.ready_to_file === false ? "not-allowed" : "pointer" }}
+                      disabled={lead!.ready_to_file === false}
+                      title={
+                        lead!.ready_to_file === false
+                          ? (lead!.grade_reasons?.join("; ") || "Complete all required fields first")
+                          : "Generate Rule 7.3 attorney solicitation letter"
+                      }
                       onClick={async () => {
+                        if (lead!.ready_to_file === false) return;
                         try {
                           const blob = await generateLetter(lead!.asset_id);
                           const url = URL.createObjectURL(blob);

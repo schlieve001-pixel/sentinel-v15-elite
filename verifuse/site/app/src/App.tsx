@@ -8,6 +8,7 @@ import Dashboard from "./pages/Dashboard";
 import LeadDetail from "./pages/LeadDetail";
 import Admin from "./pages/Admin";
 import Pricing from "./pages/Pricing";
+import PreSale from "./pages/PreSale";
 import "./App.css";
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="/lead/:assetId" element={<ErrorBoundary><LeadDetail /></ErrorBoundary>} />
           <Route path="/admin" element={<ErrorBoundary><Admin /></ErrorBoundary>} />
           <Route path="/pricing" element={<ErrorBoundary><Pricing /></ErrorBoundary>} />
+          <Route path="/pre-sale" element={<ErrorBoundary><PreSale /></ErrorBoundary>} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

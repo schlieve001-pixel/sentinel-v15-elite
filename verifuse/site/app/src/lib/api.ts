@@ -188,11 +188,68 @@ export interface Lead {
   // Surplus stream + estate case
   surplus_stream?: string | null;
   has_deceased_indicator?: number | null;
+  // Domain model: enriched status fields
+  sale_status?: "PRE_SALE" | "POST_SALE_HOLDING" | "ACTIONABLE" | "ESCROW_ENDED" | "UNKNOWN";
+  ready_to_file?: boolean;
+  grade_reasons?: string[];
 }
 
 export interface LeadsResponse {
   count: number;
   leads: Lead[];
+}
+
+// ── Pre-Sale Pipeline ──────────────────────────────────────────────
+
+export interface PreSaleLead {
+  id: string;
+  county: string;
+  case_number: string | null;
+  owner_name: string | null;
+  property_address: string | null;
+  scheduled_sale_date: string | null;
+  sale_date: string | null;
+  ned_recorded_date: string | null;
+  opening_bid: number;
+  surplus_amount: number | null;
+  overbid_amount: number | null;
+  lender_name: string | null;
+  ned_source: string | null;
+  data_grade: string;
+  ingestion_source: string | null;
+  updated_at: string | null;
+}
+
+export interface CountyBreakdown {
+  county: string;
+  cnt: number;
+  with_owner: number;
+  with_surplus: number;
+  pipeline_surplus: number;
+}
+
+export interface PreSaleResponse {
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
+  county_breakdown: CountyBreakdown[];
+  leads: PreSaleLead[];
+}
+
+export function getPreSaleLeads(params?: {
+  county?: string;
+  has_data?: boolean;
+  limit?: number;
+  offset?: number;
+}, signal?: AbortSignal): Promise<PreSaleResponse> {
+  const qs = new URLSearchParams();
+  if (params?.county) qs.set("county", params.county);
+  if (params?.has_data) qs.set("has_data", "true");
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const q = qs.toString();
+  return request(`/api/leads/pre-sale${q ? `?${q}` : ""}`, {}, signal);
 }
 
 export function getLeads(params?: {
@@ -372,6 +429,7 @@ export interface EvidenceDoc {
   filename: string;
   doc_type: string;
   doc_family: string;
+  doc_family_label?: string;
   file_sha256: string;
   bytes: number;
   content_type: string;

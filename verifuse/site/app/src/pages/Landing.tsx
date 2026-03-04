@@ -247,7 +247,7 @@ export default function Landing() {
           Lock in introductory rates. Cancel anytime. No contract.
         </p>
         <p style={{ textAlign: "center", color: "#10b981", fontSize: "0.9rem", marginBottom: "2rem" }}>
-          First 100 subscribers get these rates locked for 12 months.
+          First 10 Founding Attorneys get these rates locked in permanently.
         </p>
         <div className="pricing-grid">
           {TIERS.map((tier) => (

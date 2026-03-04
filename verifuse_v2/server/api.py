@@ -355,6 +355,18 @@ def _send_email(to: str, subject: str, body: str) -> None:
     log.info("EMAIL [%s → %s] %s | %s", FROM, to, subject, body[:300])
 
 
+# ── Evidence document family labels (display names) ─────────────────
+DOC_FAMILY_LABELS: dict[str, str] = {
+    "OB":      "Overbid Voucher",
+    "BID":     "Bid Sheet",
+    "COP":     "Certificate of Purchase",
+    "NED":     "Notice of Election to Defend",
+    "PTD":     "Partial Tax Deed",
+    "NOTICE":  "Notice Document",
+    "INVOICE": "Financial Invoice",
+    "OTHER":   "Supporting Document",
+}
+
 # ── SafeAsset model (NULL-safe: every numeric field is Optional) ────
 
 class SafeAsset(BaseModel):
@@ -392,6 +404,10 @@ class SafeAsset(BaseModel):
     gross_surplus_cents: Optional[int] = None
     net_owner_equity_cents: Optional[int] = None
     classification: Optional[str] = None
+    # Domain model: enriched status fields
+    sale_status: Optional[str] = None      # PRE_SALE | POST_SALE_HOLDING | ACTIONABLE | ESCROW_ENDED | UNKNOWN
+    ready_to_file: Optional[bool] = None   # True only when all required fields present + ACTIONABLE
+    grade_reasons: Optional[list] = None   # Human-readable explanations of current grade
 
 
 class FullAsset(SafeAsset):
@@ -464,6 +480,95 @@ def _compute_status(row: dict) -> str:
     return "UNKNOWN"
 
 
+def _compute_sale_status(row: dict) -> str:
+    """Extended status distinguishing pre-sale from post-sale phases."""
+    today = datetime.now(timezone.utc).date()
+    sale = row.get("sale_date")
+    if not sale:
+        return "PRE_SALE"
+    try:
+        sale_dt = date.fromisoformat(str(sale)[:10])
+    except (ValueError, TypeError):
+        return "UNKNOWN"
+    if sale_dt > today:
+        return "PRE_SALE"
+    restriction_end = _compute_restriction_end(sale)
+    deadline = row.get("claim_deadline")
+    if deadline:
+        try:
+            if today > date.fromisoformat(str(deadline)[:10]):
+                return "ESCROW_ENDED"
+        except (ValueError, TypeError):
+            pass
+    if restriction_end and today < restriction_end:
+        return "POST_SALE_HOLDING"
+    return "ACTIONABLE"
+
+
+def _compute_confidence(row: dict) -> float:
+    """Compute a 0.0–1.0 confidence score from available fields.
+    Score is capped at 0.50 when total_debt is absent (unverified math)."""
+    pts = 0
+    if row.get("sale_date"):
+        pts += 20
+    surplus = _safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus"))
+    if surplus and surplus > 0:
+        pts += 20
+    debt = _safe_float(row.get("total_debt"))
+    if debt and debt > 0:
+        pts += 30
+    if row.get("property_address"):
+        pts += 15
+    if row.get("owner_name"):
+        pts += 15
+    if not debt or debt <= 0:
+        return min(pts, 50) / 100.0
+    return min(pts, 100) / 100.0
+
+
+def _compute_ready_to_file(row: dict) -> bool:
+    """True only when all required fields are present AND status is ACTIONABLE."""
+    required = [
+        row.get("sale_date"),
+        _safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount")),
+        row.get("owner_name"),
+        row.get("property_address"),
+    ]
+    if any(not v for v in required):
+        return False
+    return _compute_status(row) == "ACTIONABLE"
+
+
+def _compute_grade_reasons(row: dict) -> list:
+    """Human-readable list explaining why a lead has its current grade."""
+    reasons = []
+    if not row.get("sale_date"):
+        reasons.append("Sale date not available")
+    debt = _safe_float(row.get("total_debt"))
+    if not debt or debt <= 0:
+        reasons.append("Total indebtedness not extracted — confidence capped at 50%")
+    if not row.get("owner_name"):
+        reasons.append("Owner name not retrieved")
+    if not row.get("property_address"):
+        reasons.append("Property address not retrieved")
+    return reasons
+
+
+def _assert_ready_to_file(row: dict) -> None:
+    """Raise HTTP 422 if required fields are missing for filing."""
+    missing = []
+    if not row.get("owner_name"):
+        missing.append("owner_name")
+    if not row.get("property_address"):
+        missing.append("property_address")
+    if not row.get("sale_date"):
+        missing.append("sale_date")
+    if not (_safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount"))):
+        missing.append("surplus_amount")
+    if missing:
+        raise HTTPException(422, detail=f"Missing required fields: {', '.join(missing)}")
+
+
 def _safe_float(val) -> Optional[float]:
     """Safely convert DB value to float, returning None for NULL/invalid."""
     if val is None:
@@ -526,8 +631,9 @@ def _row_to_safe(row: dict) -> dict:
     surplus = _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus")) or _safe_float(row.get("overbid_amount")) or 0.0
     bid = _safe_float(row.get("winning_bid")) or 0.0
     debt = _safe_float(row.get("total_debt")) or 0.0
-    conf = _safe_float(row.get("confidence_score")) or 0.0
+    conf = _compute_confidence(row)
     status = _compute_status(row)
+    sale_status = _compute_sale_status(row)
     today = datetime.now(timezone.utc).date()
 
     # Claim deadline tracking
@@ -567,9 +673,15 @@ def _row_to_safe(row: dict) -> dict:
         except (ValueError, TypeError):
             pass
 
-    verified = bid > 0 and debt > 0 and conf >= 0.7
+    data_grade = (row.get("data_grade") or "").upper()
+    # REJECT leads: zero out surplus so they never appear claimable
+    if data_grade == "REJECT":
+        surplus = 0.0
+    verified = data_grade in ("GOLD", "SILVER") and conf >= 0.7
 
     pk = _compute_preview_key(row) if is_preview_eligible(row) else None
+    ready = _compute_ready_to_file(row)
+    grade_reasons = _compute_grade_reasons(row)
 
     return SafeAsset(
         asset_id=row.get("id"),
@@ -592,7 +704,7 @@ def _row_to_safe(row: dict) -> dict:
         address_hint=_extract_city(row.get("property_address"), row.get("county")),
         owner_img=None,
         completeness_score=_safe_float(row.get("completeness_score")),
-        confidence_score=round(conf, 2) if conf else None,
+        confidence_score=round(conf, 2),
         data_age_days=data_age_days,
         preview_key=pk,
         # registry_asset_id: derived from county + case_number if both present
@@ -600,6 +712,9 @@ def _row_to_safe(row: dict) -> dict:
             f"FORECLOSURE:CO:{row['county'].upper()}:{row['case_number']}"
             if row.get("county") and row.get("case_number") else None
         ),
+        sale_status=sale_status,
+        ready_to_file=ready,
+        grade_reasons=grade_reasons,
     ).model_dump()
 
 
@@ -992,6 +1107,14 @@ async def _shutdown_db_executor():
 
 @app.get("/health")
 async def health():
+    """Public health check — no internal data exposed."""
+    return {"status": "ok"}
+
+
+@app.get("/api/admin/health")
+async def admin_health(request: Request):
+    """Full health diagnostics — admin/API-key only."""
+    _require_admin_or_api_key(request)
     conn = _get_conn()
     try:
         total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
@@ -2992,7 +3115,11 @@ async def admin_lead_audit(lead_id: str, request: Request):
                     "SELECT id, asset_id, filename, doc_family, bytes, retrieved_ts FROM evidence_documents WHERE asset_id = ? ORDER BY retrieved_ts DESC",
                     [asset_id_canonical],
                 ).fetchall()
-                evidence_docs = [dict(r) for r in rows]
+                evidence_docs = []
+                for r in rows:
+                    d = dict(r)
+                    d["doc_family_label"] = DOC_FAMILY_LABELS.get(d.get("doc_family", ""), d.get("doc_family") or "Supporting Document")
+                    evidence_docs.append(d)
             except Exception:
                 pass
 
@@ -3449,6 +3576,8 @@ async def generate_letter_endpoint(lead_id: str, request: Request):
     if not row:
         raise HTTPException(status_code=404, detail="Lead not found.")
 
+    _assert_ready_to_file(dict(row))
+
     try:
         filepath = generate_letter(VERIFUSE_DB_PATH, lead_id, user["user_id"])
     except Exception as e:
@@ -3483,6 +3612,15 @@ async def get_case_packet(lead_id: str, request: Request):
         )
     _check_lead_unlocked(user, lead_id, doc_type="CASE_PACKET", request=request)
 
+    conn = _get_conn()
+    try:
+        _pkt_row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+    finally:
+        conn.close()
+    if not _pkt_row:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+    _assert_ready_to_file(dict(_pkt_row))
+
     try:
         filepath = generate_case_packet(VERIFUSE_DB_PATH, lead_id)
     except ValueError as e:
@@ -3503,6 +3641,77 @@ async def get_case_packet(lead_id: str, request: Request):
             "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
+
+
+@app.get("/api/leads/pre-sale")
+@limiter.limit("100/minute")
+async def get_presale_leads(
+    request: Request,
+    county: Optional[str] = Query(None),
+    has_data: bool = Query(False),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Return PRE_SALE pipeline leads — upcoming auctions being monitored.
+
+    Requires authentication (attorneys and admin).
+    """
+    _require_user(request)
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            where = " WHERE processing_status = 'PRE_SALE'"
+            params: list = []
+            if county:
+                where += " AND county = ?"
+                params.append(county)
+            if has_data:
+                where += " AND (owner_name IS NOT NULL OR surplus_amount > 0)"
+
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM leads{where}", params
+            ).fetchone()[0]
+
+            # County breakdown
+            county_rows = conn.execute(
+                f"""SELECT county,
+                           COUNT(*) cnt,
+                           SUM(CASE WHEN owner_name IS NOT NULL AND owner_name != '' THEN 1 ELSE 0 END) with_owner,
+                           SUM(CASE WHEN surplus_amount > 0 THEN 1 ELSE 0 END) with_surplus,
+                           SUM(COALESCE(surplus_amount, 0)) pipeline_surplus
+                    FROM leads{where}
+                    GROUP BY county ORDER BY cnt DESC""",
+                params,
+            ).fetchall()
+
+            rows = conn.execute(
+                f"""SELECT id, county, case_number, owner_name, property_address,
+                           scheduled_sale_date, sale_date, ned_recorded_date,
+                           opening_bid, surplus_amount, overbid_amount,
+                           lender_name, ned_source, data_grade, ingestion_source,
+                           updated_at
+                    FROM leads{where}
+                    ORDER BY county ASC,
+                             COALESCE(surplus_amount, 0) DESC,
+                             case_number ASC
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+        finally:
+            conn.close()
+
+        return {
+            "count": len(rows),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "county_breakdown": [dict(r) for r in county_rows],
+            "leads": [dict(r) for r in rows],
+        }
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(DB_EXECUTOR, _run)
 
 
 @app.get("/api/leads/attorney-ready")
@@ -3619,7 +3828,12 @@ async def list_asset_evidence(asset_id: str, request: Request):
     finally:
         conn.close()
 
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["doc_family_label"] = DOC_FAMILY_LABELS.get(d.get("doc_family", ""), d.get("doc_family") or "Supporting Document")
+        result.append(d)
+    return result
 
 
 # ── GET /api/evidence/{doc_id}/download — Secure evidence download ────────────

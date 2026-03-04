@@ -168,10 +168,12 @@ function AttorneyQueue() {
 
   async function reject(user_id: string) {
     setActionMsg("");
+    const reason = window.prompt("Rejection reason (required):", "Does not meet verification requirements");
+    if (reason === null) return; // cancelled
     try {
       await adminFetch("/api/admin/attorney/reject", {
         method: "POST",
-        body: JSON.stringify({ user_id, reason: "Admin review" }),
+        body: JSON.stringify({ user_id, reason: reason.trim() || "Admin review" }),
       });
       setActionMsg(`Rejected ${user_id}`);
       load();
@@ -392,6 +394,8 @@ const GRADE_COLORS: Record<string, string> = {
   GOLD: "#f59e0b", SILVER: "#94a3b8", BRONZE: "#b45309", REJECT: "#ef4444", UNGRADED: "#6b7280",
 };
 
+type SystemSubTab = "operations" | "engineering";
+
 function SystemTab() {
   const [coverage, setCoverage] = useState<CoverageCounty[]>([]);
   const [stats, setStats] = useState<SystemStats | null>(null);
@@ -399,6 +403,7 @@ function SystemTab() {
   const [auditFilter, setAuditFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [subTab, setSubTab] = useState<SystemSubTab>("operations");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -428,6 +433,21 @@ function SystemTab() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
 
+      {/* ── Sub-tab toggle: OPERATIONS | ENGINEERING ── */}
+      <div style={{ display: "flex", gap: 0, borderBottom: "1px solid #374151" }}>
+        {(["operations", "engineering"] as SystemSubTab[]).map((st) => (
+          <button key={st} onClick={() => setSubTab(st)} style={{
+            background: "none", border: "none",
+            borderBottom: subTab === st ? "2px solid #22c55e" : "2px solid transparent",
+            color: subTab === st ? "#22c55e" : "#9ca3af",
+            padding: "8px 16px", fontSize: "0.75em", letterSpacing: "0.08em",
+            cursor: "pointer", fontFamily: "inherit", textTransform: "uppercase",
+          }}>{st}</button>
+        ))}
+      </div>
+
+      {subTab === "operations" && <>
+
       {/* ── Section 0: Revenue Metrics ── */}
       <section>
         <SectionHeader>REVENUE METRICS</SectionHeader>
@@ -452,8 +472,10 @@ function SystemTab() {
         </div>
       </section>
 
-      {/* ── Section 1: Health + DB ── */}
-      <section>
+      </>} {/* end operations sub-tab */}
+
+      {/* ── Section 1: Health + DB (Engineering) ── */}
+      {subTab === "engineering" && <section>
         <SectionHeader>API + DATABASE</SectionHeader>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <StatCard
@@ -475,10 +497,10 @@ function SystemTab() {
           />
         </div>
         {error && <p style={{ color: "#ef4444", fontSize: "0.8em", marginTop: 8 }}>{error}</p>}
-      </section>
+      </section>}
 
-      {/* ── Section 2: Lead Scoreboard ── */}
-      {stats?.scoreboard && stats.scoreboard.length > 0 && (
+      {/* ── Section 2: Lead Scoreboard (Engineering) ── */}
+      {subTab === "engineering" && stats?.scoreboard && stats.scoreboard.length > 0 && (
         <section>
           <SectionHeader>LEAD SCOREBOARD</SectionHeader>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
@@ -506,8 +528,8 @@ function SystemTab() {
         </section>
       )}
 
-      {/* ── Section 3: Users + Stripe ── */}
-      <section>
+      {/* ── Section 3: Users + Stripe (Operations) ── */}
+      {subTab === "operations" && <section>
         <SectionHeader>USERS + BILLING</SectionHeader>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
           <StatCard label="TOTAL USERS" value={stats?.user_counts?.total?.toString() || "—"} />
@@ -531,10 +553,10 @@ function SystemTab() {
             color={stats?.api_key_configured ? "#22c55e" : "#6b7280"}
           />
         </div>
-      </section>
+      </section>}
 
-      {/* ── Section 4: County Coverage ── */}
-      <section>
+      {/* ── Section 4: County Coverage (Engineering) ── */}
+      {subTab === "engineering" && <section>
         <SectionHeader>COUNTY COVERAGE ({coverage.length} counties)</SectionHeader>
         {coverage.length === 0 ? (
           <p style={{ opacity: 0.5, fontSize: "0.85em" }}>No coverage data.</p>
@@ -590,10 +612,10 @@ function SystemTab() {
             </table>
           </div>
         )}
-      </section>
+      </section>}
 
-      {/* ── Section 5: Recent Activity (Audit Log) ── */}
-      <section>
+      {/* ── Section 5: Recent Activity (Audit Log) (Engineering) ── */}
+      {subTab === "engineering" && <section>
         <SectionHeader>RECENT ACTIVITY</SectionHeader>
         <div style={{ marginBottom: 10 }}>
           <input
@@ -648,10 +670,10 @@ function SystemTab() {
             </table>
           </div>
         )}
-      </section>
+      </section>}
 
-      {/* ── Section 6: Admin Actions ── */}
-      <section>
+      {/* ── Section 6: Admin Actions (Engineering) ── */}
+      {subTab === "engineering" && <section>
         <SectionHeader>ADMIN ACTIONS</SectionHeader>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button className="btn-outline" style={{ fontSize: "0.8em", padding: "7px 16px" }}
@@ -667,7 +689,7 @@ function SystemTab() {
             ⬇ COVERAGE JSON
           </a>
           <a
-            href="/health"
+            href="/api/admin/health"
             target="_blank"
             className="btn-outline"
             style={{ fontSize: "0.8em", padding: "7px 16px", textDecoration: "none", display: "inline-block" }}
@@ -675,7 +697,7 @@ function SystemTab() {
             ↗ HEALTH CHECK
           </a>
         </div>
-      </section>
+      </section>}
 
     </div>
   );

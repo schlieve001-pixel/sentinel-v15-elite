@@ -1659,6 +1659,7 @@ class GovSoftEngine:
 
             from uuid import uuid4 as _uuid4
             data_grade = "BRONZE"  # Pre-sale — no confirmed overbid yet
+            new_id = str(_uuid4())
             self._conn.execute(
                 """INSERT INTO leads
                     (id, county, case_number, owner_name, property_address, lender_name,
@@ -1666,13 +1667,23 @@ class GovSoftEngine:
                      ned_source, ingestion_source, surplus_stream, updated_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
-                    str(_uuid4()), self.county, case_number,
+                    new_id, self.county, case_number,
                     owner_name, prop_addr, lender_name,
                     opening_bid, sched_date,
                     data_grade, "PRE_SALE",
                     "govsoft_active", "govsoft",
                     "FORECLOSURE_OVERBID", now_ts,
                 ],
+            )
+            # Backfill asset_registry so gauntlet invariant (registry >= leads) holds.
+            # PRE_SALE is not a valid registry processing_status — map to PENDING.
+            self._conn.execute(
+                """INSERT OR IGNORE INTO asset_registry
+                       (asset_id, engine_type, source_table, source_id, county, state,
+                        amount_cents, event_ts, processing_status, surplus_stream)
+                   VALUES (?, 'FORECLOSURE', 'leads', ?, ?, 'CO', 0, ?, 'PENDING', 'FORECLOSURE_OVERBID')""",
+                [new_id, new_id, self.county,
+                 int(__import__('time').time())],
             )
             return "inserted"
 
