@@ -189,6 +189,18 @@ export default function LeadDetail() {
             <h2 className="detail-value">{fmt(lead.estimated_surplus)}</h2>
             <p className="detail-case">Case: {lead.case_number || lead.registry_asset_id?.split(":")[3] || lead.asset_id?.substring(0, 12)}</p>
 
+            {/* Grade Reasons / Data Gap Warnings */}
+            {lead.grade_reasons && lead.grade_reasons.length > 0 && (
+              <div style={{ margin: "8px 0 12px", padding: "10px 14px", border: "1px solid #78350f", borderRadius: 6, background: "rgba(120,53,15,0.1)" }}>
+                <div style={{ fontSize: "0.7em", letterSpacing: "0.08em", color: "#f59e0b", marginBottom: 6 }}>DATA GAPS</div>
+                <ul style={{ margin: 0, padding: "0 0 0 14px", listStyle: "disc" }}>
+                  {lead.grade_reasons.map((r, i) => (
+                    <li key={i} style={{ fontSize: "0.8em", color: "#fbbf24", marginBottom: 2 }}>{r}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {/* Gate 7: Equity Resolution Panel */}
             {lead.net_owner_equity_cents != null && (
               <div style={{
@@ -325,7 +337,7 @@ export default function LeadDetail() {
                           navigate("/login");
                           return;
                         }
-                        if (!user.bar_number) {
+                        if (!user.is_admin && !user.bar_number) {
                           setError("Attorney verification required. Please update your bar number in your profile.");
                           return;
                         }
@@ -566,7 +578,7 @@ export default function LeadDetail() {
                       </div>
                     );
                   })()}
-                  {user?.bar_number && (
+                  {(user?.bar_number || user?.is_admin) && (
                     <button
                       className="btn-outline"
                       style={{ fontSize: "0.85em", opacity: lead!.ready_to_file === false ? 0.4 : 1, cursor: lead!.ready_to_file === false ? "not-allowed" : "pointer" }}
@@ -647,6 +659,43 @@ export default function LeadDetail() {
                     </h4>
                     <p style={{ margin: 0, fontSize: "0.82em", opacity: 0.8, whiteSpace: "pre-wrap" }}>
                       {lead!.equity_resolution_notes}
+                    </p>
+                  </div>
+                )}
+
+                {/* Junior Liens & Encumbrances — critical for net equity calculation */}
+                {lead!.junior_liens && lead!.junior_liens.length > 0 && (
+                  <div style={{ marginTop: 16, padding: "12px 16px", border: "1px solid #374151", borderRadius: 6, background: "rgba(17,24,39,0.6)" }}>
+                    <h4 style={{ margin: "0 0 10px", fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.7 }}>
+                      JUNIOR LIENS &amp; ENCUMBRANCES
+                    </h4>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {lead!.junior_liens.map((lien, i) => {
+                        const amt = lien.amount_cents > 0 ? "$" + (lien.amount_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "Amount unknown";
+                        const isOpen = lien.is_open === 1;
+                        return (
+                          <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, fontSize: "0.82em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
+                            <span style={{ minWidth: 80, fontWeight: 700, color: isOpen ? "#ef4444" : "#6b7280" }}>
+                              {lien.lien_type}
+                            </span>
+                            <span style={{ flex: 1, opacity: 0.75 }}>
+                              {lien.lienholder_name || "Lienholder unknown"}
+                            </span>
+                            <span style={{ fontWeight: 600, color: isOpen ? "#f59e0b" : "#6b7280" }}>
+                              {amt}
+                            </span>
+                            <span style={{ fontSize: "0.78em", padding: "2px 6px", borderRadius: 3, background: isOpen ? "rgba(239,68,68,0.15)" : "rgba(107,114,128,0.2)", color: isOpen ? "#fca5a5" : "#9ca3af" }}>
+                              {isOpen ? "OPEN" : "RELEASED"}
+                            </span>
+                            {lien.priority != null && (
+                              <span style={{ fontSize: "0.75em", opacity: 0.45 }}>P{lien.priority}</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p style={{ margin: "8px 0 0", fontSize: "0.74em", opacity: 0.45 }}>
+                      Open liens reduce net owner equity and may affect claimable amount. Verify with county records before filing.
                     </p>
                   </div>
                 )}

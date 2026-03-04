@@ -527,20 +527,24 @@ def _compute_confidence(row: dict) -> float:
 
 
 def _compute_ready_to_file(row: dict) -> bool:
-    """True only when all required fields are present AND status is ACTIONABLE."""
+    """True only when all required fields are present, surplus meets threshold, AND status is ACTIONABLE."""
+    surplus = _safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount"))
     required = [
         row.get("sale_date"),
-        _safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount")),
+        surplus,
         row.get("owner_name"),
         row.get("property_address"),
     ]
     if any(not v for v in required):
         return False
+    # Below $500 overbid is not worth filing — costs exceed recovery
+    if surplus < 500:
+        return False
     return _compute_status(row) == "ACTIONABLE"
 
 
 def _compute_grade_reasons(row: dict) -> list:
-    """Human-readable list explaining why a lead has its current grade."""
+    """Human-readable list explaining why a lead has its current grade / data gaps."""
     reasons = []
     if not row.get("sale_date"):
         reasons.append("Sale date not available")
@@ -548,9 +552,18 @@ def _compute_grade_reasons(row: dict) -> list:
     if not debt or debt <= 0:
         reasons.append("Total indebtedness not extracted — confidence capped at 50%")
     if not row.get("owner_name"):
-        reasons.append("Owner name not retrieved")
+        reasons.append("Owner name not retrieved — assessor lookup needed")
     if not row.get("property_address"):
-        reasons.append("Property address not retrieved")
+        reasons.append("Property address not retrieved — assessor lookup needed")
+    # Minimum practical surplus threshold — below $500 the overbid is below filing cost
+    surplus = (
+        _safe_float(row.get("overbid_amount"))
+        or _safe_float(row.get("surplus_amount"))
+        or _safe_float(row.get("estimated_surplus"))
+        or 0.0
+    )
+    if surplus > 0 and surplus < 500:
+        reasons.append(f"Overbid ${surplus:.2f} is below minimum practical claim threshold ($500) — filing costs likely exceed recovery")
     return reasons
 
 
@@ -2028,6 +2041,21 @@ async def get_lead_detail(lead_id: str, request: Request):
                         result["equity_resolution_notes"] = eq_notes_row["notes"]
                 except Exception:
                     pass  # Supplemental — never block the lead response
+
+            # ── Junior lien records (always included when available) ──────────
+            # Surfaced to all authenticated users — lien existence is intelligence, not PII.
+            if registry_asset_id:
+                try:
+                    lien_rows = conn.execute(
+                        """SELECT lien_type, lienholder_name, priority, amount_cents, is_open
+                           FROM lien_records
+                           WHERE asset_id = ?
+                           ORDER BY is_open DESC, priority ASC""",
+                        [registry_asset_id],
+                    ).fetchall()
+                    result["junior_liens"] = [dict(r) for r in lien_rows]
+                except Exception:
+                    result["junior_liens"] = []
 
             # ── Daily view rate limiting (BEGIN IMMEDIATE) ────────────────────
             if user_id and not is_unlocked and not is_eff_admin:

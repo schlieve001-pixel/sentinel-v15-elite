@@ -149,6 +149,14 @@ export interface SurplusMathAudit {
   doc_id: string | null;
 }
 
+export interface LienRecord {
+  lien_type: string;       // "IRS", "HOA", "MORTGAGE", "JUDGMENT", "OTHER"
+  lienholder_name?: string | null;
+  priority?: number | null;
+  amount_cents: number;    // lien amount in cents
+  is_open: number;         // 1 = open/active, 0 = released
+}
+
 export interface Lead {
   asset_id: string;
   county: string;
@@ -192,6 +200,8 @@ export interface Lead {
   sale_status?: "PRE_SALE" | "POST_SALE_HOLDING" | "ACTIONABLE" | "ESCROW_ENDED" | "UNKNOWN";
   ready_to_file?: boolean;
   grade_reasons?: string[];
+  // Junior liens and encumbrances (always included when data available)
+  junior_liens?: LienRecord[];
 }
 
 export interface LeadsResponse {
