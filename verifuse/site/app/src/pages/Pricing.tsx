@@ -431,7 +431,7 @@ export default function Pricing() {
           <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", color: "#f59e0b", marginBottom: 8 }}>
             FOUNDING ATTORNEY PROGRAM — LIMITED SEATS
           </div>
-          <h3 style={{ margin: "0 0 10px", fontSize: "1.1em" }}>First 25 Attorneys — Lock In Founder Pricing</h3>
+          <h3 style={{ margin: "0 0 10px", fontSize: "1.1em" }}>First 10 Founding Attorneys — Lock In Founder Pricing</h3>
           <ul style={{ margin: "0 0 16px", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
             <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
               <span style={{ color: "#f59e0b" }}>★</span>

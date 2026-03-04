@@ -172,6 +172,10 @@ def _doc_family_from_filename(filename: str) -> str:
     Heuristic order matters — more specific matches first.
     CERTQH (Certificate of Qualified Holder) and CKREQ (check request) are
     overbid-related documents; both map to OB (closest enum value).
+
+    NOTE: Some counties (Boulder) serve downloads with random server-generated
+    names. Always call this with the meaningful link-text name (doc_type / raw_name),
+    not the browser-suggested download filename.
     """
     upper = filename.upper()
     if "OBCLAIM" in upper or "OBCKREQ" in upper or "CKREQ" in upper:
@@ -181,6 +185,9 @@ def _doc_family_from_filename(filename: str) -> str:
         # NOT a true overbid voucher — present in ALL sold cases.
         # govsoft_extract.py has_voucher_doc query filters by OBCLAIM/OBCKREQ/CKREQ
         # filename to exclude CERTQH from Gate 5 voucher checks.
+    # Overbid fund documents (Boulder-style: "UNCLAIMED OVERBID FUNDS", "CLIP UNCLAIMED OVERBID FUNDS")
+    if "OVERBID" in upper or "UNCLAIMED" in upper:
+        return "OB"
     if "BID" in upper:
         return "BID"
     if "COP" in upper:
@@ -192,10 +199,10 @@ def _doc_family_from_filename(filename: str) -> str:
     # Match OB as a standalone token — \b doesn't work with _ so use non-alpha lookaround
     if re.search(r"(?<![A-Z])OB(?![A-Z])", upper):
         return "OB"
-    if "NOTICE" in upper:
-        return "NOTICE"
-    if "INVOICE" in upper:
+    if "INVOICE" in upper or "CURRENT INVOICE" in upper or "SALE INVOICE" in upper:
         return "INVOICE"
+    if "NOTICE" in upper or "MAILINIT" in upper or "MAILSEC" in upper:
+        return "NOTICE"
     return "OTHER"
 
 
@@ -350,7 +357,9 @@ def _store_evidence_doc(
         return None
 
     safe_name = _safe_filename(raw_filename)
-    doc_family = _doc_family_from_filename(raw_filename)
+    # Use doc_type (original link text) for classification — some GovSoft counties (e.g. Boulder)
+    # serve random server-generated filenames on download, making raw_filename useless for family detection.
+    doc_family = _doc_family_from_filename(doc_type or raw_filename)
     content_type = _content_type_from_ext(raw_filename)
     file_sha = _sha256_bytes(file_bytes)
 

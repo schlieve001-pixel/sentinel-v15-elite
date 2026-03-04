@@ -473,13 +473,17 @@ export default function Dashboard() {
                   {simMode === "user" ? "VIEW: USER" : "VIEW: ADMIN"}
                 </button>
               )}
+              <Link to="/pricing" className="btn-outline-sm">PRICING</Link>
               {user.is_admin && (
                 <Link to="/admin" className="btn-outline-sm">ADMIN</Link>
               )}
               <button className="btn-outline-sm" onClick={logout}>LOGOUT</button>
             </>
           ) : (
-            <Link to="/login" className="btn-outline-sm">LOGIN</Link>
+            <>
+              <Link to="/pricing" className="btn-outline-sm">PRICING</Link>
+              <Link to="/login" className="btn-outline-sm">LOGIN</Link>
+            </>
           )}
         </div>
       </header>
