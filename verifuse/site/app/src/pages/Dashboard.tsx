@@ -512,7 +512,15 @@ export default function Dashboard() {
             <button className="btn-outline-sm" disabled={verifySending}
               onClick={async () => {
                 setVerifySending(true); setVerifyMsg("");
-                try { await sendVerification(); setVerifyMsg("Verification email sent!"); }
+                try {
+                  const res = await sendVerification();
+                  if (res.dev_code) {
+                    setVerifyCode(res.dev_code);
+                    setVerifyMsg(`Code: ${res.dev_code} (email not configured — pre-filled)`);
+                  } else {
+                    setVerifyMsg("Verification email sent!");
+                  }
+                }
                 catch { setVerifyMsg("Failed to send. Try again."); }
                 finally { setVerifySending(false); }
               }}>RESEND CODE</button>

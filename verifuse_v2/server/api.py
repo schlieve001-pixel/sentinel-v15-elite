@@ -1753,15 +1753,27 @@ async def api_register(request: Request):
     password = body.get("password", "")
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password required.")
+    bar_number = body.get("bar_number", "").strip()
     user, token = register_user(
         email=email, password=password,
         full_name=body.get("full_name", ""),
         firm_name=body.get("firm_name", ""),
-        bar_number=body.get("bar_number", ""),
+        bar_number=bar_number,
         tier=body.get("tier", "scout"),
     )
     # Founders cap check
     _try_founders_redemption(user["user_id"])
+    # If bar_number was supplied at registration, auto-queue attorney verification
+    if bar_number:
+        conn2 = _get_conn()
+        try:
+            conn2.execute(
+                "UPDATE users SET attorney_status = 'PENDING' WHERE user_id = ? AND attorney_status = 'NONE'",
+                [user["user_id"]],
+            )
+            conn2.commit()
+        finally:
+            conn2.close()
     conn = _get_conn()
     try:
         balance = _ledger_balance(conn, user["user_id"])
@@ -1862,14 +1874,22 @@ async def send_verification(request: Request):
     finally:
         conn.close()
 
+    email_mode = os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower()
     _send_email(
         to=user["email"],
         subject="VeriFuse Email Verification",
         body=f"Your VeriFuse verification code is: {code}\n\nThis code expires in 10 minutes.",
     )
-    log.info("Verification email dispatched to %s", user["email"])
+    log.info("Verification email dispatched to %s (mode=%s)", user["email"], email_mode)
 
-    return {"ok": True, "message": "Verification code sent."}
+    # When email delivery is not configured, return the code in the response so the
+    # user can verify without needing an inbox. In production (ses/smtp mode) this
+    # field is omitted and the code is only delivered via email.
+    resp: dict = {"ok": True, "message": "Verification code sent."}
+    if email_mode == "log":
+        resp["dev_code"] = code
+        resp["message"] = "Email delivery not configured — use dev_code to verify."
+    return resp
 
 
 @app.post("/api/auth/verify-email")
@@ -3273,6 +3293,7 @@ async def admin_attorney_approve(request: Request):
     try:
         conn.execute(
             "UPDATE users SET attorney_status = 'VERIFIED', verified_attorney = 1, "
+            "role = 'approved_attorney', "
             "bar_verified_at = datetime('now'), verification_url = ? WHERE user_id = ?",
             [verification_url, user_id],
         )
@@ -3282,7 +3303,7 @@ async def admin_attorney_approve(request: Request):
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "attorney_status": "VERIFIED"}
+    return {"ok": True, "attorney_status": "VERIFIED", "role": "approved_attorney"}
 
 
 @app.post("/api/admin/attorney/reject")
@@ -3808,15 +3829,29 @@ async def set_attorney_ready(lead_id: str, request: Request):
 @app.get("/api/assets/{asset_id:path}/evidence")
 @limiter.limit("60/minute")
 async def list_asset_evidence(asset_id: str, request: Request):
-    """List evidence_documents for a captured GovSoft asset (attorney-gated)."""
+    """List evidence_documents for a captured GovSoft asset (attorney-gated, unlock-gated)."""
     user = _get_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required.")
     if user.get("role") not in ("approved_attorney", "admin") and not _effective_admin(user, request):
         raise HTTPException(status_code=403, detail="Attorney or admin role required.")
 
+    # Resolve lead_id from canonical asset_id (FORECLOSURE:CO:{COUNTY}:{case_number})
     conn = _get_conn()
     try:
+        # Try direct asset_id lookup first, then canonical parse fallback
+        lead_row = conn.execute(
+            "SELECT id FROM leads WHERE id = ?", [asset_id]
+        ).fetchone()
+        if not lead_row:
+            parts = asset_id.split(":")
+            if len(parts) >= 4:
+                county_key = parts[2].lower()
+                case_num = ":".join(parts[3:])
+                lead_row = conn.execute(
+                    "SELECT id FROM leads WHERE lower(county) = ? AND case_number = ?",
+                    [county_key, case_num],
+                ).fetchone()
         rows = conn.execute(
             """SELECT id, asset_id, filename, doc_type, doc_family,
                       file_path, file_sha256, bytes, content_type, retrieved_ts
@@ -3827,6 +3862,12 @@ async def list_asset_evidence(asset_id: str, request: Request):
         ).fetchall()
     finally:
         conn.close()
+
+    # Enforce unlock gate (admin bypasses automatically inside _check_lead_unlocked)
+    if lead_row:
+        _check_lead_unlocked(user, lead_row["id"], doc_type="EVIDENCE_LIST", request=request)
+    elif not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Lead not found or not unlocked.")
 
     result = []
     for r in rows:
@@ -3847,7 +3888,7 @@ async def list_asset_evidence(asset_id: str, request: Request):
 @app.get("/api/evidence/{doc_id}/download")
 @limiter.limit("30/minute")
 async def download_evidence_doc(doc_id: str, request: Request):
-    """Securely stream a vault evidence document to an authorized attorney."""
+    """Securely stream a vault evidence document to an authorized attorney (unlock-gated)."""
     from fastapi.responses import FileResponse
 
     user = _get_user_from_request(request)
@@ -3859,12 +3900,35 @@ async def download_evidence_doc(doc_id: str, request: Request):
     conn = _get_conn()
     try:
         row = conn.execute(
-            """SELECT file_path, filename, doc_type, content_type
+            """SELECT file_path, filename, doc_type, content_type, asset_id
                FROM evidence_documents WHERE id = ?""",
             [doc_id],
         ).fetchone()
+        # Resolve lead_id for unlock gate
+        lead_id_for_gate = None
+        if row and row["asset_id"]:
+            lead_row = conn.execute(
+                "SELECT id FROM leads WHERE id = ?", [row["asset_id"]]
+            ).fetchone()
+            if not lead_row:
+                parts = (row["asset_id"] or "").split(":")
+                if len(parts) >= 4:
+                    county_key = parts[2].lower()
+                    case_num = ":".join(parts[3:])
+                    lead_row = conn.execute(
+                        "SELECT id FROM leads WHERE lower(county) = ? AND case_number = ?",
+                        [county_key, case_num],
+                    ).fetchone()
+            if lead_row:
+                lead_id_for_gate = lead_row["id"]
     finally:
         conn.close()
+
+    # Enforce unlock gate before path resolution
+    if lead_id_for_gate:
+        _check_lead_unlocked(user, lead_id_for_gate, doc_type=row["doc_type"] or "EVIDENCE_DOC", request=request)
+    elif not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Lead not found or not unlocked.")
 
     if not row:
         raise HTTPException(status_code=404, detail="Evidence document not found.")

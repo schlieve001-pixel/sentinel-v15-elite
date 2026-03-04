@@ -93,7 +93,7 @@ export function getMe(signal?: AbortSignal): Promise<AuthUser> {
   return request("/api/auth/me", {}, signal);
 }
 
-export function sendVerification(): Promise<{ status: string }> {
+export function sendVerification(): Promise<{ ok: boolean; message: string; dev_code?: string }> {
   return request("/api/auth/send-verification", { method: "POST" });
 }
 
