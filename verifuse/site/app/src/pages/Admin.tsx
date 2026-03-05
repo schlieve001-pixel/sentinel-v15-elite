@@ -50,6 +50,25 @@ interface CoverageCounty {
   silent_24h?: boolean;
   found_zero_24h?: boolean;
   last_error?: string | null;
+  gold?: number;
+  silver?: number;
+  bronze?: number;
+  cases_processed?: number;
+}
+
+interface PipelineCounty {
+  county: string;
+  total: number;
+  gold: number;
+  silver: number;
+  bronze: number;
+  reject: number;
+  bronze_no_sale_date: number;
+  bronze_no_overbid: number;
+  has_snapshots: number;
+  platform_type: string | null;
+  last_verified_ts: number | null;
+  action_needed: string;
 }
 
 interface ScoreboardEntry {
@@ -1011,6 +1030,7 @@ function AuditLog() {
 
 function SystemTab() {
   const [coverage, setCoverage] = useState<CoverageCounty[]>([]);
+  const [pipeline, setPipeline] = useState<PipelineCounty[]>([]);
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [rev, setRev] = useState<RevenueMetrics | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1021,6 +1041,7 @@ function SystemTab() {
   const load = useCallback(() => {
     Promise.all([
       adminFetch<{ counties: CoverageCounty[] }>("/api/admin/coverage").then((r) => setCoverage(r.counties || [])).catch(() => setCoverage([])),
+      adminFetch<{ pipeline: PipelineCounty[] }>("/api/admin/pipeline-status").then((r) => setPipeline(r.pipeline || [])).catch(() => setPipeline([])),
       adminFetch<SystemStats>("/api/admin/system-stats").then(setStats).catch((e) => setError(e.message)),
       adminFetch<RevenueMetrics>("/api/admin/revenue-metrics").then(setRev).catch(() => setRev(null)),
     ]).finally(() => setLoading(false));
@@ -1128,43 +1149,94 @@ function SystemTab() {
             </section>
           )}
 
-          {/* County Coverage */}
+          {/* County Pipeline Intelligence */}
           <section>
-            <SectionHeader>COUNTY COVERAGE ({coverage.length} active)</SectionHeader>
-            {coverage.length === 0 ? (
+            <SectionHeader>COUNTY PIPELINE — GATE 4 STATUS ({pipeline.length > 0 ? pipeline.length : coverage.length} counties)</SectionHeader>
+            {pipeline.length === 0 && coverage.length === 0 ? (
               <p style={{ color: TEXT_MUTED, fontSize: "0.85em" }}>No coverage data.</p>
             ) : (
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.78em" }}>
                   <thead>
                     <tr style={{ borderBottom: `1px solid ${BORDER2}` }}>
-                      {["COUNTY", "PLATFORM", "LEADS", "24H STATUS", "LAST RUN", "ERROR"].map((h) => (
+                      {[
+                        { h: "COUNTY", right: false },
+                        { h: "PLATFORM", right: false },
+                        { h: "GOLD", right: true },
+                        { h: "SILVER", right: true },
+                        { h: "BRONZE", right: true },
+                        { h: "ACTION", right: false },
+                        { h: "24H", right: false },
+                        { h: "LAST RUN", right: false },
+                      ].map(({ h, right }) => (
                         <th key={h} style={{
-                          textAlign: h === "LEADS" ? "right" : "left",
+                          textAlign: right ? "right" : "left",
                           padding: "5px 10px", color: TEXT_MUTED, fontWeight: 600, fontSize: "0.85em",
                         }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {coverage.map((c) => {
-                      const status24h = c.ran_24h ? (c.found_zero_24h ? "EMPTY" : "OK") : c.silent_24h ? "SILENT" : "—";
-                      const statusColor = c.ran_24h ? (c.found_zero_24h ? AMBER : GREEN) : c.silent_24h ? RED : TEXT_MUTED;
-                      return (
-                        <tr key={c.county_code || c.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
-                          <td style={{ padding: "6px 10px", fontWeight: 500 }}>{(c.county || c.county_code || "—").toUpperCase()}</td>
-                          <td style={{ padding: "6px 10px", color: TEXT_MUTED }}>{c.platform_type || c.platform || "—"}</td>
-                          <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 600 }}>{c.leads_count ?? 0}</td>
-                          <td style={{ padding: "6px 10px" }}><span style={{ color: statusColor, fontWeight: 700, fontSize: "0.85em" }}>{status24h}</span></td>
-                          <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.85em" }}>
-                            {(c.last_scraped_at || c.last_run)?.slice(0, 16).replace("T", " ") || "—"}
-                          </td>
-                          <td style={{ padding: "6px 10px", color: RED, fontSize: "0.78em", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {c.last_error || ""}
-                          </td>
-                        </tr>
-                      );
-                    })}
+                    {pipeline.length > 0 ? (
+                      (() => {
+                        // Merge pipeline data with coverage data for 24h status + last run
+                        const coverageByCounty: Record<string, CoverageCounty> = {};
+                        coverage.forEach((c) => { coverageByCounty[(c.county_code || c.county || "").toLowerCase()] = c; });
+                        return pipeline.map((p) => {
+                          const cov = coverageByCounty[p.county.toLowerCase()] || {};
+                          const status24h = cov.ran_24h ? (cov.found_zero_24h ? "EMPTY" : "OK") : cov.silent_24h ? "NEEDS RUN" : "—";
+                          const status24hColor = cov.ran_24h ? (cov.found_zero_24h ? AMBER : GREEN) : cov.silent_24h ? AMBER : TEXT_MUTED;
+                          const actionColor = p.action_needed === "clean" ? GREEN
+                            : p.action_needed === "gate4_ready" ? AMBER
+                            : p.action_needed === "sale_info_backfill_needed" ? "#f97316"
+                            : p.action_needed === "captcha_blocked" ? RED
+                            : TEXT_MUTED;
+                          const actionLabel = p.action_needed === "clean" ? "✓ CLEAN"
+                            : p.action_needed === "gate4_ready" ? "→ GATE 4"
+                            : p.action_needed === "sale_info_backfill_needed" ? "⟳ BACKFILL"
+                            : p.action_needed === "captcha_blocked" ? "✗ CAPTCHA"
+                            : p.action_needed.replace(/_/g, " ").toUpperCase();
+                          return (
+                            <tr key={p.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                              <td style={{ padding: "6px 10px", fontWeight: 600 }}>{p.county.replace(/_/g, " ").toUpperCase()}</td>
+                              <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.75em" }}>{p.platform_type || cov.platform || "—"}</td>
+                              <td style={{ padding: "6px 10px", textAlign: "right", color: "#f59e0b", fontWeight: p.gold > 0 ? 700 : 400 }}>{p.gold || "—"}</td>
+                              <td style={{ padding: "6px 10px", textAlign: "right", color: "#94a3b8", fontWeight: p.silver > 0 ? 700 : 400 }}>{p.silver || "—"}</td>
+                              <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>{p.bronze || "—"}</td>
+                              <td style={{ padding: "6px 10px" }}>
+                                <span style={{ color: actionColor, fontWeight: 700, fontSize: "0.8em", letterSpacing: "0.04em" }}>{actionLabel}</span>
+                              </td>
+                              <td style={{ padding: "6px 10px" }}>
+                                <span style={{ color: status24hColor, fontWeight: 600, fontSize: "0.8em" }}>{status24h}</span>
+                              </td>
+                              <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.8em" }}>
+                                {(cov.last_scraped_at || cov.last_run)?.slice(0, 10) || "—"}
+                              </td>
+                            </tr>
+                          );
+                        });
+                      })()
+                    ) : (
+                      // Fallback: coverage-only table
+                      coverage.map((c) => {
+                        const status24h = c.ran_24h ? (c.found_zero_24h ? "EMPTY" : "OK") : c.silent_24h ? "NEEDS RUN" : "—";
+                        const statusColor = c.ran_24h ? (c.found_zero_24h ? AMBER : GREEN) : c.silent_24h ? AMBER : TEXT_MUTED;
+                        return (
+                          <tr key={c.county_code || c.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                            <td style={{ padding: "6px 10px", fontWeight: 600 }}>{(c.county || c.county_code || "—").toUpperCase()}</td>
+                            <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.75em" }}>{c.platform_type || c.platform || "—"}</td>
+                            <td style={{ padding: "6px 10px", textAlign: "right", color: "#f59e0b" }}>{c.gold || "—"}</td>
+                            <td style={{ padding: "6px 10px", textAlign: "right", color: "#94a3b8" }}>{c.silver || "—"}</td>
+                            <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>{c.bronze || "—"}</td>
+                            <td style={{ padding: "6px 10px" }}>—</td>
+                            <td style={{ padding: "6px 10px" }}><span style={{ color: statusColor, fontWeight: 600, fontSize: "0.8em" }}>{status24h}</span></td>
+                            <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.8em" }}>
+                              {(c.last_scraped_at || c.last_run)?.slice(0, 10) || "—"}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
                   </tbody>
                 </table>
               </div>

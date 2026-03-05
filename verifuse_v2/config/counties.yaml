@@ -139,12 +139,13 @@ counties:
 
   - name: Teller
     code: teller
-    platform: govease
-    parser: GenericExcessFundsParser
-    public_trustee_url: https://www.co.teller.co.us/PublicTrustee/
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://tcprop.tellercounty.gov/Treasurer/GTSWeb
+    public_trustee_url: https://www.tellercounty.gov/Treasurer/
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
-    enabled: false  # GovEase — disabled by default (Task 0D)
+    enabled: true
     population_tier: small
 
   - name: Eagle
@@ -164,8 +165,8 @@ counties:
     code: garfield
     platform: gts
     parser: GTSPreSaleParser
-    base_url: https://foreclosures.garfield-county.com
-    public_trustee_url: https://www.garfield-county.com/public-trustee/
+    base_url: https://foreclosures.garfieldcountyco.gov
+    public_trustee_url: https://www.garfieldcountyco.gov/public-trustee/
     pdf_patterns: ["*excess*", "*surplus*", "*foreclosure*"]
     scrape_interval_hours: 72
     enabled: true
@@ -175,17 +176,18 @@ counties:
     code: pitkin
     platform: county_page
     parser: GenericExcessFundsParser
-    public_trustee_url: https://www.pitkincounty.com/175/Public-Trustee
+    public_trustee_url: https://www.pitkincounty.com/325/Foreclosure-Search
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
-    enabled: true
+    enabled: false  # GTSData backend URL unconfirmed — research needed
     population_tier: small
 
   - name: Routt
     code: routt
-    platform: county_page
-    parser: GenericExcessFundsParser
-    public_trustee_url: https://co.routt.co.us/260/Public-Trustee
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: http://pioneer.co.routt.co.us/foreclosuresearch
+    public_trustee_url: https://www.co.routt.co.us/414/Public-Trustee
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
     enabled: true
@@ -213,8 +215,9 @@ counties:
 
   - name: Clear Creek
     code: clear_creek
-    platform: county_page
-    parser: GenericExcessFundsParser
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://foreclosure.co.clear-creek.co.us
     public_trustee_url: https://www.clearcreekcounty.us/149/Public-Trustee
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
@@ -245,9 +248,10 @@ counties:
 
   - name: Fremont
     code: fremont
-    platform: county_page
-    parser: GenericExcessFundsParser
-    public_trustee_url: https://www.fremontco.com/public-trustee
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://fremontcountyco.gov/web/treasurer/ForeclosureSearch
+    public_trustee_url: https://fremontcountyco.gov/web/treasurer/
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
     enabled: true
@@ -257,10 +261,10 @@ counties:
     code: park
     platform: county_page
     parser: GenericExcessFundsParser
-    public_trustee_url: https://www.parkco.us/236/Public-Trustee
+    public_trustee_url: https://www.parkcountyco.gov/481/Foreclosure-Search
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
-    enabled: true
+    enabled: false  # GTSData backend URL unconfirmed — research needed
     population_tier: small
 
   - name: Lake
@@ -275,8 +279,9 @@ counties:
 
   - name: La Plata
     code: la_plata
-    platform: county_page
-    parser: GenericExcessFundsParser
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://foreclosures.laplata.co.us
     public_trustee_url: https://co.laplata.co.us/departments/public_trustee/
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
@@ -295,8 +300,9 @@ counties:
 
   - name: Delta
     code: delta
-    platform: county_page
-    parser: GenericExcessFundsParser
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: http://ptrustee.deltacounty.com
     public_trustee_url: https://www.deltacounty.com/363/Public-Trustee
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
@@ -305,8 +311,9 @@ counties:
 
   - name: Elbert
     code: elbert
-    platform: county_page
-    parser: GenericExcessFundsParser
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://foreclosures.elbertcounty-co.gov
     public_trustee_url: https://www.elbertcounty-co.gov/277/Public-Trustee
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
@@ -350,10 +357,12 @@ counties:
 
   - name: Archuleta
     code: archuleta
-    platform: county_page
-    parser: GenericExcessFundsParser
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://foreclosuresearch.archuletacounty.org
     public_trustee_url: https://www.archuletacounty.org/213/Public-Trustee
-    scrape_interval_hours: 336
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
     enabled: true
     population_tier: rural
 
@@ -423,10 +432,12 @@ counties:
 
   - name: Gunnison
     code: gunnison
-    platform: county_page
-    parser: GenericExcessFundsParser
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://foreclosures.gunnisoncounty.org
     public_trustee_url: https://www.gunnisoncounty.org/241/Public-Trustee
-    scrape_interval_hours: 336
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
     enabled: true
     population_tier: small
 
@@ -582,10 +593,13 @@ counties:
 
   - name: San Miguel
     code: san_miguel
-    platform: govease
-    parser: GenericExcessFundsParser
-    scrape_interval_hours: 336
-    enabled: false  # GovEase — disabled by default
+    platform: gts
+    parser: GTSPreSaleParser
+    base_url: https://foreclosures.sanmiguelcountyco.gov
+    public_trustee_url: https://www.sanmiguelcountyco.gov/departments/public-trustee/
+    pdf_patterns: ["*excess*", "*surplus*"]
+    scrape_interval_hours: 168
+    enabled: true
     population_tier: rural
 
   - name: Sedgwick

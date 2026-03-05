@@ -2018,13 +2018,11 @@ class GovSoftEngine:
         BATCH = 20  # re-launch browser every N cases
         case_numbers = [r["case_number"] for r in rows]
 
-        # Build correct CaseDetail.aspx prefix (respects search_path subdirectory)
-        _spath_bf = self.search_path.strip("/")
-        _case_detail_base_bf = (
-            f"{self.base_url.rstrip('/')}/{_spath_bf}/"
-            if _spath_bf
-            else f"{self.base_url.rstrip('/')}/"
-        )
+        # Build case detail URL using detail_path from county_profiles (authoritative).
+        # Example: jefferson base=https://gts.co.jefferson.co.us/foreclosure
+        #          detail_path=/CaseDetails.aspx
+        #          → https://gts.co.jefferson.co.us/foreclosure/CaseDetails.aspx?CaseNo=J2400096
+        _detail_path_bf = self.detail_path or "/CaseDetails.aspx"
 
         for batch_start in range(0, len(case_numbers), BATCH):
             batch = case_numbers[batch_start: batch_start + BATCH]
@@ -2064,7 +2062,7 @@ class GovSoftEngine:
                     for case_number in batch:
                         asset_id_val = _asset_id(self.county, case_number)
                         detail_url = (
-                            f"{_case_detail_base_bf}CaseDetail.aspx?CaseNo={case_number}"
+                            f"{self.base_url.rstrip('/')}{_detail_path_bf}?CaseNo={case_number}"
                         )
                         try:
                             await page.goto(detail_url, wait_until="networkidle", timeout=30000)
