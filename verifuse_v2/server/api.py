@@ -300,19 +300,89 @@ def _try_founders_redemption(user_id: str) -> bool:
         conn.close()
 
 
+def _redact_email(addr: str) -> str:
+    """Redact email for safe logging: keep first 2 chars + domain."""
+    try:
+        local, domain = addr.rsplit("@", 1)
+        return local[:2] + "***@" + domain
+    except Exception:
+        return "***@***"
+
+
 def _send_email(to: str, subject: str, body: str) -> None:
-    """Send email via SES → SMTP → log fallback.
+    """Send email via SendGrid → SES → SMTP → log fallback.
 
     Reads VERIFUSE_EMAIL_MODE env var:
-      ses  — AWS SES (primary); falls through to SMTP on failure
-      smtp — SMTP directly; falls through to log on failure
-      log  — log only (default / dev)
+      sendgrid — SendGrid API (preferred production); enforces daily cap + cooldown
+      ses      — AWS SES; falls through to SMTP on failure
+      smtp     — SMTP directly; falls through to log on failure
+      log      — log only (default / dev)
 
-    Always sends from support@verifuse.tech in us-west-2.
+    Always sends from support@verifuse.tech.
+    Never logs the API key or full email body in production.
     """
     FROM = "support@verifuse.tech"
     REGION = os.environ.get("AWS_REGION", "us-west-2")
     mode = os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower()
+
+    if mode == "sendgrid":
+        sg_key = os.environ.get("SENDGRID_API_KEY", "")
+        if not sg_key:
+            log.error("[email] SENDGRID_API_KEY not set — cannot deliver")
+            raise RuntimeError("Email delivery not configured")
+        # Daily cap: 5 sends per address per day (sha256 only — never store plain email)
+        email_hash = hashlib.sha256(to.lower().strip().encode()).hexdigest()
+        today_start_ts = int(datetime(
+            *datetime.now(timezone.utc).date().timetuple()[:3],
+            tzinfo=timezone.utc,
+        ).timestamp())
+        try:
+            _ecn = _get_conn()
+            try:
+                count_row = _ecn.execute(
+                    "SELECT COUNT(*) AS cnt FROM email_log WHERE email_hash = ? AND sent_ts >= ?",
+                    [email_hash, today_start_ts],
+                ).fetchone()
+                if count_row and count_row["cnt"] >= 5:
+                    raise HTTPException(429, detail="Daily email limit reached. Try again tomorrow.")
+                _ecn.execute(
+                    "INSERT INTO email_log (email_hash, sent_ts) VALUES (?, ?)",
+                    [email_hash, int(datetime.now(timezone.utc).timestamp())],
+                )
+                _ecn.commit()
+            finally:
+                _ecn.close()
+        except HTTPException:
+            raise
+        except Exception as _cap_err:
+            log.warning("[email] email_log cap check unavailable: %s", type(_cap_err).__name__)
+        try:
+            import httpx
+            resp = httpx.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={
+                    "Authorization": f"Bearer {sg_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "personalizations": [{"to": [{"email": to}]}],
+                    "from": {"email": FROM},
+                    "subject": subject,
+                    "content": [{"type": "text/plain", "value": body}],
+                },
+                timeout=10,
+            )
+            log.info("[email] SendGrid → %s status=%d", _redact_email(to), resp.status_code)
+            if resp.status_code >= 400:
+                raise RuntimeError(f"SendGrid delivery failed (status={resp.status_code})")
+            return
+        except HTTPException:
+            raise
+        except RuntimeError:
+            raise
+        except Exception as e:
+            log.error("[email] SendGrid send failed: %s", type(e).__name__)
+            raise RuntimeError("Email delivery failed") from e
 
     if mode == "ses":
         try:
@@ -352,7 +422,7 @@ def _send_email(to: str, subject: str, body: str) -> None:
         except Exception as e:
             log.error("SMTP send failed: %s — falling back to log", e)
 
-    log.info("EMAIL [%s → %s] %s | %s", FROM, to, subject, body[:300])
+    log.info("EMAIL [%s → %s] %s | %s", FROM, _redact_email(to), subject, body[:300])
 
 
 # ── Evidence document family labels (display names) ─────────────────
@@ -405,9 +475,19 @@ class SafeAsset(BaseModel):
     net_owner_equity_cents: Optional[int] = None
     classification: Optional[str] = None
     # Domain model: enriched status fields
-    sale_status: Optional[str] = None      # PRE_SALE | POST_SALE_HOLDING | ACTIONABLE | ESCROW_ENDED | UNKNOWN
-    ready_to_file: Optional[bool] = None   # True only when all required fields present + ACTIONABLE
+    sale_status: Optional[str] = None      # PRE_SALE | POST_SALE | UNKNOWN (conservative — no timeline implied)
+    timeline_flags: Optional[list] = None  # Informational only — require attorney verification before filing
+    ready_to_file: Optional[bool] = None   # True only when all required fields present + restriction ended
     grade_reasons: Optional[list] = None   # Human-readable explanations of current grade
+    # Phase 4: verification pipeline state (6-stage)
+    verification_state: Optional[str] = None  # RAW|EXTRACTED|EVIDENCE_ATTACHED|MATH_VERIFIED|ATTORNEY_READY|PUBLISHED
+    pool_source: Optional[str] = None     # VOUCHER|LEDGER|HTML_MATH|UNVERIFIED
+    # Phase 5: two-tier net-to-owner display
+    display_tier: Optional[str] = None        # POTENTIAL | VERIFIED
+    net_to_owner_label: Optional[str] = None  # "VERIFIED NET TO OWNER" | "OVERBID POOL (Potential)"
+    # EPIC 3: explainable confidence
+    confidence_reasons: Optional[list] = None
+    missing_inputs: Optional[list] = None
 
 
 class FullAsset(SafeAsset):
@@ -480,50 +560,134 @@ def _compute_status(row: dict) -> str:
     return "UNKNOWN"
 
 
-def _compute_sale_status(row: dict) -> str:
-    """Extended status distinguishing pre-sale from post-sale phases."""
+def _compute_sale_status(row: dict) -> tuple:
+    """Conservative sale status + timeline_flags[].
+
+    Returns (status, flags[]) — 3 states only: PRE_SALE | POST_SALE | UNKNOWN.
+    Flags are informational — require attorney verification before any filing action.
+    Never implies legal deadlines are confirmed.
+    """
     today = datetime.now(timezone.utc).date()
     sale = row.get("sale_date")
     if not sale:
-        return "PRE_SALE"
+        return "UNKNOWN", ["sale_date_missing — verify with county public trustee"]
     try:
         sale_dt = date.fromisoformat(str(sale)[:10])
     except (ValueError, TypeError):
-        return "UNKNOWN"
+        return "UNKNOWN", ["sale_date_unparseable — verify with county public trustee"]
     if sale_dt > today:
-        return "PRE_SALE"
+        return "PRE_SALE", []
+
+    flags = []
     restriction_end = _compute_restriction_end(sale)
     deadline = row.get("claim_deadline")
+
+    if restriction_end:
+        if restriction_end > today:
+            flags.append(
+                f"restriction_period_active_until_{restriction_end.isoformat()} "
+                f"— verify C.R.S. § 38-38-302 before contacting owner"
+            )
+        else:
+            flags.append(
+                f"restriction_period_ended_{restriction_end.isoformat()} "
+                f"— verify redemption status with public trustee"
+            )
+
     if deadline:
         try:
-            if today > date.fromisoformat(str(deadline)[:10]):
-                return "ESCROW_ENDED"
+            dl = date.fromisoformat(str(deadline)[:10])
+            if dl < today:
+                flags.append(
+                    f"statutory_deadline_may_have_passed_{dl.isoformat()} "
+                    f"— requires legal review before filing"
+                )
+            else:
+                flags.append(
+                    f"statutory_deadline_estimated_{dl.isoformat()} "
+                    f"— verify with public trustee before relying on this date"
+                )
         except (ValueError, TypeError):
-            pass
-    if restriction_end and today < restriction_end:
-        return "POST_SALE_HOLDING"
-    return "ACTIONABLE"
+            flags.append("claim_deadline_unparseable — verify with county public trustee")
+    else:
+        flags.append("claim_deadline_unconfirmed — verify with county public trustee")
+
+    return "POST_SALE", flags
 
 
-def _compute_confidence(row: dict) -> float:
-    """Compute a 0.0–1.0 confidence score from available fields.
-    Score is capped at 0.50 when total_debt is absent (unverified math)."""
+def _compute_confidence(row: dict) -> tuple:
+    """Rule-based confidence scorer. Returns (score, reasons[], missing[]).
+
+    Points:
+      +35  pool_source == VOUCHER (authoritative overbid voucher)
+      +25  pool_source == LEDGER  (confirmed ledger document)
+      +10  pool_source == HTML_MATH (unverified, computed from HTML)
+      +20  total_debt confirmed and > 0
+      +20  sale_date present
+      +15  property_address present
+      +15  owner_name present
+
+    Caps:
+      ≤50%  if total_debt missing
+      ≤60%  if pool_source == UNVERIFIED
+    """
     pts = 0
-    if row.get("sale_date"):
-        pts += 20
-    surplus = _safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus"))
-    if surplus and surplus > 0:
-        pts += 20
+    reasons = []
+    missing = []
+
+    # Pool source
+    pool_source = row.get("pool_source", "UNVERIFIED")
+    if pool_source == "VOUCHER":
+        pts += 35
+        reasons.append("+35: pool sourced from overbid voucher (authoritative)")
+    elif pool_source == "LEDGER":
+        pts += 25
+        reasons.append("+25: pool sourced from confirmed ledger document")
+    elif pool_source == "HTML_MATH":
+        pts += 10
+        reasons.append("+10: pool computed from HTML math (unverified source)")
+    else:
+        missing.append("pool_source")
+        reasons.append("+0: pool_source unverified — no voucher or proven inputs")
+
+    # Total debt
     debt = _safe_float(row.get("total_debt"))
     if debt and debt > 0:
-        pts += 30
+        pts += 20
+        reasons.append("+20: total_indebtedness confirmed")
+    else:
+        missing.append("total_debt")
+
+    # Sale date
+    if row.get("sale_date"):
+        pts += 20
+        reasons.append("+20: sale_date present")
+    else:
+        missing.append("sale_date")
+
+    # Property address
     if row.get("property_address"):
         pts += 15
+        reasons.append("+15: property_address present")
+    else:
+        missing.append("property_address")
+
+    # Owner name
     if row.get("owner_name"):
         pts += 15
+        reasons.append("+15: owner_name present")
+    else:
+        missing.append("owner_name")
+
+    # Caps
     if not debt or debt <= 0:
-        return min(pts, 50) / 100.0
-    return min(pts, 100) / 100.0
+        pts = min(pts, 50)
+        reasons.append("cap@50%: total_debt missing — math unverified")
+    elif pool_source == "UNVERIFIED":
+        pts = min(pts, 60)
+        reasons.append("cap@60%: pool_source unverified")
+
+    return pts / 100.0, reasons, missing
 
 
 def _compute_ready_to_file(row: dict) -> bool:
@@ -592,6 +756,84 @@ def _safe_float(val) -> Optional[float]:
         return None
 
 
+def _ts_to_iso(ts) -> Optional[str]:
+    """Convert Unix integer timestamp to ISO 8601 string. DB stays Unix — API layer converts."""
+    if ts is None:
+        return None
+    try:
+        return datetime.utcfromtimestamp(float(ts)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OSError, TypeError, OverflowError):
+        return None
+
+
+def _compute_verification_state(row: dict) -> str:
+    """6-stage verification pipeline state. Supplements data_grade — does not replace it.
+
+    Stages: RAW → EXTRACTED → EVIDENCE_ATTACHED → MATH_VERIFIED → ATTORNEY_READY → PUBLISHED
+    """
+    grade = (row.get("data_grade") or "").upper()
+    if grade == "REJECT":
+        return "RAW"
+
+    # Must have at least overbid/surplus extracted to move past RAW
+    has_extraction = bool(
+        _safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount"))
+    )
+    if not has_extraction:
+        return "RAW"
+
+    # Evidence attached: voucher doc present (pool_source VOUCHER/LEDGER) or explicit voucher_doc_id
+    pool_source = row.get("pool_source", "UNVERIFIED")
+    has_evidence = pool_source in ("VOUCHER", "LEDGER")
+
+    # Math verified: audit_grade A or B
+    audit_grade = (row.get("audit_grade") or "").upper()
+    math_ok = audit_grade in ("A", "B")
+
+    # All required fields for attorney readiness
+    all_required = all([
+        row.get("sale_date"),
+        row.get("owner_name"),
+        row.get("property_address"),
+        _safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount")),
+    ])
+
+    if all_required and math_ok and has_evidence:
+        return "ATTORNEY_READY"
+    if math_ok:
+        return "MATH_VERIFIED"
+    if has_evidence:
+        return "EVIDENCE_ATTACHED"
+    return "EXTRACTED"
+
+
+def _admin_override_log(
+    conn,
+    admin_id: str,
+    action: str,
+    reason_code: str,
+    target_lead_id: Optional[str] = None,
+    target_user_id: Optional[str] = None,
+    old_value: Optional[str] = None,
+    new_value: Optional[str] = None,
+) -> None:
+    """Write to admin_override_log. Requires non-empty reason_code."""
+    if not reason_code or not reason_code.strip():
+        raise HTTPException(422, detail="reason_code is required for admin write operations")
+    try:
+        conn.execute(
+            """INSERT INTO admin_override_log
+               (admin_user_id, target_lead_id, target_user_id, action,
+                reason_code, old_value, new_value)
+               VALUES (?,?,?,?,?,?,?)""",
+            [admin_id, target_lead_id, target_user_id, action,
+             reason_code.strip()[:500], old_value, new_value],
+        )
+    except Exception:
+        # Table may not exist yet (pre-migration run) — fall through gracefully
+        pass
+
+
 def _extract_city(address: Optional[str], county: Optional[str]) -> str:
     if not address:
         return f"{county or 'CO'}, CO"
@@ -642,11 +884,10 @@ def _compute_preview_key(row: dict) -> str:
 def _row_to_safe(row: dict) -> dict:
     """Convert a leads row to SafeAsset dict. NULL-safe."""
     surplus = _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus")) or _safe_float(row.get("overbid_amount")) or 0.0
-    bid = _safe_float(row.get("winning_bid")) or 0.0
     debt = _safe_float(row.get("total_debt")) or 0.0
-    conf = _compute_confidence(row)
+    conf, conf_reasons, conf_missing = _compute_confidence(row)
     status = _compute_status(row)
-    sale_status = _compute_sale_status(row)
+    sale_status, timeline_flags = _compute_sale_status(row)
     today = datetime.now(timezone.utc).date()
 
     # Claim deadline tracking
@@ -696,6 +937,19 @@ def _row_to_safe(row: dict) -> dict:
     ready = _compute_ready_to_file(row)
     grade_reasons = _compute_grade_reasons(row)
 
+    # Phase 4: verification state
+    vstate = _compute_verification_state(row)
+
+    # Phase 5: two-tier net-to-owner display label
+    pool_source = row.get("pool_source", "UNVERIFIED")
+    _has_verified_net = (
+        data_grade == "GOLD"
+        and _safe_float(row.get("trustee_fees"))
+        and vstate in ("ATTORNEY_READY", "PUBLISHED")
+    )
+    display_tier = "VERIFIED" if _has_verified_net else "POTENTIAL"
+    net_to_owner_label = "VERIFIED NET TO OWNER" if _has_verified_net else "OVERBID POOL (Potential)"
+
     return SafeAsset(
         asset_id=row.get("id"),
         county=row.get("county"),
@@ -720,14 +974,20 @@ def _row_to_safe(row: dict) -> dict:
         confidence_score=round(conf, 2),
         data_age_days=data_age_days,
         preview_key=pk,
-        # registry_asset_id: derived from county + case_number if both present
         registry_asset_id=(
             f"FORECLOSURE:CO:{row['county'].upper()}:{row['case_number']}"
             if row.get("county") and row.get("case_number") else None
         ),
         sale_status=sale_status,
+        timeline_flags=timeline_flags,
         ready_to_file=ready,
         grade_reasons=grade_reasons,
+        verification_state=vstate,
+        pool_source=pool_source,
+        display_tier=display_tier,
+        net_to_owner_label=net_to_owner_label,
+        confidence_reasons=conf_reasons,
+        missing_inputs=conf_missing,
     ).model_dump()
 
 
@@ -1868,6 +2128,26 @@ async def api_me(request: Request):
 async def send_verification(request: Request):
     """Send a 6-digit verification code to the user's email."""
     user = _require_user(request)
+
+    # 60-second resend cooldown
+    _cconn = _get_conn()
+    try:
+        _cts = _cconn.execute(
+            "SELECT email_verify_sent_at FROM users WHERE user_id = ?",
+            [user["user_id"]],
+        ).fetchone()
+    finally:
+        _cconn.close()
+    if _cts and _cts["email_verify_sent_at"]:
+        try:
+            _sent = datetime.fromisoformat(_cts["email_verify_sent_at"].replace("Z", "+00:00"))
+            _elapsed = (datetime.now(timezone.utc) - _sent).total_seconds()
+            if _elapsed < 60:
+                raise HTTPException(429, detail=f"Please wait {int(60 - _elapsed)} seconds before resending.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
 
     code = "".join(random.choices(string.digits, k=6))
     now = datetime.now(timezone.utc).isoformat()
@@ -3337,26 +3617,28 @@ async def admin_attorney_approve(request: Request):
 
 @app.post("/api/admin/attorney/reject")
 async def admin_attorney_reject(request: Request):
-    """Admin: reject attorney verification. Sets status to 'REJECTED'."""
+    """Admin: reject attorney verification. reason_code required."""
     admin = _require_user(request)
     if not _is_admin(admin):
         raise HTTPException(status_code=403, detail="Admin only.")
     body = await request.json()
     user_id = body.get("user_id", "")
-    reason = body.get("reason", "")
+    reason_code = str(body.get("reason_code", body.get("reason", ""))).strip()
 
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id required.")
 
     conn = _get_conn()
     try:
+        _admin_override_log(conn, admin["user_id"], "attorney_reject", reason_code,
+                            target_user_id=user_id, old_value="PENDING", new_value="REJECTED")
         conn.execute(
             "UPDATE users SET attorney_status = 'REJECTED', verified_attorney = 0 WHERE user_id = ?",
             [user_id],
         )
         _audit_log(conn, user_id, "attorney_rejected", {
             "rejected_by": admin["user_id"],
-            "reason": reason,
+            "reason": reason_code,
         })
         conn.commit()
     finally:
@@ -3372,6 +3654,8 @@ async def admin_deactivate_user(user_id: str, request: Request):
     admin = _require_user(request)
     if not _is_admin(admin):
         raise HTTPException(status_code=403, detail="Admin only.")
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    reason_code = str(body.get("reason_code", body.get("reason", ""))).strip() if body else ""
     conn = _get_conn()
     try:
         row = conn.execute("SELECT email, is_admin FROM users WHERE user_id = ?", [user_id]).fetchone()
@@ -3379,6 +3663,8 @@ async def admin_deactivate_user(user_id: str, request: Request):
             raise HTTPException(status_code=404, detail="User not found.")
         if row["is_admin"]:
             raise HTTPException(status_code=400, detail="Cannot deactivate admin accounts.")
+        _admin_override_log(conn, admin["user_id"], "deactivate_user", reason_code or "admin_action",
+                            target_user_id=user_id, old_value="active", new_value="inactive")
         conn.execute("UPDATE users SET is_active = 0 WHERE user_id = ?", [user_id])
         _audit_log(conn, user_id, "user_deactivated", {"by": admin["user_id"], "email": row["email"]})
         conn.commit()
@@ -3415,6 +3701,7 @@ async def admin_adjust_credits(user_id: str, request: Request):
     body = await request.json()
     delta = int(body.get("delta", 0))
     note = str(body.get("note", "Admin adjustment"))[:200]
+    reason_code = str(body.get("reason_code", note)).strip()
     if delta == 0:
         raise HTTPException(status_code=400, detail="delta must be non-zero.")
 
@@ -3450,6 +3737,9 @@ async def admin_adjust_credits(user_id: str, request: Request):
                     [take, e["id"]],
                 )
                 remove -= take
+        _admin_override_log(conn, admin["user_id"], "adjust_credits", reason_code or "admin_action",
+                            target_user_id=user_id,
+                            old_value=None, new_value=str(delta))
         _audit_log(conn, user_id, "credits_adjusted", {
             "by": admin["user_id"], "delta": delta, "note": note, "email": row["email"],
         })
@@ -3468,14 +3758,17 @@ async def admin_set_role(user_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Admin only.")
     body = await request.json()
     new_role = str(body.get("role", "")).strip()
+    reason_code = str(body.get("reason_code", body.get("reason", ""))).strip()
     allowed = ("public", "approved_attorney", "admin")
     if new_role not in allowed:
         raise HTTPException(status_code=400, detail=f"role must be one of: {', '.join(allowed)}")
     conn = _get_conn()
     try:
-        row = conn.execute("SELECT email FROM users WHERE user_id = ?", [user_id]).fetchone()
+        row = conn.execute("SELECT email, role FROM users WHERE user_id = ?", [user_id]).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="User not found.")
+        _admin_override_log(conn, admin["user_id"], "set_role", reason_code or "admin_action",
+                            target_user_id=user_id, old_value=row["role"], new_value=new_role)
         conn.execute("UPDATE users SET role = ? WHERE user_id = ?", [new_role, user_id])
         _audit_log(conn, user_id, "role_changed", {
             "by": admin["user_id"], "new_role": new_role, "email": row["email"],
@@ -3488,7 +3781,7 @@ async def admin_set_role(user_id: str, request: Request):
 
 @app.post("/api/admin/leads/{lead_id}/set-grade")
 async def admin_set_lead_grade(lead_id: str, request: Request):
-    """Admin: manually override a lead's data_grade."""
+    """Admin: manually override a lead's data_grade. reason_code required."""
     admin = _require_user(request)
     if not _is_admin(admin):
         raise HTTPException(status_code=403, detail="Admin only.")
@@ -3497,16 +3790,18 @@ async def admin_set_lead_grade(lead_id: str, request: Request):
     allowed_grades = ("GOLD", "SILVER", "BRONZE", "REJECT")
     if new_grade not in allowed_grades:
         raise HTTPException(status_code=400, detail=f"grade must be one of: {', '.join(allowed_grades)}")
-    reason = str(body.get("reason", "Admin override"))[:500]
+    reason_code = str(body.get("reason_code", body.get("reason", ""))).strip()
     conn = _get_conn()
     try:
         row = conn.execute("SELECT county, case_number, data_grade FROM leads WHERE id = ?", [lead_id]).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Lead not found.")
+        _admin_override_log(conn, admin["user_id"], "grade_override", reason_code,
+                            target_lead_id=lead_id, old_value=row["data_grade"], new_value=new_grade)
         conn.execute("UPDATE leads SET data_grade = ?, updated_at = datetime('now') WHERE id = ?", [new_grade, lead_id])
         _audit_log(conn, admin["user_id"], "grade_override", {
             "lead_id": lead_id, "old_grade": row["data_grade"], "new_grade": new_grade,
-            "reason": reason, "county": row["county"], "case_number": row["case_number"],
+            "reason": reason_code, "county": row["county"], "case_number": row["case_number"],
         })
         conn.commit()
     finally:

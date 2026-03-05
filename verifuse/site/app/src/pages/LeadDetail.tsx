@@ -186,6 +186,9 @@ export default function LeadDetail() {
               ) : null}
             </div>
 
+            <div style={{ fontSize: "0.68em", letterSpacing: "0.1em", color: lead.display_tier === "VERIFIED" ? "#10b981" : "#f59e0b", marginBottom: 2 }}>
+              {lead.net_to_owner_label || (lead.display_tier === "VERIFIED" ? "VERIFIED NET TO OWNER" : "OVERBID POOL (Potential)")}
+            </div>
             <h2 className="detail-value">{fmt(lead.estimated_surplus)}</h2>
             <p className="detail-case">Case: {lead.case_number || lead.registry_asset_id?.split(":")[3] || lead.asset_id?.substring(0, 12)}</p>
 
@@ -586,7 +589,7 @@ export default function LeadDetail() {
                       title={
                         lead!.ready_to_file === false
                           ? (lead!.grade_reasons?.join("; ") || "Complete all required fields first")
-                          : "Generate Rule 7.3 attorney solicitation letter"
+                          : `Generate Rule 7.3 attorney solicitation letter${lead!.verification_state ? ` (state: ${lead!.verification_state})` : ""}`
                       }
                       onClick={async () => {
                         if (lead!.ready_to_file === false) return;

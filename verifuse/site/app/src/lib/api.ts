@@ -197,9 +197,21 @@ export interface Lead {
   surplus_stream?: string | null;
   has_deceased_indicator?: number | null;
   // Domain model: enriched status fields
-  sale_status?: "PRE_SALE" | "POST_SALE_HOLDING" | "ACTIONABLE" | "ESCROW_ENDED" | "UNKNOWN";
+  sale_status?: "PRE_SALE" | "POST_SALE" | "UNKNOWN";
+  timeline_flags?: string[];
   ready_to_file?: boolean;
   grade_reasons?: string[];
+  // Verification state machine (Phase 4)
+  verification_state?: "RAW" | "EXTRACTED" | "EVIDENCE_ATTACHED" | "MATH_VERIFIED" | "ATTORNEY_READY" | "PUBLISHED";
+  pool_source?: "VOUCHER" | "LEDGER" | "HTML_MATH" | "UNVERIFIED";
+  calc_hash?: string | null;
+  current_calc_id?: string | null;
+  last_verified_ts?: string | null;       // ISO 8601 (Phase 17)
+  // Two-tier display (Phase 5)
+  display_tier?: "POTENTIAL" | "VERIFIED";
+  net_to_owner_label?: string;            // "VERIFIED NET TO OWNER" | "OVERBID POOL (Potential)"
+  confidence_reasons?: string[];
+  missing_inputs?: string[];
   // Junior liens and encumbrances (always included when data available)
   junior_liens?: LienRecord[];
 }

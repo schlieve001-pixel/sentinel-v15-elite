@@ -462,11 +462,120 @@ def apply_phase11(conn: sqlite3.Connection) -> None:
             log.info("  %s.source_url already present — skipping", table)
 
 
+def _apply_013_column_additions(conn: sqlite3.Connection) -> None:
+    """Phase 013 — idempotent column additions via PRAGMA table_info guards.
+
+    1. leads: 6 new columns for verification state machine + calc link
+    2. evidence_documents: 5 new provenance columns
+    3. lien_records: table swap to expand lien_type CHECK constraint
+    """
+    # 1 — leads table
+    if _table_exists(conn, "leads"):
+        leads_cols = _get_columns(conn, "leads")
+        for col_name, col_typedef in [
+            ("verification_state", "TEXT DEFAULT 'RAW'"),
+            ("calc_hash",          "TEXT"),
+            ("current_calc_id",    "TEXT"),   # FK to calculations.id — app-enforced
+            ("last_verified_ts",   "INTEGER"),
+            ("verified_by",        "TEXT"),
+            ("pool_source",        "TEXT DEFAULT 'UNVERIFIED'"),
+        ]:
+            if col_name not in leads_cols:
+                log.info("  ADD COLUMN leads.%s", col_name)
+                conn.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_typedef}")
+            else:
+                log.info("  leads.%s already present — skipping", col_name)
+
+    # 2 — evidence_documents table
+    if _table_exists(conn, "evidence_documents"):
+        ed_cols = _get_columns(conn, "evidence_documents")
+        for col_name, col_typedef in [
+            ("recording_number",      "TEXT"),
+            ("recording_date",        "TEXT"),
+            ("verification_status",   "TEXT DEFAULT 'UNVERIFIED'"),
+            ("verified_by",           "TEXT"),
+            ("verified_ts",           "INTEGER"),
+        ]:
+            if col_name not in ed_cols:
+                log.info("  ADD COLUMN evidence_documents.%s", col_name)
+                conn.execute(f"ALTER TABLE evidence_documents ADD COLUMN {col_name} {col_typedef}")
+            else:
+                log.info("  evidence_documents.%s already present — skipping", col_name)
+
+    # 3 — lien_records table swap (expand CHECK constraint + add 3 new cols)
+    if _table_exists(conn, "lien_records"):
+        lr_cols = _get_columns(conn, "lien_records")
+        needs_swap = not all(c in lr_cols for c in ("recording_number", "recording_date", "document_id"))
+        if needs_swap:
+            pre_count = conn.execute("SELECT COUNT(*) FROM lien_records").fetchone()[0]
+            log.info("  lien_records swap: %d rows pre-drop", pre_count)
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("DROP TABLE IF EXISTS lien_records_new")
+            conn.execute("""
+                CREATE TABLE lien_records_new (
+                    id               TEXT    PRIMARY KEY,
+                    asset_id         TEXT    NOT NULL,
+                    lien_type        TEXT    NOT NULL
+                                             CHECK(lien_type IN (
+                                                 'MORTGAGE','HOA','IRS','STATE_TAX',
+                                                 'HELOC','MECHANIC','TAX','OTHER')),
+                    lienholder_name  TEXT,
+                    priority         INTEGER NOT NULL DEFAULT 0,
+                    amount_cents     INTEGER NOT NULL DEFAULT 0,
+                    is_open          INTEGER NOT NULL DEFAULT 1,
+                    source           TEXT,
+                    recording_number TEXT,
+                    recording_date   TEXT,
+                    document_id      TEXT,
+                    retrieved_ts     INTEGER NOT NULL DEFAULT (unixepoch())
+                )
+            """)
+            # Copy existing rows — map any unknown lien_type to 'OTHER'
+            conn.execute("""
+                INSERT INTO lien_records_new
+                    (id, asset_id, lien_type, lienholder_name, priority,
+                     amount_cents, is_open, source, retrieved_ts)
+                SELECT id, asset_id,
+                       CASE WHEN lien_type IN (
+                           'MORTGAGE','HOA','IRS','STATE_TAX',
+                           'HELOC','MECHANIC','TAX','OTHER')
+                            THEN lien_type ELSE 'OTHER' END,
+                       lienholder_name, COALESCE(priority, 0),
+                       COALESCE(amount_cents, 0), COALESCE(is_open, 1),
+                       source,
+                       COALESCE(retrieved_ts, unixepoch())
+                FROM lien_records
+            """)
+            post_count = conn.execute("SELECT COUNT(*) FROM lien_records_new").fetchone()[0]
+            if post_count != pre_count:
+                conn.execute("DROP TABLE lien_records_new")
+                conn.execute("PRAGMA foreign_keys = ON")
+                log.error(
+                    "  lien_records swap ABORTED: row count mismatch pre=%d post=%d",
+                    pre_count, post_count,
+                )
+            else:
+                conn.execute("DROP TABLE lien_records")
+                conn.execute("ALTER TABLE lien_records_new RENAME TO lien_records")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_lien_records_asset "
+                    "ON lien_records(asset_id)"
+                )
+                conn.execute("PRAGMA foreign_keys = ON")
+                log.info("  lien_records swap OK: %d rows preserved", post_count)
+        else:
+            log.info("  lien_records already has new columns — skipping swap")
+    conn.commit()
+
+
 def _pre_migration_hooks(filename: str, conn: sqlite3.Connection) -> None:
     """
     Run pre-flight repairs before a migration SQL file is applied.
     Add new cases here as migrations grow — never in the SQL files themselves.
     """
+    if filename == "013_enterprise_architecture.sql":
+        _apply_013_column_additions(conn)
+
     if filename == "006_sota_indexes.sql":
         # Dedupe probe: remove duplicate user_daily_lead_views rows
         # before creating uniq_user_day_lead UNIQUE index

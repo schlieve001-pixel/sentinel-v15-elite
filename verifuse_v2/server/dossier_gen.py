@@ -90,6 +90,12 @@ class DossierPDF(FPDF):
                   f'Generated {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}',
                   0, 0, 'R')
 
+        # DRAFT stripe — red text centered above page number line
+        self.set_y(-26)
+        self.set_font('Arial', 'B', 8)
+        self.set_text_color(239, 68, 68)   # Red
+        self.cell(0, 6, 'DRAFT — NOT FOR FILING — VERIFY ALL FIGURES WITH PUBLIC TRUSTEE', 0, 1, 'C')
+
     def section_header(self, number: int, title: str):
         """Draw a section header with number badge."""
         self.ln(6)
@@ -198,6 +204,7 @@ def generate_dossier(
     sale_date = signal.event_date or "Unknown"
     verified = _is_verified(outcome, signal)
     verification_label = _verification_status(outcome, signal)
+    case_ref = signal.signal_id[:12].upper().replace(" ", "_")
 
     pdf = DossierPDF(verified=verified)
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -425,8 +432,46 @@ def generate_dossier(
                  0, 1, 'C', fill=True)
         pdf.page = pdf.pages_nb
 
+    # ── Provenance Page ──
+    pdf.add_page()
+    pdf.section_header(5, "DATA PROVENANCE")
+
+    pdf.set_font('Arial', 'B', 8)
+    pdf.set_text_color(148, 163, 184)
+    pdf.cell(0, 6, "DOCUMENT GENERATION", 0, 1, 'L')
+    pdf.set_font('Arial', '', 8)
+    pdf.set_text_color(224, 224, 224)
+    pdf.field_row("Generated UTC:", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+    pdf.field_row("Case Reference:", case_ref)
+    pdf.field_row("Verification Status:", verification_label)
+    pdf.field_row("Signal ID:", signal.signal_id or "UNKNOWN")
+
+    pdf.ln(4)
+    pdf.set_font('Arial', 'B', 8)
+    pdf.set_text_color(148, 163, 184)
+    pdf.cell(0, 6, "DATA SOURCES", 0, 1, 'L')
+    pdf.set_font('Arial', '', 8)
+    pdf.set_text_color(224, 224, 224)
+    pdf.field_row("Primary Source:", signal.source_url or "County Public Trustee Records")
+    pdf.field_row("Platform:", "VeriFuse Automated Intelligence Platform")
+    pdf.field_row("County:", signal.county or "CO")
+
+    pdf.ln(4)
+    pdf.set_font('Arial', 'B', 8)
+    pdf.set_text_color(148, 163, 184)
+    pdf.cell(0, 6, "ACCURACY DISCLAIMER", 0, 1, 'L')
+    pdf.set_font('Arial', 'I', 7)
+    pdf.set_text_color(100, 116, 139)
+    pdf.multi_cell(0, 4,
+        "All figures extracted from public county records via automated scraping. "
+        "Accuracy is not guaranteed. Surplus amounts labeled DRAFT have not been "
+        "independently confirmed against county indebtedness records. "
+        "Attorneys must independently verify all financial figures with the County "
+        "Public Trustee before filing any claims. This document does not constitute "
+        "legal advice. VeriFuse is a data aggregator only."
+    )
+
     # Save
-    case_ref = signal.signal_id[:12].upper().replace(" ", "_")
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     filename = f"dossier_{case_ref}_{today}.pdf"
     filepath = out / filename

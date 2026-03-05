@@ -189,8 +189,9 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
       )}
 
       {lead.data_age_days != null && lead.data_age_days > 30 && (
-        <div style={{ fontSize: "0.7em", color: "#f59e0b", opacity: 0.7, marginBottom: 2 }}>
-          Data {lead.data_age_days}d old
+        <div style={{ fontSize: "0.68em", color: lead.data_age_days > 90 ? "#ef4444" : "#f59e0b", letterSpacing: "0.05em", marginBottom: 2 }}
+             title={`Last updated ${lead.data_age_days} days ago — figures may be stale`}>
+          {lead.data_age_days > 90 ? "⚠ " : ""}STALE DATA — {lead.data_age_days}d
         </div>
       )}
 
