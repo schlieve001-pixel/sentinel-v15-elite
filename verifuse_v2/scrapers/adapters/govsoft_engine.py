@@ -560,6 +560,13 @@ class GovSoftEngine:
                 "Deeded" for mature cases where the deed has already been issued.
         Raises on fatal navigation failure.
         """
+        # Always re-navigate to the search page before interacting with the form.
+        # This ensures we're on the correct page for counties where results appear
+        # at a separate URL (Fremont, Routt, La Plata, etc.) rather than inline.
+        search_url = f"{self.base_url.rstrip('/')}{self.search_path}"
+        await page.goto(search_url, wait_until="networkidle", timeout=30000)
+        await asyncio.sleep(1)
+
         # Step 1: Select ddStatus to target cases in the given status.
         dd_status_loc = page.locator(
             self._sel("dd_status", "[id$='ddStatus']")

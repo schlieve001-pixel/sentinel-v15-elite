@@ -485,6 +485,20 @@ def run_extraction(asset_id: str, conn=None) -> dict:
             sale_date=extracted_sale_date,
         )
 
+        # Re-read the actual grade written to DB (GOLD gate inside _write_results may
+        # have downgraded to BRONZE — result dict must reflect what was actually persisted).
+        lead_meta = conn.execute(
+            "SELECT county, case_number FROM leads WHERE id = ?", [asset_id]
+        ).fetchone()
+        if lead_meta:
+            written = conn.execute(
+                "SELECT data_grade, processing_status FROM leads WHERE county=? AND case_number=?",
+                [lead_meta["county"], lead_meta["case_number"]],
+            ).fetchone()
+            if written:
+                result["data_grade"] = written["data_grade"]
+                result["processing_status"] = written["processing_status"]
+
     except Exception as exc:
         log.exception("[extract] Extraction failed for %s: %s", asset_id, exc)
         result["error"] = str(exc)

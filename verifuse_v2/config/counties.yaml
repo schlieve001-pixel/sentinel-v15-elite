@@ -190,7 +190,7 @@ counties:
     public_trustee_url: https://www.co.routt.co.us/414/Public-Trustee
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
-    enabled: true
+    enabled: false  # URL returns 404 — needs correct GovSoft path
     population_tier: small
 
   - name: Grand
@@ -217,11 +217,11 @@ counties:
     code: clear_creek
     platform: gts
     parser: GTSPreSaleParser
-    base_url: https://foreclosure.co.clear-creek.co.us
+    base_url: https://foreclosure.clearcreekcounty.us
     public_trustee_url: https://www.clearcreekcounty.us/149/Public-Trustee
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
-    enabled: true
+    enabled: false  # SSL cert expired on primary URL — needs alternate
     population_tier: rural
 
   - name: Gilpin
@@ -254,7 +254,7 @@ counties:
     public_trustee_url: https://fremontcountyco.gov/web/treasurer/
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
-    enabled: true
+    enabled: false  # Returns 403 Forbidden to headless browsers
     population_tier: medium
 
   - name: Park
@@ -281,7 +281,7 @@ counties:
     code: la_plata
     platform: gts
     parser: GTSPreSaleParser
-    base_url: https://foreclosures.laplata.co.us
+    base_url: https://foreclosures.lpcgov.org
     public_trustee_url: https://co.laplata.co.us/departments/public_trustee/
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
@@ -302,11 +302,11 @@ counties:
     code: delta
     platform: gts
     parser: GTSPreSaleParser
-    base_url: http://ptrustee.deltacounty.com
+    base_url: https://foreclosures.deltacountyco.gov
     public_trustee_url: https://www.deltacounty.com/363/Public-Trustee
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
-    enabled: true
+    enabled: false  # URL unreachable — needs correct GovSoft URL
     population_tier: small
 
   - name: Elbert
@@ -438,7 +438,7 @@ counties:
     public_trustee_url: https://www.gunnisoncounty.org/241/Public-Trustee
     pdf_patterns: ["*excess*", "*surplus*"]
     scrape_interval_hours: 168
-    enabled: true
+    enabled: false  # DNS does not resolve — needs correct GovSoft URL
     population_tier: small
 
   - name: Hinsdale
