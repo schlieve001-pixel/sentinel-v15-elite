@@ -8,8 +8,12 @@ import {
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { toast } from "../components/Toast";
+import { Tooltip } from "../components/Tooltip";
 
 const POLL_INTERVAL_MS = 30_000;
+
+// HB25-1224: 10% statutory fee cap (C.R.S. § 38-13-1304, eff. June 4 2025)
+const ATTORNEY_FEE_CAP = 0.10;
 
 function formatCurrency(n: number): string {
   return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -19,6 +23,10 @@ function formatCurrencyShort(n: number): string {
   if (n >= 1_000_000) return "$" + (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000) return "$" + (n / 1_000).toFixed(0) + "K";
   return "$" + n.toFixed(0);
+}
+
+function maxAttorneyFee(surplus: number): string {
+  return formatCurrencyShort(surplus * ATTORNEY_FEE_CAP);
 }
 
 function useHealth() {
@@ -45,9 +53,10 @@ interface KpiProps {
   grade?: "gold" | "silver" | "bronze";
   href?: string;
   icon?: React.ElementType;
+  tooltip?: string;
 }
 
-function KpiCard({ label, value, sub, accent, grade, href, icon: Icon }: KpiProps) {
+function KpiCard({ label, value, sub, accent, grade, href, icon: Icon, tooltip }: KpiProps) {
   const borderColor = grade === "gold" ? "#f59e0b"
     : grade === "silver" ? "#94a3b8"
     : grade === "bronze" ? "#b45309"
@@ -62,15 +71,30 @@ function KpiCard({ label, value, sub, accent, grade, href, icon: Icon }: KpiProp
 
   const inner = (
     <>
-      {Icon && <Icon size={16} style={{ color: valueColor, opacity: 0.8, marginBottom: 4 }} />}
-      <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.55, textTransform: "uppercase" }}>
-        {label}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {Icon && <Icon size={16} style={{ color: valueColor, opacity: 0.8 }} />}
+          <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.55, textTransform: "uppercase" }}>
+            {label}
+          </div>
+        </div>
+        {tooltip && (
+          <Tooltip content={tooltip} position="top">
+            <span style={{
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              width: 14, height: 14, borderRadius: "50%", background: "#1e293b",
+              color: "#64748b", fontSize: "0.65em", fontWeight: 700, cursor: "default",
+              flexShrink: 0, marginTop: 1,
+            }}>?</span>
+          </Tooltip>
+        )}
       </div>
       <div style={{
         fontSize: "1.6em",
         fontWeight: 700,
         color: valueColor,
         lineHeight: 1.2,
+        marginTop: 4,
       }}>
         {value}
       </div>
@@ -129,52 +153,118 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
   return (
     <div className={`lead-card ${isRestricted ? "restricted" : ""} ${isOwned ? "owned" : ""}`}>
       <div className="card-header">
-        <span className="county-badge">{lead.county}</span>
+        <span className="county-badge">{lead.county?.replace(/_/g, " ").toUpperCase()}</span>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          {isOwned && <span className="owned-badge">● OWNED</span>}
+          {isOwned && (
+            <Tooltip content="You have unlocked this lead. Full PII and documents are available." position="top">
+              <span className="owned-badge" style={{ cursor: "default" }}>● OWNED</span>
+            </Tooltip>
+          )}
           {isRestricted ? (
-            <span className="restriction-badge">
-              RESTRICTED — {lead.days_until_actionable} DAYS
-            </span>
+            <Tooltip content={`C.R.S. § 38-38-111 restriction period active. ${lead.days_until_actionable} days until fee agreements are permitted. You may view — but not solicit — the owner during this window.`} position="top">
+              <span className="restriction-badge" style={{ cursor: "default" }}>
+                RESTRICTED — {lead.days_until_actionable} DAYS
+              </span>
+            </Tooltip>
           ) : lead.days_to_claim != null ? (
-            <span className={`timer-badge ${lead.days_to_claim < 60 ? "urgent" : ""} ${lead.deadline_passed ? "expired" : ""}`}>
-              {lead.deadline_passed ? "DEADLINE PASSED" : `${lead.days_to_claim} DAYS TO CLAIM`}
-            </span>
+            <Tooltip
+              content={
+                lead.deadline_passed
+                  ? "Claim window closed. Surplus may have escheated to county treasurer. Verify current status before proceeding."
+                  : lead.days_to_claim < 30
+                  ? `CRITICAL: Only ${lead.days_to_claim} days left. File immediately.`
+                  : lead.days_to_claim < 60
+                  ? `URGENT: ${lead.days_to_claim} days until claim deadline. Expedite client outreach.`
+                  : `${lead.days_to_claim} days until claim deadline under C.R.S. § 38-38-111.`
+              }
+              position="top"
+            >
+              <span className={`timer-badge ${lead.days_to_claim < 60 ? "urgent" : ""} ${lead.deadline_passed ? "expired" : ""}`} style={{ cursor: "default" }}>
+                {lead.deadline_passed ? "DEADLINE PASSED" : `${lead.days_to_claim} DAYS TO CLAIM`}
+              </span>
+            </Tooltip>
           ) : null}
         </div>
       </div>
 
-      <div className="card-value">
-        {formatCurrency(lead.estimated_surplus)}
-        {!lead.surplus_verified && (
-          <span className="unverified-badge">PRELIMINARY</span>
-        )}
-      </div>
+      <Tooltip
+        content={
+          lead.surplus_verified
+            ? "Overbid amount math-confirmed from official county records"
+            : "Preliminary estimate — pending Gate 4 validation from sale documents"
+        }
+        position="top"
+      >
+        <div className="card-value" style={{ cursor: "default" }}>
+          {formatCurrency(lead.estimated_surplus)}
+          {!lead.surplus_verified && (
+            <span className="unverified-badge">PRELIMINARY</span>
+          )}
+        </div>
+      </Tooltip>
+
+      {/* Attorney fee estimate (HB25-1224: 10% statutory cap) */}
+      {lead.estimated_surplus > 0 && (
+        <Tooltip content="Max attorney fee under HB25-1224 (C.R.S. § 38-13-1304) — 10% statutory cap, effective June 4, 2025" position="top">
+          <div style={{ fontSize: "0.72em", color: "#22c55e", opacity: 0.75, marginBottom: 2, cursor: "default", letterSpacing: "0.04em" }}>
+            MAX FEE: {maxAttorneyFee(lead.estimated_surplus)}
+          </div>
+        </Tooltip>
+      )}
+
       <div className="card-id">CASE: {lead.case_number || lead.registry_asset_id?.split(":")[3] || lead.asset_id?.substring(0, 12)}</div>
 
       {isRestricted && (
-        <div className="restriction-row">
-          C.R.S. § 38-38-111: Compensation agreements prohibited until {lead.restriction_end_date}
-        </div>
+        <Tooltip content="C.R.S. § 38-38-111 prohibits fee agreements with property owners during the 6-month post-sale redemption period. WATCH-ONLY until this date." position="bottom">
+          <div className="restriction-row" style={{ cursor: "default" }}>
+            C.R.S. § 38-38-111: Compensation agreements prohibited until {lead.restriction_end_date}
+          </div>
+        </Tooltip>
       )}
 
       {!isRestricted && lead.claim_deadline && (
-        <div className={`deadline-row ${lead.deadline_passed ? "passed" : lead.days_to_claim != null && lead.days_to_claim < 60 ? "urgent" : ""}`}>
-          CLAIM DEADLINE: {lead.claim_deadline}
-          {lead.days_to_claim != null && !lead.deadline_passed && (
-            <span> ({lead.days_to_claim} days)</span>
-          )}
-        </div>
+        <Tooltip
+          content={
+            lead.deadline_passed
+              ? "Statutory claim window has closed. Surplus may have escheated to the county treasurer. Verify current status."
+              : lead.days_to_claim != null && lead.days_to_claim < 60
+              ? "URGENT: Fewer than 60 days remain. File claim immediately to preserve claimant rights under C.R.S. § 38-38-111."
+              : "Claim deadline under C.R.S. § 38-38-111. File before this date to recover overbid funds."
+          }
+          position="bottom"
+        >
+          <div className={`deadline-row ${lead.deadline_passed ? "passed" : lead.days_to_claim != null && lead.days_to_claim < 60 ? "urgent" : ""}`} style={{ cursor: "default" }}>
+            CLAIM DEADLINE: {lead.claim_deadline}
+            {lead.days_to_claim != null && !lead.deadline_passed && (
+              <span> ({lead.days_to_claim} days)</span>
+            )}
+          </div>
+        </Tooltip>
       )}
 
       <div className="card-meta">
-        <span className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`}>
-          {lead.data_grade}
-        </span>
-        {lead.days_to_claim != null && !lead.deadline_passed && (
-          <span className={`days-pill ${lead.days_to_claim < 60 ? "urgent" : ""}`}>
-            {lead.days_to_claim}d
+        <Tooltip
+          content={
+            lead.data_grade === "GOLD"
+              ? "GOLD: Sale amount math confirmed + official provenance document on file. Highest confidence."
+              : lead.data_grade === "SILVER"
+              ? "SILVER: Probable overbid detected, pending 6-month restriction window or secondary validation."
+              : lead.data_grade === "BRONZE"
+              ? "BRONZE: Pre-validation. Overbid likely but sale documents or math not yet confirmed by Gate 4."
+              : "Grade pending validation."
+          }
+          position="top"
+        >
+          <span className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`} style={{ cursor: "default" }}>
+            {lead.data_grade}
           </span>
+        </Tooltip>
+        {lead.days_to_claim != null && !lead.deadline_passed && (
+          <Tooltip content={`${lead.days_to_claim} days until claim deadline. ${lead.days_to_claim < 30 ? "FILE IMMEDIATELY." : lead.days_to_claim < 60 ? "Expedite filing." : "Monitor timeline."}`} position="top">
+            <span className={`days-pill ${lead.days_to_claim < 60 ? "urgent" : ""}`} style={{ cursor: "default" }}>
+              {lead.days_to_claim}d
+            </span>
+          </Tooltip>
         )}
         {streamLabel && (
           <span style={{
@@ -573,16 +663,19 @@ export default function Dashboard() {
                 sub={stats.total_claimable_surplus > 0 ? formatCurrencyShort(stats.total_claimable_surplus) + " total" : undefined}
                 grade="gold"
                 icon={Star}
+                tooltip="GOLD: Math-confirmed overbid with official provenance document on file. Highest confidence — ready for immediate attorney outreach."
               />
               <KpiCard
                 label="SILVER Leads"
                 value={silverCount}
                 grade="silver"
+                tooltip="SILVER: Probable overbid detected. Restriction window active (C.R.S. § 38-38-111) or secondary doc validation pending. Monitor for GOLD promotion."
               />
               <KpiCard
                 label="BRONZE Leads"
                 value={bronzeCount}
                 grade="bronze"
+                tooltip="BRONZE: Pre-validation stage. Overbid likely but sale documents or math not yet confirmed. Gate 4 extraction running."
               />
               <KpiCard
                 label="Total Pipeline Value"
@@ -590,12 +683,14 @@ export default function Dashboard() {
                 sub={`${stats.verified_pipeline ?? stats.total_assets} verified leads`}
                 accent={true}
                 icon={DollarSign}
+                tooltip="Combined overbid surplus across all GOLD + SILVER + BRONZE leads with confirmed values > $100. Represents the total claimable estate across your pipeline."
               />
               <KpiCard
                 label="Attorney-Ready"
                 value={stats.attorney_ready}
-                sub="GOLD+SILVER+BRONZE, surplus > $1K"
+                sub="surplus > $1K, all verified grades"
                 icon={TrendingUp}
+                tooltip="Leads with confirmed surplus over $1,000 across GOLD, SILVER, and BRONZE grades. These have cleared basic validation and represent actionable opportunities under C.R.S. § 38-38-111."
               />
               <KpiCard
                 label="Pre-Sale Pipeline"
@@ -604,22 +699,26 @@ export default function Dashboard() {
                 grade="bronze"
                 href="/pre-sale"
                 icon={Clock}
+                tooltip="Upcoming foreclosure auctions with opening bids filed. Track these before sale date to identify overbid opportunities the moment the gavel falls."
               />
               <KpiCard
                 label="Total Leads in DB"
                 value={stats.total_leads ?? stats.total_raw_volume ?? 0}
                 icon={TrendingUp}
+                tooltip="All leads ingested across all counties and surplus streams, including pre-validation BRONZE and REJECT grades. Reflects raw pipeline volume."
               />
               <KpiCard
                 label="Counties Covered"
                 value={countyOptions.length || stats.counties.length}
                 sub="Colorado"
                 icon={MapPin}
+                tooltip="Active Colorado counties with live GovSoft scraper coverage. New counties are added quarterly. Mesa and Eagle are CAPTCHA-blocked (manual review only)."
               />
               <KpiCard
                 label="Last Refreshed"
                 value={lastUpdated ? lastUpdated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
                 sub={secondsAgo > 0 ? `${secondsAgo}s ago` : "just now"}
+                tooltip="Dashboard stats refresh every 30 seconds automatically. Click any filter to force an immediate refresh."
               />
             </>
           ) : null}
@@ -656,11 +755,11 @@ export default function Dashboard() {
       {/* Admin-only county coverage table + revenue streams */}
       {user?.is_admin && simMode !== "user" && stats && (
         <div style={{ padding: "0 20px" }}>
-          {/* Revenue Streams */}
+          {/* Revenue Streams — Live */}
           {stats.stream_breakdown && stats.stream_breakdown.length > 0 && (
             <div style={{ marginTop: 20 }}>
               <h4 style={{ fontSize: "0.75em", letterSpacing: "0.1em", opacity: 0.5, marginBottom: 8 }}>
-                REVENUE STREAMS
+                REVENUE STREAMS — LIVE
               </h4>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {stats.stream_breakdown.map((s) => {
@@ -670,17 +769,67 @@ export default function Dashboard() {
                     : s.stream === "HOA" ? "HOA (§ 38-33.3-316)"
                     : s.stream === "UNCLAIMED_PROPERTY" ? "Unclaimed Property (§ 38-13-1304)"
                     : s.stream;
+                  const tooltipText = s.stream === "FORECLOSURE_OVERBID"
+                    ? "Post-foreclosure overbid surplus. GovSoft scraper active across 12+ CO counties. Primary revenue stream."
+                    : s.stream === "TAX_LIEN"
+                    ? "Tax lien surplus under C.R.S. § 39-11-151. 5-year escheatment window. CSV import active."
+                    : s.stream;
                   return (
-                    <div key={s.stream} style={{
-                      background: "#111827", border: "1px solid #374151", borderRadius: 8,
-                      padding: "12px 16px", minWidth: 200,
-                    }}>
-                      <div style={{ fontSize: "0.7em", opacity: 0.5, marginBottom: 4 }}>{label}</div>
-                      <div style={{ fontWeight: 700, color: "#22c55e" }}>{formatCurrencyShort(s.total)}</div>
-                      <div style={{ fontSize: "0.78em", opacity: 0.5 }}>{s.cnt} leads</div>
-                    </div>
+                    <Tooltip key={s.stream} content={tooltipText} position="top">
+                      <div style={{
+                        background: "#111827", border: "1px solid #374151", borderRadius: 8,
+                        padding: "12px 16px", minWidth: 200, cursor: "default",
+                      }}>
+                        <div style={{ fontSize: "0.7em", opacity: 0.5, marginBottom: 4 }}>{label}</div>
+                        <div style={{ fontWeight: 700, color: "#22c55e" }}>{formatCurrencyShort(s.total)}</div>
+                        <div style={{ fontSize: "0.78em", opacity: 0.5 }}>{s.cnt} leads</div>
+                      </div>
+                    </Tooltip>
                   );
                 })}
+              </div>
+
+              {/* Coming Soon Streams */}
+              <h4 style={{ fontSize: "0.75em", letterSpacing: "0.1em", opacity: 0.5, marginBottom: 8, marginTop: 20 }}>
+                REVENUE STREAMS — COMING SOON
+              </h4>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {[
+                  {
+                    key: "TAX_DEED",
+                    label: "Tax Deed Surplus (§ 39-12-111)",
+                    est: "$2–4M est. CO market",
+                    desc: "Proceeds from county tax deed sales in excess of back taxes owed. 3-year claim window. Target: 15 CO counties with active treasurer auctions.",
+                    eta: "Q2 2026",
+                  },
+                  {
+                    key: "HOA",
+                    label: "HOA Foreclosure Surplus (§ 38-33.3-316)",
+                    est: "$800K–1.5M est. CO market",
+                    desc: "Overbid proceeds from HOA lien foreclosure sales. High unit value per case. Target: Denver Metro HOA-dense subdivisions.",
+                    eta: "Q3 2026",
+                  },
+                  {
+                    key: "UNCLAIMED_PROPERTY",
+                    label: "Unclaimed Property (§ 38-13-1304)",
+                    est: "$180M+ CO state pool",
+                    desc: "Colorado Great Unclaimed Property program. HB25-1224 caps attorney fees at 10%. Massive addressable pool — lowest competition of any stream.",
+                    eta: "Q2 2026",
+                  },
+                ].map((s) => (
+                  <Tooltip key={s.key} content={s.desc} position="top" maxWidth={300}>
+                    <div style={{
+                      background: "#0a0f1a", border: "1px dashed #374151", borderRadius: 8,
+                      padding: "12px 16px", minWidth: 200, cursor: "default", opacity: 0.8,
+                    }}>
+                      <div style={{ fontSize: "0.7em", opacity: 0.4, marginBottom: 4 }}>{s.label}</div>
+                      <div style={{ fontWeight: 700, color: "#4b5563", fontSize: "0.85em" }}>{s.est}</div>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, alignItems: "center" }}>
+                        <span style={{ fontSize: "0.65em", background: "#1e293b", color: "#64748b", padding: "2px 8px", borderRadius: 4, letterSpacing: "0.06em" }}>COMING {s.eta}</span>
+                      </div>
+                    </div>
+                  </Tooltip>
+                ))}
               </div>
             </div>
           )}
@@ -728,18 +877,19 @@ export default function Dashboard() {
         <span className="grade-filter-label">GRADE</span>
         <div className="grade-filters">
           {[
-            { value: "",       label: `ALL` },
-            { value: "GOLD",   label: `GOLD (${goldCount})` },
-            { value: "SILVER", label: `SILVER (${silverCount})` },
-            { value: "BRONZE", label: `BRONZE (${bronzeCount})` },
+            { value: "",       label: `ALL`,                tip: "Show all validated leads regardless of confidence grade" },
+            { value: "GOLD",   label: `GOLD (${goldCount})`,   tip: "Math-confirmed overbid + provenance doc. Highest confidence. Ready for immediate attorney action." },
+            { value: "SILVER", label: `SILVER (${silverCount})`, tip: "Probable overbid. Restriction window active or secondary validation pending. Monitor for promotion." },
+            { value: "BRONZE", label: `BRONZE (${bronzeCount})`, tip: "Pre-validation. Gate 4 extraction in progress. Overbid likely but not yet confirmed by sale documents." },
           ].map((g) => (
-            <button
-              key={g.value || "ALL"}
-              className={`grade-filter-btn ${grade === g.value ? "active" : ""}`}
-              onClick={() => { setGrade(g.value); setLoading(true); }}
-            >
-              {g.label}
-            </button>
+            <Tooltip key={g.value || "ALL"} content={g.tip} position="top">
+              <button
+                className={`grade-filter-btn ${grade === g.value ? "active" : ""}`}
+                onClick={() => { setGrade(g.value); setLoading(true); }}
+              >
+                {g.label}
+              </button>
+            </Tooltip>
           ))}
         </div>
 

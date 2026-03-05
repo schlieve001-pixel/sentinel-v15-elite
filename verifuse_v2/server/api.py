@@ -27,17 +27,21 @@ import os
 import random
 import sqlite3
 import string
+import time as _time
+import uuid
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from verifuse_v2.utils.logging_setup import setup_logging, request_id_var
 
 # ── Fail-fast: VERIFUSE_DB_PATH ────────────────────────────────────
 
@@ -77,6 +81,7 @@ if not _PREVIEW_HMAC_SECRET:
     raise RuntimeError("HMAC secret required — set PREVIEW_HMAC_SECRET or VERIFUSE_JWT_SECRET")
 
 log = logging.getLogger(__name__)
+setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
 
 # ── Dev environment flag (NEVER true in production) ──────────────────
 # Set VERIFUSE_ENV=development in .env to enable dev-only bypasses.
@@ -152,7 +157,24 @@ def _thread_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA cache_size = -65536")      # 64MB page cache
+    conn.execute("PRAGMA mmap_size = 268435456")    # 256MB memory-mapped I/O
+    conn.execute("PRAGMA temp_store = MEMORY")      # temp tables in RAM
     return conn
+
+
+def _with_busy_retry(fn, *args, _retries=3, **kwargs):
+    """Retry a callable on SQLite 'locked' errors with exponential backoff."""
+    for attempt in range(_retries):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < _retries - 1:
+                wait = 0.05 * (2 ** attempt)
+                log.warning("db_busy_retry", extra={"attempt": attempt + 1, "wait_s": wait})
+                _time.sleep(wait)
+            else:
+                raise
 
 
 async def _run_in_db(fn):
@@ -1156,12 +1178,38 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
 app = FastAPI(
     title="VeriFuse V2 — Titanium API",
-    version="4.1.0",
-    description="Colorado Surplus Intelligence Platform — Sprint 11.5",
+    version="4.2.0",
+    description="Colorado Surplus Intelligence Platform — Sprint 12",
 )
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(Exception)
+async def _global_exc_handler(request: Request, exc: Exception):
+    import traceback as _tb
+    req_id = request_id_var.get("unknown")
+    log.error("unhandled_exception", extra={
+        "request_id": req_id,
+        "method": request.method,
+        "path": request.url.path,
+        "exc_type": type(exc).__name__,
+        "traceback": _tb.format_exc(),
+    })
+    return JSONResponse(status_code=500, content={
+        "error": {"code": "INTERNAL_ERROR",
+                  "message": "An unexpected error occurred",
+                  "request_id": req_id}
+    })
+
+
+@app.exception_handler(HTTPException)
+async def _http_exc_handler(request: Request, exc: HTTPException):
+    req_id = request_id_var.get("unknown")
+    return JSONResponse(status_code=exc.status_code, content={
+        "error": {"code": str(exc.status_code), "message": exc.detail, "request_id": req_id}
+    })
 
 app.add_middleware(
     CORSMiddleware,
@@ -1174,6 +1222,7 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "x-verifuse-api-key", "X-Verifuse-Simulate"],
     expose_headers=["Content-Disposition"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 @app.middleware("http")
@@ -1222,6 +1271,36 @@ async def bfcache_hardening(request: Request, call_next):
         )
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    return response
+
+
+_SECURITY_HEADERS = {
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "X-API-Version": "4.2.0",
+}
+
+
+@app.middleware("http")
+async def request_lifecycle_middleware(request: Request, call_next):
+    """Attach request ID, timing, and security headers to every response."""
+    req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())[:8]
+    request_id_var.set(req_id)
+    t0 = _time.perf_counter()
+    log.debug("req.start", extra={"method": request.method, "path": request.url.path})
+    response = await call_next(request)
+    elapsed_ms = int((_time.perf_counter() - t0) * 1000)
+    response.headers["X-Request-ID"] = req_id
+    response.headers["X-Response-Time"] = f"{elapsed_ms}ms"
+    for h, v in _SECURITY_HEADERS.items():
+        response.headers.setdefault(h, v)
+    log.info("req.end", extra={
+        "method": request.method, "path": request.url.path,
+        "status": response.status_code, "ms": elapsed_ms,
+    })
     return response
 
 
@@ -1379,9 +1458,43 @@ async def _shutdown_db_executor():
 # ── Health ──────────────────────────────────────────────────────────
 
 @app.get("/health")
-async def health():
-    """Public health check — no internal data exposed."""
-    return {"status": "ok"}
+async def health_check():
+    """Public health check with dependency status."""
+    deps = {}
+
+    def _db_health():
+        conn = sqlite3.connect(VERIFUSE_DB_PATH, timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        wcp = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        sz_mb = round(os.path.getsize(VERIFUSE_DB_PATH) / 1_048_576, 1)
+        cnt = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+        conn.close()
+        return {"status": "ok", "size_mb": sz_mb, "leads": cnt, "wal_pages": wcp[1] if wcp else 0}
+
+    try:
+        deps["database"] = await asyncio.get_event_loop().run_in_executor(DB_EXECUTOR, _db_health)
+    except Exception as e:
+        deps["database"] = {"status": "error", "detail": str(e)[:120]}
+
+    deps["stripe"] = {"status": "configured" if STRIPE_SECRET_KEY else "unconfigured", "mode": STRIPE_MODE}
+
+    sg = os.environ.get("SENDGRID_API_KEY", "")
+    deps["sendgrid"] = {"status": "configured" if sg.startswith("SG.") else "unconfigured"}
+
+    gcp = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    deps["google_cloud"] = {
+        "status": "configured" if os.path.isfile(gcp) else "unconfigured",
+        "project": os.environ.get("VERTEX_AI_PROJECT", ""),
+    }
+
+    overall = "error" if any(d.get("status") == "error" for d in deps.values()) else "ok"
+    return {
+        "status": overall,
+        "version": "4.2.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "env": "development" if _IS_DEV else "production",
+        "dependencies": deps,
+    }
 
 
 @app.get("/api/admin/health")
@@ -1868,6 +1981,7 @@ async def unlock_lead(lead_id: str, request: Request):
     result["ok"] = True
     result["credits_remaining"] = credits_after
     result["credits_spent"] = cost
+    _invalidate_stats_cache()
     return result
 
 
@@ -1912,8 +2026,20 @@ async def billing_upgrade(request: Request):
 
 # ── GET /api/stats — Public dashboard stats ────────────────────────
 
+_stats_cache: dict = {"data": None, "expires": 0.0}
+_STATS_CACHE_TTL = 30.0
+
+
+def _invalidate_stats_cache() -> None:
+    _stats_cache["expires"] = 0.0
+
+
 @app.get("/api/stats")
 async def get_stats():
+    now = _time.monotonic()
+    if _stats_cache["data"] is not None and now < _stats_cache["expires"]:
+        return _stats_cache["data"]
+
     def _run():
         conn = _thread_conn()
         try:
@@ -2012,7 +2138,10 @@ async def get_stats():
             "pre_sale_pipeline_surplus": round(pre_sale_surplus, 2),
         }
 
-    return await _run_in_db(_run)
+    result = await _run_in_db(_run)
+    _stats_cache["data"] = result
+    _stats_cache["expires"] = _time.monotonic() + _STATS_CACHE_TTL
+    return result
 
 
 # ── Auth endpoints (delegate to auth module) ────────────────────────
@@ -3254,6 +3383,82 @@ async def admin_system_stats(request: Request):
 
 
 _TIER_MONTHLY_CENTS = {"associate": 14900, "partner": 39900, "sovereign": 89900}
+
+
+@app.get("/api/admin/pipeline-status")
+async def pipeline_status(request: Request):
+    """Per-county Gate 4 readiness with action classification (admin only)."""
+    _require_admin_or_api_key(request)
+
+    def _query():
+        conn = _thread_conn()
+        rows = conn.execute("""
+            SELECT
+                l.county,
+                COUNT(*) as total,
+                SUM(CASE WHEN l.data_grade = 'GOLD' THEN 1 ELSE 0 END) as gold,
+                SUM(CASE WHEN l.data_grade = 'SILVER' THEN 1 ELSE 0 END) as silver,
+                SUM(CASE WHEN l.data_grade = 'BRONZE' THEN 1 ELSE 0 END) as bronze,
+                SUM(CASE WHEN l.data_grade = 'REJECT' THEN 1 ELSE 0 END) as reject,
+                SUM(CASE WHEN l.sale_date IS NULL AND l.data_grade = 'BRONZE' THEN 1 ELSE 0 END) as bronze_no_sale_date,
+                SUM(CASE WHEN (l.overbid_amount IS NULL OR l.overbid_amount = 0) AND l.data_grade = 'BRONZE' THEN 1 ELSE 0 END) as bronze_no_overbid,
+                cp.platform_type,
+                cp.last_verified_ts
+            FROM leads l
+            LEFT JOIN county_profiles cp ON cp.county = l.county
+            WHERE l.data_grade != 'REJECT'
+            GROUP BY l.county
+            ORDER BY bronze DESC
+        """).fetchall()
+        # SALE_INFO snapshot counts per county (asset_id = FORECLOSURE:CO:{COUNTY}:{CASE})
+        snap_rows = conn.execute("""
+            SELECT LOWER(SUBSTR(asset_id, 17,
+                   INSTR(SUBSTR(asset_id, 17), ':') - 1)) as county,
+                   COUNT(*) as cnt
+            FROM html_snapshots
+            WHERE snapshot_type = 'SALE_INFO'
+              AND asset_id LIKE 'FORECLOSURE:CO:%'
+            GROUP BY county
+        """).fetchall()
+        conn.close()
+        snap_by_county = {r["county"]: r["cnt"] for r in snap_rows}
+        return rows, snap_by_county
+
+    rows, snap_by_county = await _run_in_db(_query)
+    result = []
+    _captcha_counties = {"mesa", "eagle"}
+    for r in rows:
+        bronze_no_sale_date = r["bronze_no_sale_date"] or 0
+        bronze_no_overbid = r["bronze_no_overbid"] or 0
+        bronze = r["bronze"] or 0
+        county = r["county"] or ""
+        has_snapshots = snap_by_county.get(county, 0)
+        platform = r["platform_type"] or ""
+        if county in _captcha_counties or "captcha" in platform:
+            action = "captcha_blocked"
+        elif bronze > 0 and bronze_no_sale_date > bronze * 0.5:
+            action = "sale_info_backfill_needed"
+        elif bronze_no_overbid > 0 and bronze > 0:
+            action = "gate4_ready"
+        elif bronze == 0:
+            action = "clean"
+        else:
+            action = "gate4_ready"
+        result.append({
+            "county": county,
+            "total": r["total"],
+            "gold": r["gold"] or 0,
+            "silver": r["silver"] or 0,
+            "bronze": bronze,
+            "reject": r["reject"] or 0,
+            "bronze_no_sale_date": bronze_no_sale_date,
+            "bronze_no_overbid": bronze_no_overbid,
+            "has_snapshots": has_snapshots,
+            "platform_type": platform,
+            "last_verified_ts": r["last_verified_ts"],
+            "action_needed": action,
+        })
+    return {"pipeline": result, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/admin/revenue-metrics")

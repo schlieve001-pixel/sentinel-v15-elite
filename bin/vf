@@ -214,6 +214,45 @@ conn.close()
 PYEOF
     ;;
 
+  # Gate 4 full county pipeline — Phase 1: counties with SALE_INFO captured;
+  # Phase 2: counties needing SALE_INFO backfill first (Jefferson/Boulder/Broomfield)
+  # Usage: bin/vf gate4-run-all
+  gate4-run-all)
+    shift
+    echo "=== Phase 1: Gate 4 extraction on counties with SALE_INFO captured ==="
+    for county in adams weld douglas denver gilpin arapahoe; do
+      echo "--- Gate 4: $county ---"
+      python3 -c "
+import sys, os; sys.path.insert(0, os.getcwd())
+from verifuse_v2.ingest.govsoft_extract import run_extraction_batch
+results = run_extraction_batch('$county', limit=300)
+print(results)
+"
+    done
+
+    echo "=== Phase 2: SALE_INFO backfill + Gate 4 for counties with missing snapshots ==="
+    for county in jefferson boulder broomfield; do
+      echo "--- SALE_INFO backfill: $county ---"
+      flock -n /tmp/vf_ingest.lock python3 -m verifuse_v2.ingest.ingest_runner --sale-info-backfill --county "$county" --limit 600 || echo "WARN: could not acquire lock for $county"
+      echo "--- Gate 4: $county ---"
+      python3 -c "
+import sys, os; sys.path.insert(0, os.getcwd())
+from verifuse_v2.ingest.govsoft_extract import run_extraction_batch
+results = run_extraction_batch('$county', limit=600)
+print(results)
+"
+    done
+
+    echo "=== Gate 4 Run Complete ==="
+    python3 -c "
+import sqlite3, os
+conn = sqlite3.connect(os.environ['VERIFUSE_DB_PATH'])
+for row in conn.execute('SELECT county, data_grade, COUNT(*) FROM leads GROUP BY county, data_grade ORDER BY county, data_grade'):
+    print(row)
+conn.close()
+"
+    ;;
+
   deploy)
     echo "[vf deploy] Gate 9 deployment sequence. Run each step manually and verify:"
     echo ""
@@ -246,6 +285,7 @@ Required commands:
   scraper-run-window      Run date-window ingest (flock; pass --county --days N)
   scraper-enum            Sequential case enumerator (flock; --county --prefix --start-num --end-num)
   extract-batch           Gate 4 batch extraction on BRONZE leads (--county --limit)
+  gate4-run-all           Full Gate 4 pipeline: Phase 1 (adams/weld/douglas/gilpin/arapahoe/denver) + Phase 2 (jefferson/boulder/broomfield with SALE_INFO backfill)
   pending-sales           Scrape Active/Pending pre-sale cases (--county or --all-counties)
   sale-info-backfill      Re-scrape BRONZE leads missing SALE_INFO (--county --limit)
   denver-scrape           Denver Public Trustee PDF scraper (--dry-run to preview)
