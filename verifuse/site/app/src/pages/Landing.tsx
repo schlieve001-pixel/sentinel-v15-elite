@@ -155,24 +155,22 @@ export default function Landing() {
         </div>
 
         {stats && (
-          <div className="hero-stats">
-            <div className="stat-block">
+          <div className="hero-stats-grid">
+            <div className="hero-stat-card">
               <span className="stat-value">{stats.total_leads ?? stats.total_assets}</span>
               <span className="stat-label">Active Pipeline</span>
             </div>
-            <div className="stat-block">
+            <div className="hero-stat-card">
               <span className="stat-value">{stats.attorney_ready}</span>
-              <span className="stat-label">Attorney-Ready Leads</span>
+              <span className="stat-label">Attorney-Ready</span>
             </div>
-            <div className="stat-block">
-              <span className="stat-value">{stats.gold_grade}</span>
+            <div className="hero-stat-card">
+              <span className="stat-value" style={{ color: "#f59e0b" }}>{stats.gold_grade}</span>
               <span className="stat-label">GOLD Grade</span>
             </div>
-            <div className="stat-block">
-              <span className="stat-value">
-                ${(stats.total_claimable_surplus).toLocaleString("en-US", {
-                  maximumFractionDigits: 0,
-                })}
+            <div className="hero-stat-card">
+              <span className="stat-value" style={{ color: "#10b981" }}>
+                ${(stats.total_claimable_surplus / 1_000_000).toFixed(1)}M
               </span>
               <span className="stat-label">Claimable Surplus</span>
             </div>

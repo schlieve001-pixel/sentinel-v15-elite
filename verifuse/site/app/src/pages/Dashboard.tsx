@@ -1,11 +1,13 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { Link, useSearchParams, useLocation, useNavigate } from "react-router-dom";
+import { TrendingUp, DollarSign, MapPin, Clock, Star } from "lucide-react";
 import {
   getLeads, getStats, downloadSecure, downloadSample, getPreviewLeads,
   sendVerification, verifyEmail, API_BASE,
   type Lead, type Stats, type PreviewLead,
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { toast } from "../components/Toast";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -42,28 +44,32 @@ interface KpiProps {
   accent?: boolean;
   grade?: "gold" | "silver" | "bronze";
   href?: string;
+  icon?: React.ElementType;
 }
 
-function KpiCard({ label, value, sub, accent, grade, href }: KpiProps) {
+function KpiCard({ label, value, sub, accent, grade, href, icon: Icon }: KpiProps) {
   const borderColor = grade === "gold" ? "#f59e0b"
     : grade === "silver" ? "#94a3b8"
     : grade === "bronze" ? "#b45309"
     : accent ? "#22c55e"
     : "#374151";
 
+  const valueColor = grade === "gold" ? "#f59e0b"
+    : grade === "silver" ? "#94a3b8"
+    : grade === "bronze" ? "#b45309"
+    : accent ? "#22c55e"
+    : "#e5e7eb";
+
   const inner = (
     <>
+      {Icon && <Icon size={16} style={{ color: valueColor, opacity: 0.8, marginBottom: 4 }} />}
       <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.55, textTransform: "uppercase" }}>
         {label}
       </div>
       <div style={{
         fontSize: "1.6em",
         fontWeight: 700,
-        color: grade === "gold" ? "#f59e0b"
-          : grade === "silver" ? "#94a3b8"
-          : grade === "bronze" ? "#b45309"
-          : accent ? "#22c55e"
-          : "#e5e7eb",
+        color: valueColor,
         lineHeight: 1.2,
       }}>
         {value}
@@ -113,6 +119,7 @@ function SkeletonKpi() {
 
 function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) => void }) {
   const isRestricted = lead.restriction_status === "RESTRICTED";
+  const isOwned = lead.unlocked_by_me === true;
   const streamLabel = lead.surplus_stream === "TAX_LIEN" ? "Tax Lien"
     : lead.surplus_stream === "TAX_DEED" ? "Tax Deed"
     : lead.surplus_stream === "HOA" ? "HOA"
@@ -120,18 +127,21 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
     : null;
 
   return (
-    <div className={`lead-card ${isRestricted ? "restricted" : ""}`}>
+    <div className={`lead-card ${isRestricted ? "restricted" : ""} ${isOwned ? "owned" : ""}`}>
       <div className="card-header">
         <span className="county-badge">{lead.county}</span>
-        {isRestricted ? (
-          <span className="restriction-badge">
-            RESTRICTED — {lead.days_until_actionable} DAYS
-          </span>
-        ) : lead.days_to_claim != null ? (
-          <span className={`timer-badge ${lead.days_to_claim < 60 ? "urgent" : ""} ${lead.deadline_passed ? "expired" : ""}`}>
-            {lead.deadline_passed ? "DEADLINE PASSED" : `${lead.days_to_claim} DAYS TO CLAIM`}
-          </span>
-        ) : null}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {isOwned && <span className="owned-badge">● OWNED</span>}
+          {isRestricted ? (
+            <span className="restriction-badge">
+              RESTRICTED — {lead.days_until_actionable} DAYS
+            </span>
+          ) : lead.days_to_claim != null ? (
+            <span className={`timer-badge ${lead.days_to_claim < 60 ? "urgent" : ""} ${lead.deadline_passed ? "expired" : ""}`}>
+              {lead.deadline_passed ? "DEADLINE PASSED" : `${lead.days_to_claim} DAYS TO CLAIM`}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <div className="card-value">
@@ -205,10 +215,14 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
       )}
 
       <div className="card-actions stacked">
-        <button className="decrypt-btn-sota" onClick={() => onNavigate(lead.asset_id!)}>
-          {isRestricted ? "VIEW DETAILS" : "UNLOCK INTEL"}
+        <button
+          className="decrypt-btn-sota"
+          onClick={() => onNavigate(lead.asset_id!)}
+          style={isOwned ? { background: "transparent", border: "1px solid var(--green)", color: "var(--green)" } : undefined}
+        >
+          {isRestricted ? "VIEW DETAILS" : isOwned ? "OPEN INTEL →" : "UNLOCK INTEL"}
         </button>
-        {lead.unlocked_by_me ? (
+        {isOwned ? (
           <button
             className="btn-outline-sm full-width"
             onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.pdf`)}
@@ -318,6 +332,7 @@ export default function Dashboard() {
   const [county, setCounty] = useState("");
   const [grade, setGrade] = useState("");
   const [sortBy, setSortBy] = useState<"surplus" | "newest" | "grade">("surplus");
+  const [viewMode, setViewMode] = useState<"actionable" | "watchlist" | "my_leads">("actionable");
   const [loading, setLoading] = useState(true);
   const [statsLoading, setStatsLoading] = useState(true);
   const [fetchError, setFetchError] = useState("");
@@ -441,6 +456,7 @@ export default function Dashboard() {
 
   const actionable = sortLeads(leads.filter((l) => l.restriction_status !== "RESTRICTED"));
   const watchlist = sortLeads(leads.filter((l) => l.restriction_status === "RESTRICTED"));
+  const myLeads = sortLeads(leads.filter((l) => l.unlocked_by_me === true));
 
   // Grade counts for badges
   const goldCount = stats?.gold_grade ?? 0;
@@ -510,7 +526,12 @@ export default function Dashboard() {
             <button className="btn-outline-sm" disabled={!verifyCode || verifySending}
               onClick={async () => {
                 setVerifySending(true); setVerifyMsg("");
-                try { await verifyEmail(verifyCode); setVerifyMsg("Email verified!"); window.location.reload(); }
+                try {
+                  await verifyEmail(verifyCode);
+                  toast("Email verified ✓", "success");
+                  setVerifyMsg("Email verified!");
+                  window.location.reload();
+                }
                 catch { setVerifyMsg("Invalid code. Try again."); }
                 finally { setVerifySending(false); }
               }}>VERIFY</button>
@@ -551,6 +572,7 @@ export default function Dashboard() {
                 value={goldCount}
                 sub={stats.total_claimable_surplus > 0 ? formatCurrencyShort(stats.total_claimable_surplus) + " total" : undefined}
                 grade="gold"
+                icon={Star}
               />
               <KpiCard
                 label="SILVER Leads"
@@ -567,11 +589,13 @@ export default function Dashboard() {
                 value={formatCurrencyShort(stats.verified_pipeline_surplus ?? stats.total_claimable_surplus)}
                 sub={`${stats.verified_pipeline ?? stats.total_assets} verified leads`}
                 accent={true}
+                icon={DollarSign}
               />
               <KpiCard
                 label="Attorney-Ready"
                 value={stats.attorney_ready}
                 sub="GOLD+SILVER+BRONZE, surplus > $1K"
+                icon={TrendingUp}
               />
               <KpiCard
                 label="Pre-Sale Pipeline"
@@ -579,15 +603,18 @@ export default function Dashboard() {
                 sub="upcoming auctions — click to explore"
                 grade="bronze"
                 href="/pre-sale"
+                icon={Clock}
               />
               <KpiCard
                 label="Total Leads in DB"
                 value={stats.total_leads ?? stats.total_raw_volume ?? 0}
+                icon={TrendingUp}
               />
               <KpiCard
                 label="Counties Covered"
                 value={countyOptions.length || stats.counties.length}
                 sub="Colorado"
+                icon={MapPin}
               />
               <KpiCard
                 label="Last Refreshed"
@@ -658,6 +685,30 @@ export default function Dashboard() {
             </div>
           )}
           <CountyCoverageTable counties={stats.counties} />
+        </div>
+      )}
+
+      {/* View Mode Tabs (authenticated, non-preview) */}
+      {!isPreview && user && (
+        <div className="view-tabs">
+          <button
+            className={`view-tab ${viewMode === "actionable" ? "active" : ""}`}
+            onClick={() => setViewMode("actionable")}
+          >
+            ACTIONABLE ({actionable.length})
+          </button>
+          <button
+            className={`view-tab ${viewMode === "watchlist" ? "active" : ""}`}
+            onClick={() => setViewMode("watchlist")}
+          >
+            WATCHLIST ({watchlist.length})
+          </button>
+          <button
+            className={`view-tab ${viewMode === "my_leads" ? "active" : ""}`}
+            onClick={() => setViewMode("my_leads")}
+          >
+            MY LEADS ({myLeads.length})
+          </button>
         </div>
       )}
 
@@ -747,7 +798,32 @@ export default function Dashboard() {
         </div>
       ) : (
         <>
-          {actionable.length > 0 && (
+          {/* MY LEADS view */}
+          {viewMode === "my_leads" && (
+            <div className="bucket-section">
+              <div className="bucket-header actionable">
+                <h2>MY LEADS — UNLOCKED INTEL</h2>
+                <span className="bucket-count">{myLeads.length} leads</span>
+                <p className="bucket-desc">
+                  Leads you have unlocked. Full owner data and case details are available.
+                </p>
+              </div>
+              {myLeads.length === 0 ? (
+                <div className="center-content" style={{ paddingTop: 40 }}>
+                  <p style={{ color: "#64748b" }}>No leads unlocked yet — browse the intelligence below</p>
+                </div>
+              ) : (
+                <div className="vault-grid">
+                  {myLeads.map((lead) => (
+                    <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ACTIONABLE view */}
+          {viewMode === "actionable" && actionable.length > 0 && (
             <div className="bucket-section">
               <div className="bucket-header actionable">
                 <h2>ESCROW ENDED — ACTIONABLE</h2>
@@ -765,7 +841,8 @@ export default function Dashboard() {
             </div>
           )}
 
-          {watchlist.length > 0 && (
+          {/* WATCHLIST view */}
+          {viewMode === "watchlist" && watchlist.length > 0 && (
             <div className="bucket-section">
               <div className="bucket-header watchlist">
                 <h2>DATA ACCESS ONLY — RESTRICTION PERIOD</h2>
@@ -777,6 +854,21 @@ export default function Dashboard() {
               </div>
               <div className="vault-grid">
                 {watchlist.map((lead) => (
+                  <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Old dual-section view for preview/no-tabs */}
+          {!user && actionable.length > 0 && (
+            <div className="bucket-section">
+              <div className="bucket-header actionable">
+                <h2>ESCROW ENDED — ACTIONABLE</h2>
+                <span className="bucket-count">{actionable.length} leads</span>
+              </div>
+              <div className="vault-grid">
+                {actionable.map((lead) => (
                   <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
                 ))}
               </div>

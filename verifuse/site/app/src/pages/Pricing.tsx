@@ -104,6 +104,23 @@ const ONE_TIME = [
   },
 ];
 
+const FEATURE_MATRIX = [
+  { feature: "Credits per month",       associate: "30",   partner: "100",   sovereign: "250" },
+  { feature: "GOLD leads access",       associate: "✓",    partner: "✓",     sovereign: "✓" },
+  { feature: "PRE-SALE pipeline",       associate: "✓",    partner: "✓",     sovereign: "✓" },
+  { feature: "Overbid calculations",    associate: "✓",    partner: "✓",     sovereign: "✓" },
+  { feature: "Evidence documents",      associate: "✓",    partner: "✓",     sovereign: "✓" },
+  { feature: "Rule 7.3 letter gen",     associate: "✓",    partner: "✓",     sovereign: "✓" },
+  { feature: "Bulk CSV export",         associate: "—",    partner: "✓",     sovereign: "✓" },
+  { feature: "Case packet download",    associate: "—",    partner: "✓",     sovereign: "✓" },
+  { feature: "Priority data updates",  associate: "—",    partner: "✓",     sovereign: "✓" },
+  { feature: "All 5 surplus streams",  associate: "—",    partner: "✓",     sovereign: "✓" },
+  { feature: "API access",             associate: "—",    partner: "—",     sovereign: "✓" },
+  { feature: "Heir notification letters", associate: "—", partner: "—",     sovereign: "✓" },
+  { feature: "County coverage reports", associate: "—",   partner: "—",     sovereign: "✓" },
+  { feature: "Premium Dossier",        associate: "—",    partner: "—",     sovereign: "✓" },
+];
+
 const CREDIT_COSTS = [
   { action: "Lead Unlock", credits: 1, description: "View full case details, owner name, property address" },
   { action: "Filing Pack", credits: 3, description: "Motion template + owner address + lien summary + evidence PDF" },
@@ -361,6 +378,33 @@ export default function Pricing() {
               </div>
             ))}
           </div>
+        </div>
+
+        {/* Feature Comparison Matrix */}
+        <div style={{ background: "#0d1117", border: "1px solid #374151", borderRadius: 10, padding: "24px", marginBottom: 60 }}>
+          <h3 style={{ fontSize: "0.8em", letterSpacing: "0.1em", opacity: 0.5, marginBottom: 16, marginTop: 0 }}>
+            FEATURE COMPARISON
+          </h3>
+          <table className="feature-matrix" style={{ fontFamily: "inherit" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", minWidth: 200 }}>FEATURE</th>
+                <th style={{ textAlign: "center" }}>ASSOCIATE</th>
+                <th style={{ textAlign: "center" }}>PARTNER</th>
+                <th className="col-sovereign" style={{ textAlign: "center" }}>SOVEREIGN</th>
+              </tr>
+            </thead>
+            <tbody>
+              {FEATURE_MATRIX.map((row) => (
+                <tr key={row.feature}>
+                  <td>{row.feature}</td>
+                  <td style={{ textAlign: "center", opacity: row.associate === "—" ? 0.3 : 1 }}>{row.associate}</td>
+                  <td style={{ textAlign: "center", opacity: row.partner === "—" ? 0.3 : 1 }}>{row.partner}</td>
+                  <td className="col-sovereign" style={{ textAlign: "center" }}>{row.sovereign}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
 
         {/* One-Time Packs */}

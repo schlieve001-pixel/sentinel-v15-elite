@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
 import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, getAssetEvidence, downloadEvidenceDoc, getLeadAudit, type Lead, type UnlockResponse, type EvidenceDoc, type LeadAuditTrail, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import ClassificationBadge from "../components/ClassificationBadge";
+import { toast } from "../components/Toast";
 
 function isVerifyEmailError(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 &&
@@ -57,6 +58,12 @@ export default function LeadDetail() {
     return () => ac.abort();
   }, [assetId]);
 
+  // Auto-unlock when lead was already purchased by this user (no credit charge — INSERT OR IGNORE)
+  useEffect(() => {
+    if (!lead?.unlocked_by_me || !assetId || unlocked) return;
+    unlockLead(assetId).then(setUnlocked).catch(() => {});
+  }, [lead?.unlocked_by_me, assetId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Auto-load evidence docs for attorneys/admins when registry_asset_id is available
   useEffect(() => {
     const isAttorney = user?.is_admin || user?.role === "approved_attorney" || user?.role === "admin";
@@ -93,6 +100,13 @@ export default function LeadDetail() {
     try {
       const res = await unlockLead(assetId);
       setUnlocked(res);
+      const remaining = res.credits_remaining;
+      toast(
+        remaining != null
+          ? `Lead unlocked — intel available (${remaining} credits remaining)`
+          : "Lead unlocked — intel is now available (1 credit used)",
+        "success"
+      );
     } catch (err) {
       handleUnlockError(err);
     } finally {
@@ -303,7 +317,23 @@ export default function LeadDetail() {
             {/* Obfuscated Owner */}
             {!unlocked && (
               <div className="detail-locked">
-                <h3>OWNER INTELLIGENCE — LOCKED</h3>
+                {lead.unlocked_by_me ? (
+                  <div style={{
+                    padding: "12px 16px",
+                    background: "rgba(16,185,129,0.08)",
+                    border: "1px solid rgba(16,185,129,0.3)",
+                    borderRadius: 6,
+                    color: "var(--green)",
+                    fontSize: "0.85rem",
+                    fontWeight: 600,
+                    letterSpacing: "0.04em",
+                    marginBottom: 16,
+                  }}>
+                    ✓ ALREADY UNLOCKED — INTEL BELOW ↓
+                  </div>
+                ) : (
+                  <h3>OWNER INTELLIGENCE — LOCKED</h3>
+                )}
                 {lead.owner_img ? (
                   <div className="owner-img-wrap lg">
                     <img src={lead.owner_img} alt="Owner (obfuscated)" />
