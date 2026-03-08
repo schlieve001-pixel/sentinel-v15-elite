@@ -1576,95 +1576,204 @@ class GovSoftEngine:
             "leads_inserted": 0, "leads_upgraded": 0,
         }
 
-        # Regex helpers for pre-sale CASE_DETAIL parsing
+        # ── SOTA pre-sale HTML parsers — multi-pattern with cell fallbacks ──────
+        # GovSoft uses inconsistent HTML: <dd>, <td>, <span>, raw text cells.
+        # Each field tries the most specific pattern first, then falls back.
+
         _amount_re = re.compile(
-            r'(?:amount|opening.{0,10}bid|total.{0,10}indebtedness)'
-            r'(?:(?:<[^>]*>)|[^<$\d])*\$?([\d,]+(?:\.\d{2})?)',
+            r'(?:amount|opening.{0,15}bid|total.{0,15}indebtedness|judgment.{0,10}amount)'
+            r'(?:(?:<[^>]*>)|[^<$\d]){0,120}\$?\s*([\d,]+(?:\.\d{2})?)',
             re.IGNORECASE,
         )
-        _sched_date_re = re.compile(
-            r'(?:scheduled.{0,20}date|sale.{0,10}date|hearing.{0,10}date)'
-            r'(?:(?:<[^>]*>)|[^<\d])*(\d{1,2}/\d{1,2}/\d{4})',
-            re.IGNORECASE,
-        )
-        _owner_re = re.compile(
-            r'(?:grantor|trustor|borrower|owner|defendant)'
-            r'(?:(?:<[^>]*>)|[^<])*?<dd[^>]*>([^<]{3,80})</dd>',
-            re.IGNORECASE,
-        )
-        _address_re = re.compile(
-            r'(?:property\s+address|street\s+address|situs)'
-            r'(?:(?:<[^>]*>)|[^<])*?<dd[^>]*>([^<]{5,120})</dd>',
-            re.IGNORECASE,
-        )
-        _lender_re = re.compile(
-            r'(?:beneficiary|lender|holder|creditor)'
-            r'(?:(?:<[^>]*>)|[^<])*?<dd[^>]*>([^<]{3,100})</dd>',
-            re.IGNORECASE,
-        )
+        # Broad date patterns: MM/DD/YYYY and YYYY-MM-DD and Month D, YYYY
+        _sched_date_res = [
+            re.compile(
+                r'(?:scheduled.{0,25}(?:sale|auction)|sale.{0,10}date|'
+                r'hearing.{0,10}date|auction.{0,10}date|date.{0,10}sale)'
+                r'(?:(?:<[^>]*>)|[^<\d]){0,120}(\d{1,2}/\d{1,2}/\d{4})',
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r'(?:scheduled.{0,25}(?:sale|auction)|sale.{0,10}date|'
+                r'hearing.{0,10}date|auction.{0,10}date|date.{0,10}sale)'
+                r'(?:(?:<[^>]*>)|[^<\d]){0,120}(\d{4}-\d{2}-\d{2})',
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r'(?:scheduled.{0,25}(?:sale|auction)|sale.{0,10}date|'
+                r'hearing.{0,10}date|auction.{0,10}date)'
+                r'(?:(?:<[^>]*>)|[^<\w]){0,120}'
+                r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2},?\s+\d{4})',
+                re.IGNORECASE,
+            ),
+        ]
+        # Owner: try <dd>, <td>, plain text after label
+        _owner_res = [
+            re.compile(
+                r'(?:grantor|trustor|borrower|defendant|owner\s*name)'
+                r'(?:(?:<[^>]*>)|[^<]){0,200}?<(?:dd|td)[^>]*>\s*([A-Z][^<]{2,80}?)\s*</(?:dd|td)>',
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r'(?:grantor|trustor|borrower|defendant)'
+                r'[^<]{0,30}:\s*([A-Z][A-Za-z ,.\'-]{2,80})',
+                re.IGNORECASE,
+            ),
+        ]
+        _address_res = [
+            re.compile(
+                r'(?:property\s+address|street\s+address|situs\s+address|property\s+location)'
+                r'(?:(?:<[^>]*>)|[^<]){0,200}?<(?:dd|td)[^>]*>\s*([^<]{5,150}?)\s*</(?:dd|td)>',
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r'(?:property\s+address|situs)'
+                r'[^<]{0,30}:\s*(\d[^<\n]{5,150})',
+                re.IGNORECASE,
+            ),
+        ]
+        _lender_res = [
+            re.compile(
+                r'(?:beneficiary|lender|holder|creditor|mortgagee)'
+                r'(?:(?:<[^>]*>)|[^<]){0,200}?<(?:dd|td)[^>]*>\s*([^<]{3,120}?)\s*</(?:dd|td)>',
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r'(?:beneficiary|lender|holder)'
+                r'[^<]{0,30}:\s*([A-Z][^<\n]{2,120})',
+                re.IGNORECASE,
+            ),
+        ]
+
+        def _try_parse_date(raw: str) -> str | None:
+            """Try multiple date formats, return ISO YYYY-MM-DD or None."""
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%B %d, %Y", "%b %d, %Y",
+                        "%B %d %Y", "%b %d %Y"):
+                try:
+                    return datetime.strptime(raw.strip(), fmt).strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
+            return None
 
         def _parse_presale_html(html: str) -> dict:
-            """Extract pre-sale fields from CASE_DETAIL or SALE_INFO HTML."""
+            """Extract pre-sale fields from CASE_DETAIL or SALE_INFO HTML.
+
+            Multi-pattern SOTA parser: tries primary regex then falls back to
+            alternate patterns. Never raises — always returns partial dict.
+            """
             result: dict = {}
+
+            # Opening bid
             m = _amount_re.search(html)
             if m:
                 try:
                     result["opening_bid"] = float(m.group(1).replace(",", ""))
                 except ValueError:
                     pass
-            m = _sched_date_re.search(html)
-            if m:
-                try:
-                    result["scheduled_sale_date"] = datetime.strptime(
-                        m.group(1), "%m/%d/%Y"
-                    ).strftime("%Y-%m-%d")
-                except ValueError:
-                    pass
-            m = _owner_re.search(html)
-            if m:
-                result["owner_name"] = m.group(1).strip()[:120]
-            m = _address_re.search(html)
-            if m:
-                result["property_address"] = m.group(1).strip()[:250]
-            m = _lender_re.search(html)
-            if m:
-                result["lender_name"] = m.group(1).strip()[:120]
+
+            # Scheduled sale date — try all patterns
+            for date_re in _sched_date_res:
+                m = date_re.search(html)
+                if m:
+                    parsed = _try_parse_date(m.group(1))
+                    if parsed:
+                        result["scheduled_sale_date"] = parsed
+                        break
+
+            # Owner name — try primary then fallback
+            for owner_re in _owner_res:
+                m = owner_re.search(html)
+                if m:
+                    candidate = m.group(1).strip()[:120]
+                    # Reject obvious garbage (all numbers, URLs, etc.)
+                    if candidate and not candidate.isdigit() and "http" not in candidate.lower():
+                        result["owner_name"] = candidate
+                        break
+
+            # Property address
+            for addr_re in _address_res:
+                m = addr_re.search(html)
+                if m:
+                    candidate = m.group(1).strip()[:250]
+                    if candidate and len(candidate) >= 5:
+                        result["property_address"] = candidate
+                        break
+
+            # Lender name
+            for lender_re in _lender_res:
+                m = lender_re.search(html)
+                if m:
+                    candidate = m.group(1).strip()[:120]
+                    if candidate and not candidate.isdigit():
+                        result["lender_name"] = candidate
+                        break
+
             return result
 
         def _upsert_presale(case_number: str, fields: dict) -> str:
-            """Insert or upgrade a PRE_SALE lead. Returns 'inserted'|'upgraded'|'skipped'."""
-            asset_id_val = _asset_id(self.county, case_number)
-            existing = self._conn.execute(
-                "SELECT id, data_grade FROM leads WHERE county=? AND case_number=?",
-                [self.county, case_number],
-            ).fetchone()
+            """Insert or upgrade a PRE_SALE lead. Returns action string.
 
-            # Don't downgrade post-sale leads
-            if existing and existing["data_grade"] in ("GOLD", "SILVER"):
-                return "skipped"
+            SOTA quality gates:
+            - Always capture: case_number from GovSoft Active filter is the source of truth
+            - Accept without scheduled_sale_date (rare parse miss — still valuable to track)
+            - Reject only confirmed PAST dates (sale already happened; handled by date_window)
+            - Never downgrade GOLD/SILVER post-sale leads
+            """
+            from datetime import date as _date
 
             opening_bid = fields.get("opening_bid", 0.0) or 0.0
             sched_date = fields.get("scheduled_sale_date")
-            owner_name = fields.get("owner_name", "")
-            prop_addr = fields.get("property_address", "")
-            lender_name = fields.get("lender_name", "")
+            owner_name = (fields.get("owner_name") or "").strip()
+            prop_addr = (fields.get("property_address") or "").strip()
+            lender_name = (fields.get("lender_name") or "").strip()
+
+            # ── Quality gate: only hard-reject confirmed past sales ──────────
+            # Missing date = parse miss (GovSoft HTML variation) — still accept
+            if sched_date:
+                try:
+                    sched_dt = _date.fromisoformat(sched_date[:10])
+                    if sched_dt < _date.today():
+                        log.debug(
+                            "[presale] %s %s — skipped: confirmed past date %s",
+                            self.county, case_number, sched_date,
+                        )
+                        return "skipped_past_date"
+                except (ValueError, TypeError):
+                    # Unparseable — keep the raw string, still insert
+                    log.debug(
+                        "[presale] %s %s — date parse failed: %r (will store NULL)",
+                        self.county, case_number, sched_date,
+                    )
+                    sched_date = None
+
+            asset_id_val = _asset_id(self.county, case_number)
+            existing = self._conn.execute(
+                "SELECT id, data_grade, processing_status FROM leads WHERE county=? AND case_number=?",
+                [self.county, case_number],
+            ).fetchone()
+
+            # Don't downgrade confirmed post-sale leads
+            if existing and existing["data_grade"] in ("GOLD", "SILVER"):
+                log.debug("[presale] %s %s — skip downgrade (grade=%s)", self.county, case_number, existing["data_grade"])
+                return "skipped_gold_silver"
             now_ts = datetime.now(timezone.utc).isoformat()
 
             if existing:
+                # Merge: prefer new non-null values, keep existing where new is empty
                 self._conn.execute(
                     """UPDATE leads SET
-                        processing_status=?,
-                        scheduled_sale_date=COALESCE(?,scheduled_sale_date),
-                        opening_bid=COALESCE(NULLIF(?,0), opening_bid),
-                        owner_name=COALESCE(NULLIF(?,'')||NULLIF('',NULLIF(?,''))||NULL, owner_name),
-                        property_address=COALESCE(NULLIF(?,'')||(NULLIF('',NULLIF(?,'')))||NULL, property_address),
-                        lender_name=COALESCE(NULLIF(?,'')||(NULLIF('',NULLIF(?,'')))||NULL, lender_name),
-                        ned_source='govsoft_active',
-                        updated_at=?
+                        processing_status      = 'PRE_SALE',
+                        scheduled_sale_date    = COALESCE(?, scheduled_sale_date),
+                        opening_bid            = CASE WHEN ? > 0 THEN ? ELSE opening_bid END,
+                        owner_name             = CASE WHEN ? != '' THEN ? ELSE owner_name END,
+                        property_address       = CASE WHEN ? != '' THEN ? ELSE property_address END,
+                        lender_name            = CASE WHEN ? != '' THEN ? ELSE lender_name END,
+                        ned_source             = 'govsoft_active',
+                        updated_at             = ?
                        WHERE county=? AND case_number=?""",
                     [
-                        "PRE_SALE",
-                        sched_date, opening_bid,
+                        sched_date,
+                        opening_bid, opening_bid,
                         owner_name, owner_name,
                         prop_addr, prop_addr,
                         lender_name, lender_name,
@@ -1674,33 +1783,33 @@ class GovSoftEngine:
                 return "upgraded"
 
             from uuid import uuid4 as _uuid4
-            data_grade = "BRONZE"  # Pre-sale — no confirmed overbid yet
             new_id = str(_uuid4())
             self._conn.execute(
                 """INSERT INTO leads
                     (id, county, case_number, owner_name, property_address, lender_name,
                      opening_bid, scheduled_sale_date, data_grade, processing_status,
-                     ned_source, ingestion_source, surplus_stream, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     ned_source, ingestion_source, surplus_stream, status,
+                     verification_state, pool_source, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,'BRONZE','PRE_SALE',
+                           'govsoft_active','govsoft','FORECLOSURE_OVERBID',
+                           'STAGED','RAW','UNVERIFIED',?)""",
                 [
                     new_id, self.county, case_number,
-                    owner_name, prop_addr, lender_name,
+                    owner_name or None, prop_addr or None, lender_name or None,
                     opening_bid, sched_date,
-                    data_grade, "PRE_SALE",
-                    "govsoft_active", "govsoft",
-                    "FORECLOSURE_OVERBID", now_ts,
+                    now_ts,
                 ],
             )
-            # Backfill asset_registry so gauntlet invariant (registry >= leads) holds.
-            # PRE_SALE is not a valid registry processing_status — map to PENDING.
+            # Backfill asset_registry — PRE_SALE maps to PENDING in registry
             self._conn.execute(
                 """INSERT OR IGNORE INTO asset_registry
                        (asset_id, engine_type, source_table, source_id, county, state,
                         amount_cents, event_ts, processing_status, surplus_stream)
                    VALUES (?, 'FORECLOSURE', 'leads', ?, ?, 'CO', 0, ?, 'PENDING', 'FORECLOSURE_OVERBID')""",
-                [new_id, new_id, self.county,
-                 int(__import__('time').time())],
+                [new_id, new_id, self.county, int(__import__('time').time())],
             )
+            log.info("[presale] %s/%s INSERTED — sched=%s bid=$%s owner=%r",
+                     self.county, case_number, sched_date, opening_bid, owner_name or "")
             return "inserted"
 
         async with async_playwright() as pw:

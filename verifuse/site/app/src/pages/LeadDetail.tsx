@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
-import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, getAssetEvidence, downloadEvidenceDoc, getLeadAudit, type Lead, type UnlockResponse, type EvidenceDoc, type LeadAuditTrail, ApiError } from "../lib/api";
+import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, getAssetEvidence, downloadEvidenceDoc, getLeadAudit, API_BASE, type Lead, type UnlockResponse, type EvidenceDoc, type LeadAuditTrail, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import ClassificationBadge from "../components/ClassificationBadge";
 import { toast } from "../components/Toast";
@@ -44,6 +44,65 @@ export default function LeadDetail() {
   const [auditTrail, setAuditTrail] = useState<LeadAuditTrail | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
+
+  // Case timeline (2C)
+  const [showTimeline, setShowTimeline] = useState(false);
+  const [timeline, setTimeline] = useState<any[]>([]);
+
+  // Title stack (4C)
+  const [showTitleStack, setShowTitleStack] = useState(false);
+  const [titleStack, setTitleStack] = useState<any>(null);
+
+  // Add to pipeline (4A)
+  const [showPipelineModal, setShowPipelineModal] = useState(false);
+
+  function _apiBase(): string { return API_BASE || ""; }
+  function _token(): string { return localStorage.getItem("vf_token") || ""; }
+
+  async function loadTimeline() {
+    if (!showTimeline) {
+      try {
+        const res = await fetch(`${_apiBase()}/api/lead/${assetId}/timeline`, { headers: { Authorization: `Bearer ${_token()}` } });
+        if (res.ok) setTimeline(await res.json() || []);
+        else setTimeline([]);
+      } catch { setTimeline([]); }
+      setShowTimeline(true);
+    } else {
+      setShowTimeline(false);
+    }
+  }
+
+  async function loadTitleStack() {
+    if (!showTitleStack) {
+      try {
+        const res = await fetch(`${_apiBase()}/api/lead/${assetId}/title-stack`, { headers: { Authorization: `Bearer ${_token()}` } });
+        if (res.ok) setTitleStack(await res.json());
+        else setTitleStack(null);
+      } catch { setTitleStack(null); }
+      setShowTitleStack(true);
+    } else {
+      setShowTitleStack(false);
+    }
+  }
+
+  async function addToPipeline(stage: string) {
+    try {
+      const res = await fetch(`${_apiBase()}/api/my-cases`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${_token()}` },
+        body: JSON.stringify({ asset_id: assetId, stage }),
+      });
+      if (res.ok) {
+        toast(`Added to your pipeline as ${stage.replace(/_/g, " ")}`, "success");
+        setShowPipelineModal(false);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        toast(body.detail || "Failed to add to pipeline", "error");
+      }
+    } catch {
+      toast("Failed to add to pipeline", "error");
+    }
+  }
 
   useEffect(() => {
     if (!assetId) return;
@@ -182,20 +241,45 @@ export default function LeadDetail() {
                     ATTORNEY READY
                   </span>
                 )}
+                {(lead as any).quality_badge && (
+                  <span
+                    className={`quality-badge quality-${((lead as any).quality_badge as string).toLowerCase()}`}
+                    style={{
+                      fontSize: "0.7rem", padding: "0.2rem 0.5rem", borderRadius: "0.25rem", marginLeft: "0.5rem",
+                      background: (lead as any).quality_badge === "VERIFIED" ? "#16a34a22" : (lead as any).quality_badge === "PARTIAL" ? "#d9770622" : "#64748b22",
+                      color: (lead as any).quality_badge === "VERIFIED" ? "#16a34a" : (lead as any).quality_badge === "PARTIAL" ? "#d97706" : "#64748b",
+                      border: `1px solid ${(lead as any).quality_badge === "VERIFIED" ? "#16a34a44" : (lead as any).quality_badge === "PARTIAL" ? "#d9770644" : "#64748b44"}`,
+                    }}
+                  >
+                    {(lead as any).quality_badge}
+                  </span>
+                )}
+                {(lead as any).opportunity_score != null && (
+                  <span style={{
+                    fontSize: "0.75rem", padding: "0.2rem 0.5rem", borderRadius: "0.25rem", marginLeft: "0.5rem",
+                    background: (lead as any).opportunity_score >= 7 ? "#16a34a22" : (lead as any).opportunity_score >= 4 ? "#d9770622" : "#64748b22",
+                    color: (lead as any).opportunity_score >= 7 ? "#16a34a" : (lead as any).opportunity_score >= 4 ? "#d97706" : "#64748b",
+                    border: "1px solid currentColor",
+                  }}>
+                    OPPORTUNITY: {(lead as any).opportunity_score}/10
+                  </span>
+                )}
               </div>
               {isRestricted ? (
                 <span className="restriction-badge">
-                  RESTRICTED — {lead.days_until_actionable} DAYS
+                  WINDOW NOT YET OPEN — {lead.days_until_actionable} DAYS
                 </span>
               ) : lead.restriction_status === "UNKNOWN" ? (
                 <span className="status-badge" style={{ background: "#374151", color: "#9ca3af" }}>
                   SALE DATE PENDING
                 </span>
+              ) : lead.deadline_passed ? (
+                <span className={`timer-badge expired`}>
+                  WINDOW CLOSED
+                </span>
               ) : lead.days_to_claim != null ? (
-                <span className={`timer-badge ${lead.days_to_claim < 60 ? "urgent" : ""} ${lead.deadline_passed ? "expired" : ""}`}>
-                  {lead.deadline_passed
-                    ? "DEADLINE PASSED"
-                    : `${lead.days_to_claim} DAYS TO CLAIM`}
+                <span className={`timer-badge ${lead.days_to_claim < 60 ? "urgent" : ""}`}>
+                  {`${lead.days_to_claim} DAYS TO CLAIM`}
                 </span>
               ) : null}
             </div>
@@ -268,19 +352,112 @@ export default function LeadDetail() {
               </div>
             )}
 
-            {/* 180-DAY CLAIM DEADLINE */}
-            {!isRestricted && lead.claim_deadline && (
-              <div className={`deadline-banner ${lead.deadline_passed ? "passed" : lead.days_to_claim != null && lead.days_to_claim < 60 ? "urgent" : ""}`}>
-                <strong>C.R.S. § 38-38-111 CLAIM DEADLINE:</strong>{" "}
-                {lead.claim_deadline}
-                {lead.days_to_claim != null && !lead.deadline_passed && (
-                  <span> — {lead.days_to_claim} days remaining</span>
-                )}
-                {lead.deadline_passed && (
-                  <span> — EXPIRED. Funds may have escheated to the state.</span>
-                )}
+            {/* CLAIM WINDOW PANEL */}
+            {!isRestricted && lead.claim_deadline && (() => {
+              const days = lead.days_to_claim;
+              const passed = lead.deadline_passed;
+              const urgencyColor = passed ? "#ef4444"
+                : days != null && days <= 180 ? "#ef4444"
+                : days != null && days <= 365 ? "#f59e0b"
+                : "#22c55e";
+              const urgencyLabel = passed ? "EXPIRED — FILE IMMEDIATELY"
+                : days != null && days <= 180 ? "URGENT — ACT NOW"
+                : days != null && days <= 365 ? "PLAN AHEAD"
+                : "AMPLE TIME";
+              // Progress bar: 30 months = 912 days total window
+              const totalDays = 912;
+              const elapsed = passed ? totalDays : Math.max(0, totalDays - (days ?? totalDays));
+              const pct = Math.min(100, Math.round(elapsed / totalDays * 100));
+              return (
+                <div style={{
+                  background: "#0f172a", border: `1px solid ${urgencyColor}40`,
+                  borderRadius: 8, padding: "14px 16px", marginBottom: 12,
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                    <div style={{ fontSize: "0.68em", letterSpacing: "0.1em", color: "#64748b" }}>
+                      C.R.S. § 38-38-111 CLAIM WINDOW
+                    </div>
+                    <div style={{ fontSize: "0.75em", fontWeight: 700, color: urgencyColor, letterSpacing: "0.06em" }}>
+                      {urgencyLabel}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                    <div style={{ fontSize: "0.85em", color: "#e5e7eb" }}>
+                      Deadline: <strong>{lead.claim_deadline}</strong>
+                    </div>
+                    {!passed && days != null && (
+                      <div style={{ fontSize: "1.1em", fontWeight: 700, color: urgencyColor }}>
+                        {days} days remaining
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ background: "#1f2937", borderRadius: 4, height: 6, overflow: "hidden" }}>
+                    <div style={{
+                      width: `${pct}%`, height: "100%", borderRadius: 4,
+                      background: urgencyColor, transition: "width 0.3s",
+                    }} />
+                  </div>
+                  <div style={{ fontSize: "0.72em", color: "#64748b", marginTop: 4 }}>
+                    {pct}% of 30-month window elapsed
+                    {passed && " — Funds may have escheated to the state."}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* CASE TIMELINE (2C) */}
+            <div className="panel timeline-panel" style={{ marginTop: "1rem", border: "1px solid #374151", borderRadius: 8, marginBottom: 8 }}>
+              <div className="panel-header" onClick={loadTimeline} style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", padding: "10px 14px", borderBottom: showTimeline ? "1px solid #374151" : "none" }}>
+                <h3 style={{ margin: 0, fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.6 }}>CASE TIMELINE</h3>
+                <span style={{ color: "#64748b", fontSize: "0.85em" }}>{showTimeline ? "▲" : "▼"}</span>
               </div>
-            )}
+              {showTimeline && (
+                <div style={{ padding: "1rem" }}>
+                  {timeline.length === 0 ? (
+                    <p style={{ color: "#64748b", fontSize: "0.85rem", margin: 0 }}>No timeline events recorded.</p>
+                  ) : timeline.map((ev: any, i: number) => (
+                    <div key={i} style={{ display: "flex", gap: "1rem", padding: "0.5rem 0", borderBottom: "1px solid #1f2937" }}>
+                      <span style={{ fontSize: "0.75rem", color: "#64748b", minWidth: "120px" }}>{ev.ts ? new Date(ev.ts).toLocaleDateString() : "—"}</span>
+                      <span style={{ fontSize: "0.8rem", fontWeight: 600, minWidth: "120px", color: "#22c55e" }}>{ev.event_type}</span>
+                      <span style={{ fontSize: "0.8rem", color: "#9ca3af" }}>{ev.notes}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* TITLE STACK (4C) */}
+            <div className="panel" style={{ marginTop: "0.5rem", border: "1px solid #374151", borderRadius: 8, marginBottom: 8 }}>
+              <div className="panel-header" onClick={loadTitleStack} style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", padding: "10px 14px", borderBottom: showTitleStack ? "1px solid #374151" : "none" }}>
+                <h3 style={{ margin: 0, fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.6 }}>TITLE STACK</h3>
+                <span style={{ color: "#64748b", fontSize: "0.85em" }}>{showTitleStack ? "▲" : "▼"}</span>
+              </div>
+              {showTitleStack && titleStack && (
+                <div style={{ padding: "1rem" }}>
+                  <div style={{ display: "flex", gap: "1rem", marginBottom: "0.75rem", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: "0.85rem" }}>Risk: <strong style={{ color: titleStack.risk_score === "LOW" ? "#16a34a" : titleStack.risk_score === "HIGH" ? "#dc2626" : "#d97706" }}>{titleStack.risk_score}</strong></span>
+                    <span style={{ fontSize: "0.85rem" }}>Open liens: <strong>{titleStack.liens?.filter((l: any) => l.is_open).length || 0}</strong></span>
+                    <span style={{ fontSize: "0.85rem" }}>Total open: <strong>${((titleStack.total_open_cents || 0) / 100).toLocaleString()}</strong></span>
+                  </div>
+                  {(titleStack.liens || []).map((lien: any, i: number) => (
+                    <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr 80px", gap: "0.5rem", padding: "0.5rem 0", borderBottom: "1px solid #1f2937", fontSize: "0.8rem" }}>
+                      <span style={{ color: "#9ca3af" }}>#{lien.priority}</span>
+                      <span>{lien.lienholder_name || lien.lien_type}</span>
+                      <span>${((lien.amount_cents || 0) / 100).toLocaleString()}</span>
+                      <span style={{ color: lien.is_open ? "#dc2626" : "#16a34a" }}>{lien.is_open ? "OPEN" : "SATISFIED"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {showTitleStack && !titleStack && (
+                <div style={{ padding: "1rem" }}>
+                  <p style={{ color: "#64748b", fontSize: "0.85rem", margin: 0 }}>No title stack data available for this asset.</p>
+                </div>
+              )}
+            </div>
+
+            {/* Territory warning placeholder (4E) */}
+            {/* In production, check /api/territories for county overlap */}
 
             <div className="detail-grid">
               <div className="detail-field">
@@ -292,12 +469,12 @@ export default function LeadDetail() {
                 <span>{lead.sale_date || "\u2014"}</span>
               </div>
               <div className="detail-field">
-                <label>Restriction Status</label>
+                <label>FILING WINDOW STATUS</label>
                 <span style={{
                   color: isRestricted ? "#ef4444" : isExpired ? "#6b7280" : "#22c55e",
                   fontWeight: 600,
                 }}>
-                  {isRestricted ? "DATA ACCESS ONLY" : isExpired ? "EXPIRED" : "ESCROW ENDED"}
+                  {isRestricted ? "WINDOW NOT YET OPEN" : isExpired ? "WINDOW CLOSED" : "ESCROW ENDED"}
                 </span>
               </div>
               {lead.sale_status && (
@@ -470,6 +647,28 @@ export default function LeadDetail() {
                       </button>
                     </div>
                     {verifyMsg && <p className="verify-msg">{verifyMsg}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ADD TO MY PIPELINE (4A) */}
+            {user && (
+              <div style={{ marginTop: 12 }}>
+                <button onClick={() => setShowPipelineModal(true)} className="btn btn-secondary" style={{ fontSize: "0.82em", padding: "8px 16px", background: "none", border: "1px solid #374151", color: "#9ca3af", borderRadius: 6, cursor: "pointer", fontFamily: "monospace" }}>
+                  + ADD TO MY PIPELINE
+                </button>
+                {showPipelineModal && (
+                  <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200 }}>
+                    <div style={{ background: "#1e293b", padding: "2rem", borderRadius: "0.75rem", minWidth: "300px", border: "1px solid #374151" }}>
+                      <h3 style={{ marginBottom: "1rem", fontSize: "0.95em" }}>Add to Pipeline</h3>
+                      {["LEADS", "CONTACTED", "RETAINER_SIGNED", "FILED", "FUNDS_RELEASED"].map((stage) => (
+                        <button key={stage} onClick={() => addToPipeline(stage)} style={{ display: "block", width: "100%", marginBottom: "0.5rem", padding: "8px 16px", background: "#0f172a", border: "1px solid #374151", color: "#e5e7eb", borderRadius: 6, cursor: "pointer", fontFamily: "monospace", fontSize: "0.82em", textAlign: "left" }}>
+                          {stage.replace(/_/g, " ")}
+                        </button>
+                      ))}
+                      <button onClick={() => setShowPipelineModal(false)} style={{ display: "block", width: "100%", marginTop: "0.5rem", padding: "8px 16px", background: "none", border: "1px solid #374151", color: "#64748b", borderRadius: 6, cursor: "pointer", fontFamily: "monospace", fontSize: "0.82em" }}>Cancel</button>
+                    </div>
                   </div>
                 )}
               </div>

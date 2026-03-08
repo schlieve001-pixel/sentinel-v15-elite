@@ -183,7 +183,7 @@ export default function Landing() {
         <h2>What You Get</h2>
         <div className="steps-grid">
           <div className="step-card">
-            <h3>Exact surplus amounts — down to the penny</h3>
+            <h3>Verified surplus amounts with full source documentation</h3>
           </div>
           <div className="step-card">
             <h3>County, sale date, grade — free to preview</h3>
@@ -285,6 +285,7 @@ export default function Landing() {
           <span>Unused credits roll over 30 days</span>
           <span>Founding member rates locked in</span>
         </div>
+        <p className="stripe-badge">🔒 Secure payments powered by Stripe</p>
       </section>
 
       {/* Legal Disclaimer */}
@@ -297,7 +298,7 @@ export default function Landing() {
           38-13-1301, and does not claim any interest in surplus funds. Users are
           responsible for ensuring compliance with all applicable state and
           federal regulations, including: the 6-month post-sale contact
-          restriction under C.R.S. § 38-38-111(5); the 24-month lockout on
+          restriction under C.R.S. § 38-38-111(5); the 30-month claim window under C.R.S. § 38-38-111 on
           finder agreements after transfer to the State Treasurer under C.R.S. §
           38-13-1304; and the 10% maximum finder fee cap under C.R.S. §
           38-13-1304(1)(b)(IV) as amended by HB25-1224 (eff. June 4, 2025).

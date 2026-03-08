@@ -125,6 +125,20 @@ for lead in r['leads']:
     fi
     ;;
 
+  # pre-sale-scan: alias for pending-sales (plan A5 / C1 naming)
+  # Usage: bin/vf pre-sale-scan [--county jefferson] [--all-counties]
+  pre-sale-scan)
+    shift
+    if [[ "${1:-}" == "--all-counties" ]]; then
+      for county in adams arapahoe boulder broomfield douglas eagle el_paso gilpin jefferson larimer mesa weld; do
+        echo "[pre-sale-scan] Running county=$county ..."
+        flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --pending-sales --county "$county" || true
+      done
+    else
+      flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --pending-sales "$@"
+    fi
+    ;;
+
   # SALE_INFO backfill — re-scrapes BRONZE leads missing SALE_INFO tab
   # Promotes leads to GOLD/SILVER when overbid is confirmed
   # Usage: bin/vf sale-info-backfill --county jefferson [--limit 50]
@@ -253,6 +267,190 @@ conn.close()
 "
     ;;
 
+  # Coverage report — print all county_profiles with status and lead counts
+  # Usage: bin/vf coverage-report
+  coverage-report)
+    python3 - <<'PYEOF'
+import sqlite3, os
+DB = os.environ.get("VERIFUSE_DB_PATH", "verifuse_v2/data/verifuse_v2.db")
+conn = sqlite3.connect(DB)
+conn.row_factory = sqlite3.Row
+rows = conn.execute("""
+    SELECT cp.county, cp.platform_type, cp.access_method,
+           COUNT(CASE WHEN l.data_grade='GOLD' THEN 1 END) as gold,
+           COUNT(CASE WHEN l.data_grade='SILVER' THEN 1 END) as silver,
+           COUNT(CASE WHEN l.data_grade='BRONZE' THEN 1 END) as bronze,
+           COUNT(l.id) as total
+    FROM county_profiles cp
+    LEFT JOIN leads l ON l.county = cp.county
+    GROUP BY cp.county ORDER BY cp.county
+""").fetchall()
+print(f"{'COUNTY':<20} {'PLATFORM':<12} {'ACCESS':<12} {'GOLD':>4} {'SILVER':>6} {'BRONZE':>6} {'TOTAL':>6}")
+print("-" * 75)
+for r in rows:
+    print(f"{r['county']:<20} {r['platform_type'] or 'unknown':<12} {r['access_method'] or 'unknown':<12} {r['gold']:>4} {r['silver']:>6} {r['bronze']:>6} {r['total']:>6}")
+print(f"\nTotal counties: {len(rows)} | Active coverage: {sum(1 for r in rows if r['gold'] > 0 or r['silver'] > 0)}")
+conn.close()
+PYEOF
+    ;;
+
+  # PDF intake — submit a PDF file for a paper-only county
+  # Usage: bin/vf pdf-intake [county] [pdf_path] [case_number] [overbid_amount]
+  pdf-intake)
+    shift
+    COUNTY="${1:-}"
+    PDF_PATH="${2:-}"
+    CASE_NUMBER="${3:-}"
+    OVERBID="${4:-}"
+    if [[ -z "$COUNTY" || -z "$PDF_PATH" || -z "$CASE_NUMBER" ]]; then
+      echo "Usage: vf pdf-intake COUNTY PDF_PATH CASE_NUMBER [OVERBID_AMOUNT]"
+      exit 1
+    fi
+    BASE_URL="${VERIFUSE_API_URL:-http://localhost:8000}"
+    curl -s -X POST "${BASE_URL}/api/intake/pdf-upload" \
+      -F "file=@${PDF_PATH}" \
+      -F "county=${COUNTY}" \
+      -F "case_number=${CASE_NUMBER}" \
+      $([ -n "$OVERBID" ] && echo "-F overbid_amount=${OVERBID}") \
+      | python3 -m json.tool
+    ;;
+
+  # Research county — try common URL patterns to identify platform
+  # Usage: bin/vf research-county COUNTY_SLUG
+  research-county)
+    shift
+    COUNTY="${1:-}"
+    if [[ -z "$COUNTY" ]]; then
+      echo "Usage: vf research-county COUNTY_SLUG (e.g. montrose, pueblo)"
+      exit 1
+    fi
+    echo "[research-county] Probing $COUNTY for known platform patterns..."
+    # Try common GovSoft/GTSData patterns
+    for URL in \
+      "https://foreclosures.${COUNTY}gov.org/" \
+      "https://foreclosures.${COUNTY}co.us/" \
+      "https://public.${COUNTY}co.us/foreclosures/" \
+      "https://${COUNTY}.gtsdata.com/" \
+      "https://foreclosure.${COUNTY}county.org/"; do
+      STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 "$URL" 2>/dev/null || echo "ERR")
+      echo "  [$STATUS] $URL"
+    done
+    ;;
+
+  # Scraper run for a specific county (date-window alias)
+  # Usage: bin/vf scraper-run COUNTY [--days N]
+  scraper-run)
+    shift
+    COUNTY="${1:-}"
+    if [[ -z "$COUNTY" ]]; then
+      echo "Usage: vf scraper-run COUNTY [--days N]"
+      exit 1
+    fi
+    shift
+    flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --date-window --county "$COUNTY" "$@"
+    ;;
+
+  # promote-presale: Scan existing leads with future sale_date → PRE_SALE status
+  # No Playwright required — pure DB operation. Run any time.
+  # Usage: bin/vf promote-presale [--county jefferson] [--dry-run]
+  promote-presale)
+    shift
+    COUNTY_ARG=""
+    DRY_RUN=""
+    for arg in "$@"; do
+      [[ "$arg" == "--dry-run" ]] && DRY_RUN="1"
+      [[ "$arg" == --county=* ]] && COUNTY_ARG="${arg#--county=}"
+      [[ "$arg" == "--county" ]] && next=1
+      [[ "${next:-}" == "1" ]] && COUNTY_ARG="$arg" && next=""
+    done
+    python3 - "$@" <<'PYEOF'
+import sys, sqlite3, os
+from datetime import date
+
+dry_run = "--dry-run" in sys.argv
+county_filter = None
+args = sys.argv[1:]
+for i, a in enumerate(args):
+    if a == "--county" and i+1 < len(args):
+        county_filter = args[i+1]
+    elif a.startswith("--county="):
+        county_filter = a.split("=",1)[1]
+
+DB = os.environ.get("VERIFUSE_DB_PATH", "verifuse_v2/data/verifuse_v2.db")
+conn = sqlite3.connect(DB)
+conn.row_factory = sqlite3.Row
+
+where = ""
+params = []
+if county_filter:
+    where = " AND county = ?"
+    params.append(county_filter)
+
+# Count candidates first
+candidates = conn.execute(f"""
+    SELECT id, county, case_number, sale_date, scheduled_sale_date
+    FROM leads
+    WHERE processing_status != 'PRE_SALE'
+      AND data_grade NOT IN ('GOLD','SILVER')
+      AND (
+          (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now'))
+          OR (sale_date IS NOT NULL AND sale_date > date('now'))
+      ){where}
+""", params).fetchall()
+
+print(f"promote-presale: {len(candidates)} candidates found" + (f" (county={county_filter})" if county_filter else ""))
+for r in candidates[:20]:
+    print(f"  {r['county']:12s} {(r['case_number'] or '')[:15]:15s} sale={r['sale_date']} sched={r['scheduled_sale_date']}")
+if len(candidates) > 20:
+    print(f"  ... and {len(candidates)-20} more")
+
+if dry_run:
+    print("(dry-run — no changes made)")
+else:
+    if candidates:
+        conn.execute(f"""
+            UPDATE leads SET
+                processing_status = 'PRE_SALE',
+                ned_source = COALESCE(ned_source, 'date_window_future'),
+                updated_at = datetime('now')
+            WHERE processing_status != 'PRE_SALE'
+              AND data_grade NOT IN ('GOLD','SILVER')
+              AND (
+                  (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now'))
+                  OR (sale_date IS NOT NULL AND sale_date > date('now'))
+              ){where}
+        """, params)
+        conn.commit()
+        print(f"promote-presale: {len(candidates)} leads set to PRE_SALE")
+
+        total = conn.execute("SELECT COUNT(*) FROM leads WHERE processing_status='PRE_SALE'").fetchone()[0]
+        print(f"promote-presale: total PRE_SALE leads = {total}")
+    else:
+        print("promote-presale: nothing to do")
+conn.close()
+PYEOF
+    ;;
+
+  # ops-jobs: list recent admin ops center jobs
+  # Usage: bin/vf ops-jobs [--limit 20]
+  ops-jobs)
+    shift
+    LIMIT="${1:-20}"
+    DB_PATH="${VERIFUSE_DB_PATH:-verifuse_v2/data/verifuse_v2.db}"
+    sqlite3 "$DB_PATH" -column -header "
+      SELECT substr(id,1,8)||'...' as id,
+             command,
+             COALESCE(county,'—') as county,
+             status,
+             datetime(triggered_at,'unixepoch') as triggered,
+             CASE WHEN finished_at AND started_at THEN (finished_at-started_at)||'s' ELSE '—' END as duration,
+             exit_code
+      FROM ops_jobs
+      ORDER BY triggered_at DESC
+      LIMIT ${LIMIT};
+    "
+    ;;
+
   deploy)
     echo "[vf deploy] Gate 9 deployment sequence. Run each step manually and verify:"
     echo ""
@@ -287,9 +485,12 @@ Required commands:
   extract-batch           Gate 4 batch extraction on BRONZE leads (--county --limit)
   gate4-run-all           Full Gate 4 pipeline: Phase 1 (adams/weld/douglas/gilpin/arapahoe/denver) + Phase 2 (jefferson/boulder/broomfield with SALE_INFO backfill)
   pending-sales           Scrape Active/Pending pre-sale cases (--county or --all-counties)
+  pre-sale-scan           Alias for pending-sales (--county or --all-counties)
   sale-info-backfill      Re-scrape BRONZE leads missing SALE_INFO (--county --limit)
   denver-scrape           Denver Public Trustee PDF scraper (--dry-run to preview)
   promote-eligible        Promote SILVER → GOLD when 6-month restriction expires (--dry-run)
+  promote-presale         Scan existing leads with future sale_date → PRE_SALE status (--dry-run, --county)
+  ops-jobs                List recent Admin Ops Center job runs
   status                  Show API + scraper timer systemd status
   backup-db               SQLite online backup (timestamped .bak file)
 
@@ -298,6 +499,10 @@ Optional commands:
   tail-ingest             Alias for logs-scraper
   rebuild-frontend        npm ci + npm run build in verifuse/site/app
   deploy                  Print Gate 9 deploy checklist (manual confirmation required)
+  coverage-report         Print all 64 counties with status and lead counts
+  pdf-intake              Submit a PDF for paper-only county (COUNTY PDF_PATH CASE_NUMBER [OVERBID])
+  research-county         Probe URL patterns to identify county platform (COUNTY_SLUG)
+  scraper-run             Run date-window scraper for a specific county
 
 Examples:
   vf migrate

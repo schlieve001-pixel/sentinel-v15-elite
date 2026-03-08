@@ -1,0 +1,37 @@
+IN THE DISTRICT COURT, {{court_district}} JUDICIAL DISTRICT
+STATE OF COLORADO, {{county_upper}} COUNTY
+
+Case No.: {{case_number}}
+
+AFFIDAVIT OF REPRESENTATION
+
+STATE OF COLORADO  )
+                   ) ss.
+COUNTY OF {{county_upper}} )
+
+I, {{attorney_name}}, being first duly sworn on oath, depose and state as follows:
+
+1. I am an attorney licensed to practice law in the State of Colorado, Colorado Bar No. {{attorney_bar_number}}.
+
+2. I represent {{claimant_name}} ("Claimant") in connection with a claim to overbid funds (C.R.S. § 38-38-111) resulting from the Public Trustee's Sale of the property located at {{property_address}}, {{county_name}} County, Colorado, conducted on {{sale_date}}.
+
+3. Pursuant to HB25-1224 (effective June 4, 2025), I have disclosed to my client that attorney fees in connection with the recovery of overbid funds (C.R.S. § 38-38-111) shall not exceed ten percent (10%) of the funds actually recovered.
+
+4. To the best of my knowledge and belief, Claimant's claim to the overbid funds (C.R.S. § 38-38-111) is valid and supported by applicable Colorado law, including C.R.S. § 38-38-111.
+
+5. I have conducted reasonable inquiry and am not aware of any superior claims to the overbid funds (C.R.S. § 38-38-111) that would defeat Claimant's entitlement.
+
+FURTHER AFFIANT SAYETH NOT.
+
+_______________________________
+{{attorney_name}}
+Colorado Bar No. {{attorney_bar_number}}
+{{attorney_firm}}
+
+Subscribed and sworn to before me this ____ day of __________, 20____.
+
+_______________________________
+Notary Public
+My Commission Expires: ____________
+
+Date: {{filing_date}}

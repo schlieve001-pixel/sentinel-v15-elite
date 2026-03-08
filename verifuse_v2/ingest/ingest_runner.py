@@ -85,12 +85,13 @@ async def _run_single_case(conn, county: str, case_number: str) -> dict:
     from verifuse_v2.scrapers.adapters.govsoft_engine import GovSoftEngine
 
     run_id = str(uuid4())
+    _run_start_ts = int(time.time())
     conn.execute(
         """INSERT INTO ingestion_runs
            (run_id, county, start_ts, status, cases_processed, cases_failed)
            VALUES (?,?,?,'RUNNING',0,0)
         """,
-        [run_id, county, int(time.time())],
+        [run_id, county, _run_start_ts],
     )
     conn.commit()
     log.info("ingestion_run started: run_id=%s county=%s case=%s", run_id, county, case_number)
@@ -116,18 +117,23 @@ async def _run_single_case(conn, county: str, case_number: str) -> dict:
         final_status = "FAILED"
         log.exception("Ingestion run failed: %s", exc)
     finally:
+        _end_ts = int(time.time())
+        _browser = 1  # single-case always visits exactly 1 case
+        _db = cases_processed
         conn.execute(
             """UPDATE ingestion_runs
-               SET end_ts=?, status=?, cases_processed=?, cases_failed=?
+               SET end_ts=?, status=?, cases_processed=?, cases_failed=?,
+                   run_duration_s=?, browser_count=?, db_count=?, delta=?, mode=?
                WHERE run_id=?
             """,
-            [int(time.time()), final_status, cases_processed, cases_failed, run_id],
+            [_end_ts, final_status, cases_processed, cases_failed,
+             _end_ts - _run_start_ts, _browser, _db, _browser - _db, "single_case", run_id],
         )
         conn.commit()
 
     log.info(
-        "ingestion_run complete: run_id=%s status=%s processed=%d failed=%d",
-        run_id, final_status, cases_processed, cases_failed,
+        "ingestion_run complete: run_id=%s status=%s processed=%d failed=%d duration=%ds",
+        run_id, final_status, cases_processed, cases_failed, int(time.time()) - _run_start_ts,
     )
     return {
         "run_id": run_id,
@@ -142,13 +148,14 @@ async def _run_date_window(conn, county: str, date_from: str, date_to: str) -> d
     from verifuse_v2.scrapers.adapters.govsoft_engine import GovSoftEngine
 
     run_id = str(uuid4())
+    _run_start_ts = int(time.time())
     conn.execute(
         """INSERT INTO ingestion_runs
            (run_id, county, start_ts, status, cases_processed, cases_failed,
             notes)
            VALUES (?,?,?,'RUNNING',0,0,?)
         """,
-        [run_id, county, int(time.time()), f"{date_from} to {date_to}"],
+        [run_id, county, _run_start_ts, f"{date_from} to {date_to}"],
     )
     conn.commit()
     log.info(
@@ -158,6 +165,7 @@ async def _run_date_window(conn, county: str, date_from: str, date_to: str) -> d
 
     cases_processed = 0
     cases_failed = 0
+    stats: dict = {}
     final_status = "FAILED"
 
     try:
@@ -171,18 +179,23 @@ async def _run_date_window(conn, county: str, date_from: str, date_to: str) -> d
         final_status = "FAILED"
         log.exception("Ingestion run failed: %s", exc)
     finally:
+        _end_ts = int(time.time())
+        _browser = stats.get("browser_count", cases_processed + cases_failed)
+        _db = stats.get("db_count", cases_processed)
         conn.execute(
             """UPDATE ingestion_runs
-               SET end_ts=?, status=?, cases_processed=?, cases_failed=?
+               SET end_ts=?, status=?, cases_processed=?, cases_failed=?,
+                   run_duration_s=?, browser_count=?, db_count=?, delta=?, mode=?
                WHERE run_id=?
             """,
-            [int(time.time()), final_status, cases_processed, cases_failed, run_id],
+            [_end_ts, final_status, cases_processed, cases_failed,
+             _end_ts - _run_start_ts, _browser, _db, _browser - _db, "date_window", run_id],
         )
         conn.commit()
 
     log.info(
-        "ingestion_run complete: run_id=%s status=%s processed=%d failed=%d",
-        run_id, final_status, cases_processed, cases_failed,
+        "ingestion_run complete: run_id=%s status=%s processed=%d failed=%d duration=%ds",
+        run_id, final_status, cases_processed, cases_failed, int(time.time()) - _run_start_ts,
     )
     return {
         "run_id": run_id,
@@ -199,12 +212,13 @@ async def _run_sequential_enum(
     from verifuse_v2.scrapers.adapters.govsoft_engine import GovSoftEngine
 
     run_id = str(uuid4())
+    _run_start_ts = int(time.time())
     conn.execute(
         """INSERT INTO ingestion_runs
            (run_id, county, start_ts, status, cases_processed, cases_failed, notes)
            VALUES (?,?,?,'RUNNING',0,0,?)
         """,
-        [run_id, county, int(time.time()), f"sequential_enum:{prefix}{start_num}..{prefix}{end_num}"],
+        [run_id, county, _run_start_ts, f"sequential_enum:{prefix}{start_num}..{prefix}{end_num}"],
     )
     log.info(
         "ingestion_run started: run_id=%s county=%s mode=sequential_enum prefix=%s num=%d..%d",
@@ -213,6 +227,7 @@ async def _run_sequential_enum(
 
     cases_processed = 0
     cases_failed = 0
+    enum_stats: dict = {}
     final_status = "FAILED"
 
     try:
@@ -225,17 +240,22 @@ async def _run_sequential_enum(
         final_status = "FAILED"
         log.exception("Sequential enum run failed: %s", exc)
     finally:
+        _end_ts = int(time.time())
+        _browser = enum_stats.get("browser_count", cases_processed + cases_failed)
+        _db = enum_stats.get("db_count", cases_processed)
         conn.execute(
             """UPDATE ingestion_runs
-               SET end_ts=?, status=?, cases_processed=?, cases_failed=?
+               SET end_ts=?, status=?, cases_processed=?, cases_failed=?,
+                   run_duration_s=?, browser_count=?, db_count=?, delta=?, mode=?
                WHERE run_id=?
             """,
-            [int(time.time()), final_status, cases_processed, cases_failed, run_id],
+            [_end_ts, final_status, cases_processed, cases_failed,
+             _end_ts - _run_start_ts, _browser, _db, _browser - _db, "sequential_enum", run_id],
         )
 
     log.info(
-        "ingestion_run complete: run_id=%s status=%s processed=%d failed=%d",
-        run_id, final_status, cases_processed, cases_failed,
+        "ingestion_run complete: run_id=%s status=%s processed=%d failed=%d duration=%ds",
+        run_id, final_status, cases_processed, cases_failed, int(time.time()) - _run_start_ts,
     )
     return {
         "run_id": run_id,
@@ -250,17 +270,19 @@ async def _run_pending_sales(conn, county: str) -> dict:
     from verifuse_v2.scrapers.adapters.govsoft_engine import GovSoftEngine
 
     run_id = str(uuid4())
+    _run_start_ts = int(time.time())
     conn.execute(
         """INSERT INTO ingestion_runs
            (run_id, county, start_ts, status, cases_processed, cases_failed, notes)
            VALUES (?,?,?,'RUNNING',0,0,'pending_sales')
         """,
-        [run_id, county, int(time.time())],
+        [run_id, county, _run_start_ts],
     )
     log.info("ingestion_run started: run_id=%s county=%s mode=pending_sales", run_id, county)
 
     cases_processed = 0
     cases_failed = 0
+    stats: dict = {}
     final_status = "FAILED"
 
     try:
@@ -279,12 +301,18 @@ async def _run_pending_sales(conn, county: str) -> dict:
         final_status = "FAILED"
         log.exception("Pending-sales run failed for %s: %s", county, exc)
     finally:
+        _end_ts = int(time.time())
+        # browser_count = cases the scraper visited; db_count = new/upgraded rows written
+        _browser = stats.get("browser_count", cases_processed + cases_failed)
+        _db = stats.get("leads_inserted", 0) + stats.get("leads_upgraded", 0) or cases_processed
         conn.execute(
             """UPDATE ingestion_runs
-               SET end_ts=?, status=?, cases_processed=?, cases_failed=?
+               SET end_ts=?, status=?, cases_processed=?, cases_failed=?,
+                   run_duration_s=?, browser_count=?, db_count=?, delta=?, mode=?
                WHERE run_id=?
             """,
-            [int(time.time()), final_status, cases_processed, cases_failed, run_id],
+            [_end_ts, final_status, cases_processed, cases_failed,
+             _end_ts - _run_start_ts, _browser, _db, _browser - _db, "pending_sales", run_id],
         )
 
     return {"run_id": run_id, "status": final_status,
@@ -296,12 +324,13 @@ async def _run_sale_info_backfill(conn, county: str, limit: int = 50) -> dict:
     from verifuse_v2.scrapers.adapters.govsoft_engine import GovSoftEngine
 
     run_id = str(uuid4())
+    _run_start_ts = int(time.time())
     conn.execute(
         """INSERT INTO ingestion_runs
            (run_id, county, start_ts, status, cases_processed, cases_failed, notes)
            VALUES (?,?,?,'RUNNING',0,0,?)
         """,
-        [run_id, county, int(time.time()), f"sale_info_backfill:limit={limit}"],
+        [run_id, county, _run_start_ts, f"sale_info_backfill:limit={limit}"],
     )
     log.info(
         "ingestion_run started: run_id=%s county=%s mode=sale_info_backfill limit=%d",
@@ -310,6 +339,7 @@ async def _run_sale_info_backfill(conn, county: str, limit: int = 50) -> dict:
 
     cases_processed = 0
     cases_failed = 0
+    stats: dict = {}
     final_status = "FAILED"
 
     try:
@@ -331,12 +361,18 @@ async def _run_sale_info_backfill(conn, county: str, limit: int = 50) -> dict:
         final_status = "FAILED"
         log.exception("Sale-info backfill failed for %s: %s", county, exc)
     finally:
+        _end_ts = int(time.time())
+        # browser_count = cases attempted; db_count = cases captured/promoted
+        _browser = stats.get("cases_attempted", cases_processed + cases_failed)
+        _db = stats.get("cases_captured", cases_processed)
         conn.execute(
             """UPDATE ingestion_runs
-               SET end_ts=?, status=?, cases_processed=?, cases_failed=?
+               SET end_ts=?, status=?, cases_processed=?, cases_failed=?,
+                   run_duration_s=?, browser_count=?, db_count=?, delta=?, mode=?
                WHERE run_id=?
             """,
-            [int(time.time()), final_status, cases_processed, cases_failed, run_id],
+            [_end_ts, final_status, cases_processed, cases_failed,
+             _end_ts - _run_start_ts, _browser, _db, _browser - _db, "sale_info_backfill", run_id],
         )
 
     return {"run_id": run_id, "status": final_status,

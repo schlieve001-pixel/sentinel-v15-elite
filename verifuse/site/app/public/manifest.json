@@ -1,0 +1,44 @@
+{
+  "name": "VeriFuse",
+  "short_name": "VeriFuse",
+  "description": "Colorado foreclosure surplus intelligence — verified overbid equity for attorneys and claimants.",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "orientation": "any",
+  "categories": ["finance", "business"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "Dashboard",
+      "short_name": "Dashboard",
+      "description": "View your leads dashboard",
+      "url": "/dashboard"
+    },
+    {
+      "name": "My Pipeline",
+      "short_name": "Pipeline",
+      "description": "View your attorney case pipeline",
+      "url": "/my-cases"
+    }
+  ]
+}

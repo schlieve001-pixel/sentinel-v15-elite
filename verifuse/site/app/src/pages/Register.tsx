@@ -3,6 +3,17 @@ import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import { ApiError } from "../lib/api";
 
+function getPasswordStrength(p: string): { score: number; label: string; color: string } {
+  let score = 0;
+  if (p.length >= 8) score++;
+  if (/[A-Z]/.test(p)) score++;
+  if (/[0-9]/.test(p)) score++;
+  if (/[^a-zA-Z0-9]/.test(p)) score++;
+  const labels = ["", "Weak", "Fair", "Strong", "Very Strong"];
+  const colors = ["", "#ef4444", "#f59e0b", "#22c55e", "#10b981"];
+  return { score, label: labels[score] || "", color: colors[score] || "#374151" };
+}
+
 export default function Register() {
   const { register } = useAuth();
   const navigate = useNavigate();
@@ -15,6 +26,7 @@ export default function Register() {
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const strength = getPasswordStrength(form.password);
 
   function update(field: string, value: string) {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -90,10 +102,25 @@ export default function Register() {
               className="forensic-input"
               value={form.password}
               onChange={(e) => update("password", e.target.value)}
-              placeholder="Min 8 characters"
+              placeholder="8+ chars, uppercase, number, symbol"
               required
-              minLength={8}
             />
+            {form.password.length > 0 && (
+              <div style={{ marginTop: 6 }}>
+                <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                  {[1, 2, 3, 4].map((i) => (
+                    <div key={i} style={{
+                      flex: 1, height: 4, borderRadius: 2,
+                      background: i <= strength.score ? strength.color : "#1f2937",
+                      transition: "background 0.2s",
+                    }} />
+                  ))}
+                </div>
+                <div style={{ fontSize: "0.75em", color: strength.color, letterSpacing: "0.05em" }}>
+                  {strength.label}
+                </div>
+              </div>
+            )}
           </div>
           <div className="input-row">
             <div className="input-group">

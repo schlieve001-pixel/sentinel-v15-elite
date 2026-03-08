@@ -50,6 +50,7 @@ interface CoverageCounty {
   silent_24h?: boolean;
   found_zero_24h?: boolean;
   last_error?: string | null;
+  last_ingestion_ts?: number | string | null;
   gold?: number;
   silver?: number;
   bronze?: number;
@@ -64,11 +65,42 @@ interface PipelineCounty {
   bronze: number;
   reject: number;
   bronze_no_sale_date: number;
-  bronze_no_overbid: number;
+  bronze_no_overbid?: number;
+  bronze_not_extracted?: number;
+  bronze_zero_overbid?: number;
   has_snapshots: number;
   platform_type: string | null;
   last_verified_ts: number | null;
+  last_ingestion_ts?: number | string | null;
   action_needed: string;
+}
+
+interface CountyHealth {
+  county: string;
+  platform_type: string;
+  total: number;
+  gold: number;
+  silver: number;
+  bronze: number;
+  gold_pct: number;
+  health_score: number;
+  sale_date_coverage_pct: number;
+  extraction_rate_pct: number;
+  evidence_pct: number;
+  last_run_age_days: number | null;
+  last_run_status: string | null;
+  browser_count: number;
+  db_count: number;
+  delta: number;
+  parser_drift: boolean;
+  alert: string | null;
+}
+
+interface CountyHealthSummary {
+  healthy: number;
+  warning: number;
+  critical: number;
+  total: number;
 }
 
 interface ScoreboardEntry {
@@ -571,7 +603,7 @@ function LeadsTab() {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82em" }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${BORDER2}` }}>
-                  {["COUNTY", "CASE #", "OWNER / ADDRESS", "SURPLUS", "GRADE", "SALE DATE", "ACTIONS"].map((h) => (
+                  {["COUNTY", "CASE #", "OWNER / ADDRESS", "SURPLUS", "CONFIDENCE", "SALE DATE", "ACTIONS"].map((h) => (
                     <th key={h} style={{
                       textAlign: h === "SURPLUS" ? "right" : "left",
                       padding: "7px 10px", color: TEXT_MUTED, fontWeight: 600, fontSize: "0.82em",
@@ -662,6 +694,18 @@ function UserRow({ u, onAction }: { u: AdminUser; onAction: () => void }) {
   const [creditNote, setCreditNote] = useState("");
   const [deactivateConfirm, setDeactivateConfirm] = useState(false);
   const [newRole, setNewRole] = useState(u.role || "public");
+  const [generatedApiKey, setGeneratedApiKey] = useState<string | null>(null);
+
+  async function generateApiKey(e: React.MouseEvent) {
+    e.stopPropagation();
+    try {
+      const res = await adminFetch<{ api_key: string }>(`/api/admin/users/${u.user_id}/generate-api-key`, { method: "POST" });
+      setGeneratedApiKey(res.api_key);
+    } catch (err: unknown) {
+      setMsg(err instanceof ApiError ? err.message : "Failed to generate API key");
+      setIsErr(true);
+    }
+  }
 
   async function toggleActive() {
     const endpoint = u.is_active ? "deactivate" : "activate";
@@ -750,6 +794,36 @@ function UserRow({ u, onAction }: { u: AdminUser; onAction: () => void }) {
         <td style={{ padding: "10px 12px", color: TEXT_MUTED, fontSize: "0.8em" }}>
           {relTime(u.last_login_at)}
         </td>
+        <td style={{ padding: "10px 12px" }} onClick={(e) => e.stopPropagation()}>
+          <button onClick={generateApiKey} style={{
+            fontSize: "0.72em", padding: "2px 8px", background: "none",
+            border: `1px solid ${BORDER2}`, color: TEXT_MUTED,
+            borderRadius: 4, cursor: "pointer", fontFamily: "monospace",
+          }}>Generate</button>
+          {generatedApiKey && (
+            <div style={{
+              position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center",
+              background: "rgba(0,0,0,0.7)",
+            }} onClick={() => setGeneratedApiKey(null)}>
+              <div style={{
+                background: BG2, border: `1px solid ${AMBER}`, borderRadius: 10, padding: "24px 28px",
+                maxWidth: 480, width: "90%",
+              }} onClick={(ev) => ev.stopPropagation()}>
+                <h3 style={{ margin: "0 0 8px", fontSize: "0.95em", color: AMBER }}>API Key Generated</h3>
+                <p style={{ margin: "0 0 12px", fontSize: "0.82em", color: RED }}>Copy this key now — it will not be shown again.</p>
+                <div style={{
+                  background: BG, border: `1px solid ${BORDER2}`, borderRadius: 6,
+                  padding: "10px 14px", fontFamily: "monospace", fontSize: "0.82em",
+                  wordBreak: "break-all", color: GREEN, marginBottom: 16,
+                }}>{generatedApiKey}</div>
+                <button onClick={() => setGeneratedApiKey(null)} style={{
+                  background: `${GREEN}18`, border: `1px solid ${GREEN}44`, color: GREEN,
+                  borderRadius: 6, padding: "7px 20px", cursor: "pointer", fontFamily: "monospace", fontSize: "0.82em",
+                }}>Done</button>
+              </div>
+            </div>
+          )}
+        </td>
         <td style={{ padding: "10px 12px", textAlign: "right" }}>
           <span style={{ color: TEXT_MUTED, fontSize: "0.75em" }}>{expanded ? "▲" : "▼"}</span>
         </td>
@@ -758,7 +832,7 @@ function UserRow({ u, onAction }: { u: AdminUser; onAction: () => void }) {
       {/* Expanded detail panel */}
       {expanded && (
         <tr style={{ background: BG3 }}>
-          <td colSpan={7} style={{ padding: "16px 20px" }}>
+          <td colSpan={8} style={{ padding: "16px 20px" }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 20 }}>
 
               {/* Info */}
@@ -917,7 +991,7 @@ function UsersTab() {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.84em" }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${BORDER2}` }}>
-              {["EMAIL / FIRM", "TIER", "CREDITS", "ATTY STATUS", "ROLE", "LAST LOGIN", ""].map((h) => (
+              {["EMAIL / FIRM", "TIER", "CREDITS", "ATTY STATUS", "ROLE", "LAST LOGIN", "API KEY", ""].map((h) => (
                 <th key={h} style={{
                   textAlign: h === "CREDITS" ? "right" : "left",
                   padding: "7px 12px", color: TEXT_MUTED, fontWeight: 600,
@@ -963,15 +1037,25 @@ function AuditLog() {
 
   useEffect(() => { load(); }, [load]);
 
+  const FILTER_OPTIONS = ["all", "unlock", "login", "register", "dossier_generated"] as const;
+
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, marginBottom: 12, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
+        {FILTER_OPTIONS.map((opt) => (
+          <button key={opt} onClick={() => { setFilter(opt === "all" ? "" : opt); setOffset(0); }} style={{
+            background: (filter === opt || (opt === "all" && !filter)) ? `${GREEN}18` : "none",
+            border: `1px solid ${(filter === opt || (opt === "all" && !filter)) ? GREEN : BORDER2}`,
+            color: (filter === opt || (opt === "all" && !filter)) ? GREEN : TEXT_MUTED,
+            borderRadius: 5, padding: "3px 10px", cursor: "pointer", fontFamily: "monospace", fontSize: "0.72em", fontWeight: 600,
+          }}>{opt.toUpperCase()}</button>
+        ))}
         <input
-          type="text" placeholder="Filter by action…" value={filter}
+          type="text" placeholder="Custom filter…" value={filter}
           onChange={(e) => { setFilter(e.target.value); setOffset(0); }}
           style={{
             background: BG, border: `1px solid ${BORDER2}`, color: TEXT,
-            padding: "5px 12px", borderRadius: 5, fontSize: "0.82em", fontFamily: "monospace", width: 220,
+            padding: "4px 10px", borderRadius: 5, fontSize: "0.78em", fontFamily: "monospace", width: 160,
           }}
         />
         <button onClick={load} style={{
@@ -1033,6 +1117,8 @@ function SystemTab() {
   const [pipeline, setPipeline] = useState<PipelineCounty[]>([]);
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [rev, setRev] = useState<RevenueMetrics | null>(null);
+  const [countyHealth, setCountyHealth] = useState<CountyHealth[] | null>(null);
+  const [healthSummary, setHealthSummary] = useState<CountyHealthSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [subTab, setSubTab] = useState<SystemSubTab>("operations");
@@ -1044,6 +1130,9 @@ function SystemTab() {
       adminFetch<{ pipeline: PipelineCounty[] }>("/api/admin/pipeline-status").then((r) => setPipeline(r.pipeline || [])).catch(() => setPipeline([])),
       adminFetch<SystemStats>("/api/admin/system-stats").then(setStats).catch((e) => setError(e.message)),
       adminFetch<RevenueMetrics>("/api/admin/revenue-metrics").then(setRev).catch(() => setRev(null)),
+      adminFetch<{ counties: CountyHealth[]; summary: CountyHealthSummary }>("/api/admin/county-health")
+        .then((r) => { setCountyHealth(r.counties || []); setHealthSummary(r.summary); })
+        .catch(() => setCountyHealth(null)),
     ]).finally(() => setLoading(false));
   }, []);
 
@@ -1080,23 +1169,39 @@ function SystemTab() {
         <>
           <section>
             <SectionHeader>REVENUE</SectionHeader>
+            {/* Stripe mode context banner */}
+            {stats?.stripe_mode === "test" && (
+              <div style={{
+                marginBottom: 14, padding: "8px 14px", borderRadius: 6,
+                background: "#1e1a0022", border: `1px solid ${AMBER}44`,
+                fontSize: "0.78em", color: AMBER, display: "flex", alignItems: "center", gap: 8,
+              }}>
+                <span style={{ fontWeight: 700 }}>⚠ STRIPE TEST MODE</span>
+                <span style={{ color: TEXT_MUTED }}>— No live charges. All subscriptions shown are from test data only. Switch STRIPE_MODE=live to process real payments.</span>
+              </div>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
-              <StatCard label="MRR" value={`$${((rev?.mrr_cents || 0) / 100).toLocaleString()}`} color={GREEN} accent />
-              <StatCard label="ARR" value={`$${((rev?.arr_cents || 0) / 100).toLocaleString()}`} color={GREEN} />
-              <StatCard label="Active Subs" value={String(rev?.active_subscriptions ?? 0)} color={BLUE} />
+              <StatCard label="MRR" value={`$${((rev?.mrr_cents || 0) / 100).toLocaleString()}`} color={(rev?.mrr_cents ?? 0) > 0 ? GREEN : TEXT_MUTED} accent={(rev?.mrr_cents ?? 0) > 0} sub={stats?.stripe_mode === "test" ? "test mode" : undefined} />
+              <StatCard label="ARR" value={`$${((rev?.arr_cents || 0) / 100).toLocaleString()}`} color={(rev?.arr_cents ?? 0) > 0 ? GREEN : TEXT_MUTED} />
+              <StatCard label="Active Subs" value={String(rev?.active_subscriptions ?? 0)} color={(rev?.active_subscriptions ?? 0) > 0 ? BLUE : TEXT_MUTED} sub={(rev?.active_subscriptions ?? 0) === 0 ? "no paying subscribers yet" : undefined} />
               <StatCard label="New (30d)" value={String(rev?.new_subscribers_30d ?? 0)} color={BLUE} />
               <StatCard label="Churn (30d)" value={String(rev?.churn_30d ?? 0)} color={(rev?.churn_30d ?? 0) > 0 ? RED : GREEN} />
               <StatCard label="Credit Util" value={`${rev?.credit_utilization_pct ?? 0}%`} />
-              <StatCard label="Founding Spots" value={`${rev?.founding_spots_claimed ?? 0} / ${rev?.founding_spots_total ?? 10}`} color={AMBER} />
+              <StatCard label="Founding Spots" value={`${rev?.founding_spots_claimed ?? 0} / ${rev?.founding_spots_total ?? 10}`} color={AMBER} sub={(rev?.founding_spots_claimed ?? 0) === 0 ? "none claimed yet" : `${(rev?.founding_spots_total ?? 10) - (rev?.founding_spots_claimed ?? 0)} remaining`} />
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {(["sovereign", "partner", "associate"] as const).map((tier) => (
-                <div key={tier} style={{ flex: 1, minWidth: 140, background: BG, border: `1px solid ${BORDER2}`, borderRadius: 8, padding: "12px 16px" }}>
-                  <div style={{ color: TEXT_MUTED, fontSize: "0.7em", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{tier}</div>
-                  <div style={{ fontWeight: 700, fontSize: "1.2em" }}>{rev?.by_tier?.[tier]?.count ?? 0} users</div>
-                  <div style={{ color: GREEN, fontSize: "0.82em" }}>${((rev?.by_tier?.[tier]?.mrr_cents ?? 0) / 100).toLocaleString()}/mo</div>
-                </div>
-              ))}
+              {(["sovereign", "partner", "associate"] as const).map((tier) => {
+                const tierData = rev?.by_tier?.[tier];
+                const count = tierData?.count ?? 0;
+                return (
+                  <div key={tier} style={{ flex: 1, minWidth: 140, background: BG, border: `1px solid ${count > 0 ? BLUE + "44" : BORDER2}`, borderRadius: 8, padding: "12px 16px" }}>
+                    <div style={{ color: TEXT_MUTED, fontSize: "0.7em", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{tier}</div>
+                    <div style={{ fontWeight: 700, fontSize: "1.2em", color: count > 0 ? TEXT : TEXT_MUTED }}>{count} users</div>
+                    <div style={{ color: count > 0 ? GREEN : TEXT_MUTED, fontSize: "0.82em" }}>${((tierData?.mrr_cents ?? 0) / 100).toLocaleString()}/mo</div>
+                    <span style={{ fontSize: "0.7em", color: TEXT_MUTED }}>• Powered by Stripe</span>
+                  </div>
+                );
+              })}
             </div>
           </section>
 
@@ -1108,7 +1213,19 @@ function SystemTab() {
               <StatCard label="Pending Attorneys" value={stats?.user_counts?.pending_attorneys?.toString() || "—"} color={AMBER} />
               <StatCard label="Pipeline Leads" value={stats?.verified_pipeline_count?.toString() || "—"} />
               <StatCard label="Pipeline Surplus" value={stats ? formatCurrency(stats.verified_pipeline_surplus) : "—"} color={GREEN} accent />
-              <StatCard label="Stripe" value={stats?.stripe_configured ? `${(stats?.stripe_mode || "test").toUpperCase()} MODE` : "NOT SET"} color={stats?.stripe_configured ? GREEN : RED} dot />
+              <StatCard label="Stripe" value={stats?.stripe_configured ? `${(stats?.stripe_mode || "test").toUpperCase()} MODE` : "NOT SET"} color={stats?.stripe_configured ? stats?.stripe_mode === "live" ? GREEN : AMBER : RED} dot />
+            </div>
+          </section>
+
+          {/* Data Intelligence */}
+          <section>
+            <SectionHeader>DATA INTELLIGENCE</SectionHeader>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+              <StatCard label="GOLD Leads" value={stats?.scoreboard?.find(s => s.data_grade === "GOLD")?.lead_count?.toString() || "0"} color={AMBER} accent sub={stats?.scoreboard?.find(s => s.data_grade === "GOLD") ? formatCurrency(stats?.scoreboard?.find(s => s.data_grade === "GOLD")?.total_surplus ?? 0) + " verified" : undefined} />
+              <StatCard label="SILVER Leads" value={stats?.scoreboard?.find(s => s.data_grade === "SILVER")?.lead_count?.toString() || "0"} color="#94a3b8" sub={stats?.scoreboard?.find(s => s.data_grade === "SILVER") ? formatCurrency(stats?.scoreboard?.find(s => s.data_grade === "SILVER")?.total_surplus ?? 0) : undefined} />
+              <StatCard label="BRONZE Leads" value={stats?.scoreboard?.find(s => s.data_grade === "BRONZE")?.lead_count?.toString() || "0"} color="#b45309" sub="pending Gate 4" />
+              <StatCard label="CO Counties" value="64" color={BLUE} sub={`${pipeline.filter(p => p.total > 0).length} with data`} />
+              <StatCard label="Coverage" value={`${Math.round(pipeline.filter(p => p.total > 0).length / 64 * 100)}%`} color={pipeline.filter(p => p.total > 0).length >= 20 ? GREEN : AMBER} sub="of 64 CO counties" />
             </div>
           </section>
         </>
@@ -1151,7 +1268,7 @@ function SystemTab() {
 
           {/* County Pipeline Intelligence */}
           <section>
-            <SectionHeader>COUNTY PIPELINE — GATE 4 STATUS ({pipeline.length > 0 ? pipeline.length : coverage.length} counties)</SectionHeader>
+            <SectionHeader>COUNTY PIPELINE — ALL 64 COLORADO COUNTIES ({pipeline.length > 0 ? pipeline.length : coverage.length} configured)</SectionHeader>
             {pipeline.length === 0 && coverage.length === 0 ? (
               <p style={{ color: TEXT_MUTED, fontSize: "0.85em" }}>No coverage data.</p>
             ) : (
@@ -1162,11 +1279,12 @@ function SystemTab() {
                       {[
                         { h: "COUNTY", right: false },
                         { h: "PLATFORM", right: false },
+                        { h: "TOTAL", right: true },
                         { h: "GOLD", right: true },
                         { h: "SILVER", right: true },
                         { h: "BRONZE", right: true },
-                        { h: "ACTION", right: false },
-                        { h: "24H", right: false },
+                        { h: "GOLD%", right: true },
+                        { h: "STATUS", right: false },
                         { h: "LAST RUN", right: false },
                       ].map(({ h, right }) => (
                         <th key={h} style={{
@@ -1179,38 +1297,64 @@ function SystemTab() {
                   <tbody>
                     {pipeline.length > 0 ? (
                       (() => {
-                        // Merge pipeline data with coverage data for 24h status + last run
                         const coverageByCounty: Record<string, CoverageCounty> = {};
                         coverage.forEach((c) => { coverageByCounty[(c.county_code || c.county || "").toLowerCase()] = c; });
+
+                        function lastRunLabel(ts: number | string | null | undefined): { text: string; color: string } {
+                          if (!ts) return { text: "NEVER", color: RED };
+                          // ts may be a unix timestamp (integer seconds) or ISO string
+                          const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
+                          const daysAgo = Math.floor((Date.now() - d.getTime()) / 86400000);
+                          if (daysAgo < 1) return { text: "TODAY", color: GREEN };
+                          if (daysAgo <= 7) return { text: `${daysAgo}d ago`, color: GREEN };
+                          if (daysAgo <= 30) return { text: `${daysAgo}d ago`, color: AMBER };
+                          return { text: `${daysAgo}d ago`, color: RED };
+                        }
+
                         return pipeline.map((p) => {
                           const cov = coverageByCounty[p.county.toLowerCase()] || {};
-                          const status24h = cov.ran_24h ? (cov.found_zero_24h ? "EMPTY" : "OK") : cov.silent_24h ? "NEEDS RUN" : "—";
-                          const status24hColor = cov.ran_24h ? (cov.found_zero_24h ? AMBER : GREEN) : cov.silent_24h ? AMBER : TEXT_MUTED;
-                          const actionColor = p.action_needed === "clean" ? GREEN
+                          const actionColor = p.action_needed === "clean" || p.action_needed === "no_surplus" ? GREEN
                             : p.action_needed === "gate4_ready" ? AMBER
                             : p.action_needed === "sale_info_backfill_needed" ? "#f97316"
                             : p.action_needed === "captcha_blocked" ? RED
+                            : p.total === 0 ? TEXT_MUTED
                             : TEXT_MUTED;
+                          const actionTooltip = p.action_needed === "sale_info_backfill_needed"
+                            ? `>50% of ${p.bronze} BRONZE leads are missing sale_date. Run: bin/vf gate4-run ${p.county}`
+                            : p.action_needed === "gate4_ready" ? `${p.bronze_not_extracted} leads ready for Gate 4 extraction. Run: bin/vf gate4-run ${p.county}`
+                            : p.action_needed === "captcha_blocked" ? "County website requires CAPTCHA — manual review needed"
+                            : p.total === 0 ? "No leads ingested yet for this county"
+                            : "";
                           const actionLabel = p.action_needed === "clean" ? "✓ CLEAN"
+                            : p.action_needed === "no_surplus" ? "✓ $0 OVERBID"
                             : p.action_needed === "gate4_ready" ? "→ GATE 4"
-                            : p.action_needed === "sale_info_backfill_needed" ? "⟳ BACKFILL"
+                            : p.action_needed === "sale_info_backfill_needed" ? "⟳ NEEDS SALE DATE"
                             : p.action_needed === "captcha_blocked" ? "✗ CAPTCHA"
+                            : p.total === 0 ? "— NO DATA"
                             : p.action_needed.replace(/_/g, " ").toUpperCase();
+                          const goldPct = (p.gold + p.silver + p.bronze) > 0
+                            ? Math.round(p.gold / (p.gold + p.silver + p.bronze) * 100)
+                            : 0;
+                          const goldPctColor = goldPct >= 30 ? GREEN : goldPct >= 10 ? AMBER : TEXT_MUTED;
+                          const runInfo = lastRunLabel(p.last_ingestion_ts ?? cov.last_scraped_at ?? cov.last_run);
                           return (
-                            <tr key={p.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                            <tr key={p.county} style={{ borderBottom: `1px solid ${BORDER}`, opacity: p.total === 0 ? 0.55 : 1 }}>
                               <td style={{ padding: "6px 10px", fontWeight: 600 }}>{p.county.replace(/_/g, " ").toUpperCase()}</td>
-                              <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.75em" }}>{p.platform_type || cov.platform || "—"}</td>
+                              <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.75em" }}>
+                                {(p.platform_type || cov.platform || "unknown").replace(/_/g, " ")}
+                              </td>
+                              <td style={{ padding: "6px 10px", textAlign: "right", color: p.total > 0 ? TEXT : TEXT_MUTED, fontSize: "0.85em" }}>{p.total || "—"}</td>
                               <td style={{ padding: "6px 10px", textAlign: "right", color: "#f59e0b", fontWeight: p.gold > 0 ? 700 : 400 }}>{p.gold || "—"}</td>
                               <td style={{ padding: "6px 10px", textAlign: "right", color: "#94a3b8", fontWeight: p.silver > 0 ? 700 : 400 }}>{p.silver || "—"}</td>
                               <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>{p.bronze || "—"}</td>
-                              <td style={{ padding: "6px 10px" }}>
-                                <span style={{ color: actionColor, fontWeight: 700, fontSize: "0.8em", letterSpacing: "0.04em" }}>{actionLabel}</span>
+                              <td style={{ padding: "6px 10px", textAlign: "right", color: goldPctColor, fontWeight: goldPct >= 10 ? 700 : 400, fontSize: "0.8em" }}>
+                                {(p.gold + p.silver + p.bronze) > 0 ? `${goldPct}%` : "—"}
                               </td>
                               <td style={{ padding: "6px 10px" }}>
-                                <span style={{ color: status24hColor, fontWeight: 600, fontSize: "0.8em" }}>{status24h}</span>
+                                <span title={actionTooltip} style={{ color: actionColor, fontWeight: 700, fontSize: "0.8em", letterSpacing: "0.04em", cursor: actionTooltip ? "help" : "default" }}>{actionLabel}</span>
                               </td>
-                              <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.8em" }}>
-                                {(cov.last_scraped_at || cov.last_run)?.slice(0, 10) || "—"}
+                              <td style={{ padding: "6px 10px" }}>
+                                <span style={{ color: runInfo.color, fontWeight: 600, fontSize: "0.8em" }}>{runInfo.text}</span>
                               </td>
                             </tr>
                           );
@@ -1218,24 +1362,20 @@ function SystemTab() {
                       })()
                     ) : (
                       // Fallback: coverage-only table
-                      coverage.map((c) => {
-                        const status24h = c.ran_24h ? (c.found_zero_24h ? "EMPTY" : "OK") : c.silent_24h ? "NEEDS RUN" : "—";
-                        const statusColor = c.ran_24h ? (c.found_zero_24h ? AMBER : GREEN) : c.silent_24h ? AMBER : TEXT_MUTED;
-                        return (
-                          <tr key={c.county_code || c.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
-                            <td style={{ padding: "6px 10px", fontWeight: 600 }}>{(c.county || c.county_code || "—").toUpperCase()}</td>
-                            <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.75em" }}>{c.platform_type || c.platform || "—"}</td>
-                            <td style={{ padding: "6px 10px", textAlign: "right", color: "#f59e0b" }}>{c.gold || "—"}</td>
-                            <td style={{ padding: "6px 10px", textAlign: "right", color: "#94a3b8" }}>{c.silver || "—"}</td>
-                            <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>{c.bronze || "—"}</td>
-                            <td style={{ padding: "6px 10px" }}>—</td>
-                            <td style={{ padding: "6px 10px" }}><span style={{ color: statusColor, fontWeight: 600, fontSize: "0.8em" }}>{status24h}</span></td>
-                            <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.8em" }}>
-                              {(c.last_scraped_at || c.last_run)?.slice(0, 10) || "—"}
-                            </td>
-                          </tr>
-                        );
-                      })
+                      coverage.map((c) => (
+                        <tr key={c.county_code || c.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                          <td style={{ padding: "6px 10px", fontWeight: 600 }}>{(c.county || c.county_code || "—").toUpperCase()}</td>
+                          <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.75em" }}>{c.platform_type || c.platform || "—"}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "right", color: "#f59e0b" }}>{c.gold || "—"}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "right", color: "#94a3b8" }}>{c.silver || "—"}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>{c.bronze || "—"}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>—</td>
+                          <td style={{ padding: "6px 10px" }}>—</td>
+                          <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.8em" }}>
+                            {(c.last_scraped_at || c.last_run)?.slice(0, 10) || "NEVER"}
+                          </td>
+                        </tr>
+                      ))
                     )}
                   </tbody>
                 </table>
@@ -1247,6 +1387,152 @@ function SystemTab() {
           <section>
             <SectionHeader>AUDIT LOG</SectionHeader>
             <AuditLog />
+          </section>
+
+          {/* Scraper Health (2G) */}
+          <section>
+            <SectionHeader>SCRAPER HEALTH</SectionHeader>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", fontSize: "0.8em", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ color: TEXT_MUTED, textAlign: "left" }}>
+                    <th style={{ padding: "0.375rem 0.5rem" }}>COUNTY</th>
+                    <th style={{ padding: "0.375rem 0.5rem" }}>PLATFORM</th>
+                    <th style={{ padding: "0.375rem 0.5rem" }}>LAST RUN</th>
+                    <th style={{ padding: "0.375rem 0.5rem" }}>CASES</th>
+                    <th style={{ padding: "0.375rem 0.5rem" }}>HEALTH</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(pipeline || []).filter(p => p.platform_type === "govsoft" || p.total > 0).map((p: PipelineCounty) => {
+                    const ts = p.last_ingestion_ts;
+                    let daysAgo: number | null = null;
+                    if (ts) {
+                      const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
+                      daysAgo = Math.floor((Date.now() - d.getTime()) / 86400000);
+                    }
+                    const status = daysAgo == null ? "NEVER RUN" : daysAgo === 0 ? "OK" : daysAgo <= 7 ? "WARN" : "STALE";
+                    const statusColor = status === "OK" ? GREEN : status === "WARN" ? AMBER : RED;
+                    return (
+                      <tr key={p.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                        <td style={{ padding: "0.375rem 0.5rem", fontWeight: 600 }}>{p.county?.replace(/_/g, " ").toUpperCase()}</td>
+                        <td style={{ padding: "0.375rem 0.5rem", color: TEXT_MUTED, fontSize: "0.85em" }}>
+                          {p.platform_type || "unknown"}
+                        </td>
+                        <td style={{ padding: "0.375rem 0.5rem", color: TEXT_MUTED }}>
+                          {daysAgo != null ? `${daysAgo}d ago` : "Never"}
+                        </td>
+                        <td style={{ padding: "0.375rem 0.5rem", color: TEXT_MUTED }}>{p.total > 0 ? p.total.toLocaleString() : "—"}</td>
+                        <td style={{ padding: "0.375rem 0.5rem", color: statusColor, fontWeight: 700, fontSize: "0.78em" }}>
+                          {status}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {pipeline.length === 0 && (
+                    <tr><td colSpan={5} style={{ padding: "0.75rem 0.5rem", color: TEXT_MUTED }}>No scraper data available.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {/* County Intelligence (Layer 6) */}
+          <section>
+            <SectionHeader>COUNTY INTELLIGENCE</SectionHeader>
+            {countyHealth === null ? (
+              <p style={{ color: TEXT_MUTED, fontSize: "0.82em" }}>Loading health data...</p>
+            ) : (
+              <>
+                {/* Summary bar */}
+                {healthSummary && (
+                  <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+                    {([
+                      { label: "HEALTHY", value: healthSummary.healthy, color: GREEN },
+                      { label: "WARNING", value: healthSummary.warning, color: AMBER },
+                      { label: "CRITICAL", value: healthSummary.critical, color: RED },
+                      { label: "TOTAL", value: healthSummary.total, color: TEXT_DIM },
+                    ] as { label: string; value: number; color: string }[]).map(({ label, value, color }) => (
+                      <div key={label} style={{ flex: 1, minWidth: 100, background: BG, border: `1px solid ${color}33`, borderRadius: 8, padding: "10px 14px" }}>
+                        <div style={{ fontSize: "0.65em", letterSpacing: "0.1em", color: TEXT_MUTED, marginBottom: 4 }}>{label}</div>
+                        <div style={{ fontSize: "1.4em", fontWeight: 700, color }}>{value}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", fontSize: "0.78em", borderCollapse: "collapse", minWidth: 700 }}>
+                    <thead>
+                      <tr style={{ color: TEXT_MUTED, textAlign: "left", borderBottom: `1px solid ${BORDER2}` }}>
+                        <th style={{ padding: "4px 8px" }}>COUNTY</th>
+                        <th style={{ padding: "4px 8px" }}>HEALTH</th>
+                        <th style={{ padding: "4px 8px", textAlign: "right" }}>SALE DATE COV</th>
+                        <th style={{ padding: "4px 8px", textAlign: "right" }}>EXTRACTION</th>
+                        <th style={{ padding: "4px 8px", textAlign: "right" }}>EVIDENCE</th>
+                        <th style={{ padding: "4px 8px", textAlign: "right" }}>BROWSER/DB</th>
+                        <th style={{ padding: "4px 8px", textAlign: "right" }}>LAST RUN</th>
+                        <th style={{ padding: "4px 8px" }}>ALERT</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {countyHealth.filter(c => c.total > 0).map((c) => {
+                        const hColor = c.health_score >= 70 ? GREEN : c.health_score >= 40 ? AMBER : RED;
+                        const alertColor = c.alert === "NO_DATA" || c.alert === "STALE_30D" || c.alert === "PARSER_DRIFT" ? RED
+                          : c.alert === "STALE_7D" || c.alert === "ALL_BRONZE" ? AMBER : TEXT_MUTED;
+                        return (
+                          <tr key={c.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                            <td style={{ padding: "5px 8px", fontWeight: 600 }}>
+                              {c.county.replace(/_/g, " ").toUpperCase()}
+                              <span style={{ marginLeft: 6, fontSize: "0.85em", color: TEXT_MUTED, fontWeight: 400 }}>{c.platform_type}</span>
+                            </td>
+                            <td style={{ padding: "5px 8px" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <div style={{ width: 56, height: 5, background: BORDER2, borderRadius: 3, flexShrink: 0 }}>
+                                  <div style={{ width: `${c.health_score}%`, height: "100%", background: hColor, borderRadius: 3 }} />
+                                </div>
+                                <span style={{ color: hColor, fontWeight: 700, minWidth: 24 }}>{c.health_score}</span>
+                              </div>
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: c.sale_date_coverage_pct >= 80 ? GREEN : c.sale_date_coverage_pct >= 50 ? AMBER : RED }}>
+                              {c.sale_date_coverage_pct}%
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: c.extraction_rate_pct >= 60 ? GREEN : c.extraction_rate_pct >= 30 ? AMBER : RED }}>
+                              {c.extraction_rate_pct}%
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: c.evidence_pct >= 50 ? GREEN : c.evidence_pct >= 20 ? AMBER : TEXT_MUTED }}>
+                              {c.evidence_pct}%
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: c.browser_count > 0 && Math.abs(c.delta) > c.browser_count * 0.1 ? AMBER : TEXT_DIM }}>
+                              {c.browser_count > 0 ? `${c.browser_count}/${c.db_count}` : "—"}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: c.last_run_age_days == null ? RED : c.last_run_age_days > 7 ? AMBER : TEXT_DIM }}>
+                              {c.last_run_age_days != null ? `${c.last_run_age_days}d ago` : "Never"}
+                            </td>
+                            <td style={{ padding: "5px 8px" }}>
+                              {c.alert ? (
+                                <Badge color={alertColor}>{c.alert}</Badge>
+                              ) : (
+                                <span style={{ color: GREEN, fontSize: "0.85em" }}>✓ OK</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {countyHealth.filter(c => c.total > 0).length === 0 && (
+                        <tr>
+                          <td colSpan={8} style={{ padding: "12px 8px", color: TEXT_MUTED }}>No counties with data yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                {countyHealth.filter(c => c.total === 0).length > 0 && (
+                  <p style={{ fontSize: "0.72em", color: TEXT_MUTED, marginTop: 8 }}>
+                    {countyHealth.filter(c => c.total === 0).length} counties with no data not shown.
+                  </p>
+                )}
+              </>
+            )}
           </section>
 
           {/* Quick actions */}
@@ -1276,14 +1562,441 @@ function SystemTab() {
   );
 }
 
+// ── Tab: Ops Center ───────────────────────────────────────────────────────────
+
+interface OpsJob {
+  id: string;
+  command: string;
+  args_json?: string;
+  status: "QUEUED" | "RUNNING" | "SUCCESS" | "FAILED" | "CANCELLED";
+  triggered_by?: string;
+  triggered_at: number;
+  started_at?: number;
+  finished_at?: number;
+  output?: string;
+  output_tail?: string;
+  exit_code?: number;
+  county?: string;
+  duration_s?: number;
+}
+
+interface PipelineSummary {
+  grade_distribution: Record<string, number>;
+  status_distribution: Record<string, number>;
+  pre_sale_leads: number;
+  pre_sale_promotion_candidates: number;
+  gate4_ready: number;
+  snapshot_counts: Record<string, number>;
+  recent_jobs: OpsJob[];
+  runs_24h: { mode: string; status: string; cnt: number }[];
+}
+
+const COUNTY_SLUGS = [
+  "adams","arapahoe","archuleta","boulder","broomfield","clear_creek",
+  "delta","douglas","eagle","el_paso","elbert","fremont","garfield",
+  "gilpin","gunnison","jefferson","la_plata","larimer","mesa",
+  "routt","san_miguel","teller","weld",
+];
+
+const PIPELINE_COMMANDS: {
+  id: string; label: string; desc: string; needsCounty?: boolean;
+  danger?: boolean; color?: string;
+}[] = [
+  // Pre-Sale
+  { id: "pending-sales",       label: "▶ RUN PRE-SALE SCAN",    desc: "Scrape Active/Pending cases from GovSoft (pre-sale pipeline)", needsCounty: true,  color: "#22c55e" },
+  // Post-Sale Scraper
+  { id: "scraper-run-window",  label: "▶ DATE-WINDOW SCRAPE",   desc: "Scrape post-sale cases for a county date window", needsCounty: true },
+  { id: "sale-info-backfill",  label: "▶ SALE-INFO BACKFILL",   desc: "Re-scrape BRONZE leads missing SALE_INFO tab", needsCounty: true },
+  // Gate 4
+  { id: "extract-batch",       label: "▶ GATE 4 EXTRACT",       desc: "Extract overbid data from captured SALE_INFO snapshots", needsCounty: true },
+  { id: "gate4-run-all",       label: "▶ GATE 4 ALL COUNTIES",  desc: "Full Gate 4 pipeline: all counties (slow, 30+ min)", color: "#f59e0b" },
+  // Promotion
+  { id: "promote-eligible",    label: "▶ PROMOTE ELIGIBLE",     desc: "Promote SILVER → GOLD when 6-month restriction expires" },
+  // Denver
+  { id: "denver-scrape",       label: "▶ DENVER SCRAPE",        desc: "Denver Public Trustee PDF scraper" },
+  // Tax lien
+  { id: "tax-lien-run",        label: "▶ TAX LIEN RUN",         desc: "Tax lien surplus pipeline (C.R.S. § 39-11-151)" },
+  // DB
+  { id: "backup-db",           label: "⬇ BACKUP DB",            desc: "SQLite online backup (timestamped .bak)" },
+  { id: "migrate",             label: "⬆ MIGRATE",              desc: "Run all pending DB migrations (idempotent)" },
+];
+
+function jobStatusColor(status: string) {
+  if (status === "SUCCESS") return GREEN;
+  if (status === "RUNNING") return "#3b82f6";
+  if (status === "QUEUED")  return AMBER;
+  if (status === "FAILED")  return RED;
+  return TEXT_MUTED;
+}
+
+function fmtDuration(s?: number | null): string {
+  if (s == null) return "—";
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
+function OpsCenter() {
+  const [summary, setSummary]               = useState<PipelineSummary | null>(null);
+  const [jobs, setJobs]                     = useState<OpsJob[]>([]);
+  const [selectedJob, setSelectedJob]       = useState<OpsJob | null>(null);
+  const [liveOutput, setLiveOutput]         = useState<string>("");
+  const [loading, setLoading]               = useState(true);
+  const [runningCmd, setRunningCmd]         = useState<string | null>(null);
+  const [selectedCounty, setSelectedCounty] = useState<string>("");
+  const [triggerMsg, setTriggerMsg]         = useState<string>("");
+  const [triggerErr, setTriggerErr]         = useState(false);
+  const [promoting, setPromoting]           = useState(false);
+  const logRef = useRef<HTMLPreElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadSummary = useCallback(() => {
+    Promise.all([
+      adminFetch<PipelineSummary>("/api/admin/ops/pipeline-summary"),
+      adminFetch<{ jobs: OpsJob[] }>("/api/admin/ops/jobs?limit=30"),
+    ]).then(([s, j]) => {
+      setSummary(s);
+      setJobs(j.jobs);
+    }).catch(() => null).finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    loadSummary();
+    const id = setInterval(loadSummary, 8000);
+    return () => clearInterval(id);
+  }, [loadSummary]);
+
+  // Poll selected job for live output
+  useEffect(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (!selectedJob) return;
+
+    const poll = () => {
+      adminFetch<OpsJob>(`/api/admin/ops/jobs/${selectedJob.id}`)
+        .then((j) => {
+          setSelectedJob(j);
+          setLiveOutput(j.output || "");
+          if (j.status !== "RUNNING" && j.status !== "QUEUED") {
+            if (pollRef.current) clearInterval(pollRef.current);
+          }
+        })
+        .catch(() => null);
+    };
+    poll();
+    pollRef.current = setInterval(poll, 2000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [selectedJob?.id]); // eslint-disable-line
+
+  // Auto-scroll log
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [liveOutput]);
+
+  const triggerJob = async (command: string, county?: string) => {
+    setRunningCmd(command);
+    setTriggerMsg("");
+    setTriggerErr(false);
+    try {
+      const res = await adminFetch<{ job_id: string; status: string }>("/api/admin/ops/run", {
+        method: "POST",
+        body: JSON.stringify({ command, county: county || null, extra_args: [] }),
+      });
+      setTriggerMsg(`Job queued: ${res.job_id.slice(0, 8)}... — refresh jobs list to track`);
+      // Auto-select the new job for live tail
+      setTimeout(() => {
+        adminFetch<OpsJob>(`/api/admin/ops/jobs/${res.job_id}`).then(setSelectedJob).catch(() => null);
+        loadSummary();
+      }, 800);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setTriggerMsg(msg);
+      setTriggerErr(true);
+    } finally {
+      setRunningCmd(null);
+    }
+  };
+
+  const promotePresale = async () => {
+    setPromoting(true);
+    try {
+      const res = await adminFetch<{ promoted: number; total_pre_sale: number; message: string }>(
+        "/api/admin/ops/promote-presale", { method: "POST" },
+      );
+      setTriggerMsg(res.message);
+      setTriggerErr(false);
+      loadSummary();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setTriggerMsg(msg);
+      setTriggerErr(true);
+    } finally {
+      setPromoting(false);
+    }
+  };
+
+  if (loading) return (
+    <div style={{ padding: 40, textAlign: "center", color: TEXT_MUTED }}>LOADING PIPELINE STATUS...</div>
+  );
+
+  const grades = summary?.grade_distribution || {};
+  const statuses = summary?.status_distribution || {};
+  const runningJobs = jobs.filter(j => j.status === "RUNNING" || j.status === "QUEUED");
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+      {/* ── Header KPIs ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 10 }}>
+        {[
+          { label: "GOLD", value: grades["GOLD"] ?? 0,   color: AMBER },
+          { label: "SILVER", value: grades["SILVER"] ?? 0, color: "#94a3b8" },
+          { label: "BRONZE", value: grades["BRONZE"] ?? 0, color: "#b45309" },
+          { label: "REJECT", value: grades["REJECT"] ?? 0, color: RED },
+          { label: "PRE-SALE", value: summary?.pre_sale_leads ?? 0, color: "#22c55e", accent: true },
+          { label: "GATE4 READY", value: summary?.gate4_ready ?? 0, color: BLUE },
+          { label: "PROMO CANDS", value: summary?.pre_sale_promotion_candidates ?? 0, color: "#a78bfa" },
+          { label: "ACTIVE JOBS", value: runningJobs.length, color: runningJobs.length > 0 ? BLUE : TEXT_MUTED },
+        ].map((k) => (
+          <StatCard key={k.label} label={k.label} value={String(k.value)}
+            color={k.color} dot accent={!!(k as { accent?: boolean }).accent} />
+        ))}
+      </div>
+
+      {/* ── Trigger messages ── */}
+      {triggerMsg && <ActionMsg msg={triggerMsg} error={triggerErr} />}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+
+        {/* ── Left: Command Panel ── */}
+        <div>
+          <SectionHeader>PIPELINE CONTROLS</SectionHeader>
+
+          {/* County selector */}
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ fontSize: "0.72em", color: TEXT_MUTED, display: "block", marginBottom: 6, letterSpacing: "0.08em" }}>
+              COUNTY (for county-specific commands)
+            </label>
+            <select
+              value={selectedCounty}
+              onChange={(e) => setSelectedCounty(e.target.value)}
+              style={{
+                width: "100%", background: BG3, border: `1px solid ${BORDER2}`,
+                color: TEXT, padding: "8px 12px", borderRadius: 6,
+                fontFamily: "monospace", fontSize: "0.85em", cursor: "pointer",
+              }}
+            >
+              <option value="">— all counties —</option>
+              {COUNTY_SLUGS.map(c => <option key={c} value={c}>{c.replace(/_/g, " ").toUpperCase()}</option>)}
+            </select>
+          </div>
+
+          {/* Command buttons */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {PIPELINE_COMMANDS.map((cmd) => {
+              const isRunning = runningCmd === cmd.id;
+              const countyRequired = cmd.needsCounty && !selectedCounty;
+              return (
+                <div key={cmd.id} style={{
+                  border: `1px solid ${(cmd.color || BORDER2) + "44"}`,
+                  borderRadius: 8, padding: "10px 14px", background: BG,
+                  display: "flex", alignItems: "center", gap: 10,
+                }}>
+                  <button
+                    onClick={() => triggerJob(cmd.id, cmd.needsCounty ? (selectedCounty || undefined) : undefined)}
+                    disabled={isRunning || !!runningCmd || countyRequired}
+                    style={{
+                      background: (cmd.color || BLUE) + "22",
+                      border: `1px solid ${(cmd.color || BLUE) + "55"}`,
+                      color: countyRequired ? TEXT_MUTED : (cmd.color || BLUE),
+                      borderRadius: 5, padding: "5px 14px",
+                      fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700,
+                      cursor: (isRunning || !!runningCmd || countyRequired) ? "not-allowed" : "pointer",
+                      letterSpacing: "0.04em", flexShrink: 0,
+                      opacity: (isRunning || !!runningCmd) ? 0.6 : 1,
+                    }}
+                  >
+                    {isRunning ? "QUEUING..." : cmd.label}
+                  </button>
+                  <div>
+                    <div style={{ fontSize: "0.78em", color: TEXT, fontWeight: 600 }}>{cmd.id}</div>
+                    <div style={{ fontSize: "0.7em", color: TEXT_MUTED, marginTop: 2 }}>
+                      {countyRequired ? "⚠ SELECT A COUNTY ABOVE" : cmd.desc}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* PRE-SALE PROMOTE special button */}
+            <div style={{
+              border: `1px solid #a78bfa44`, borderRadius: 8, padding: "10px 14px",
+              background: BG, display: "flex", alignItems: "center", gap: 10,
+            }}>
+              <button
+                onClick={promotePresale}
+                disabled={promoting}
+                style={{
+                  background: "#a78bfa22", border: "1px solid #a78bfa55",
+                  color: "#a78bfa", borderRadius: 5, padding: "5px 14px",
+                  fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700,
+                  cursor: promoting ? "not-allowed" : "pointer", letterSpacing: "0.04em",
+                  flexShrink: 0, opacity: promoting ? 0.6 : 1,
+                }}
+              >
+                {promoting ? "PROMOTING..." : "▶ PROMOTE PRE-SALE"}
+              </button>
+              <div>
+                <div style={{ fontSize: "0.78em", color: TEXT, fontWeight: 600 }}>promote-presale</div>
+                <div style={{ fontSize: "0.7em", color: TEXT_MUTED, marginTop: 2 }}>
+                  Scan existing leads with future sale_date → set PRE_SALE status ({summary?.pre_sale_promotion_candidates ?? 0} candidates)
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right: Job List ── */}
+        <div>
+          <SectionHeader action={
+            <button onClick={loadSummary} style={{
+              background: "none", border: `1px solid ${BORDER2}`, color: TEXT_MUTED,
+              borderRadius: 4, padding: "3px 10px", fontSize: "0.7em", cursor: "pointer", fontFamily: "monospace",
+            }}>↻ REFRESH</button>
+          }>RECENT JOBS</SectionHeader>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 420, overflowY: "auto" }}>
+            {jobs.length === 0 && (
+              <div style={{ color: TEXT_MUTED, fontSize: "0.82em", padding: "12px 0" }}>No jobs yet.</div>
+            )}
+            {jobs.map((job) => (
+              <div
+                key={job.id}
+                onClick={() => setSelectedJob(job)}
+                style={{
+                  border: `1px solid ${selectedJob?.id === job.id ? jobStatusColor(job.status) + "77" : BORDER}`,
+                  borderRadius: 7, padding: "8px 12px", cursor: "pointer", background: BG,
+                  display: "flex", alignItems: "center", gap: 10,
+                  transition: "border-color 0.15s",
+                }}
+              >
+                <span style={{
+                  width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                  background: jobStatusColor(job.status),
+                  boxShadow: job.status === "RUNNING" ? `0 0 6px ${jobStatusColor(job.status)}` : "none",
+                }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: "0.8em", fontWeight: 700, color: TEXT, display: "flex", gap: 8 }}>
+                    <span>{job.command}</span>
+                    {job.county && <Badge color={TEXT_MUTED}>{job.county}</Badge>}
+                  </div>
+                  <div style={{ fontSize: "0.68em", color: TEXT_MUTED, marginTop: 2 }}>
+                    {new Date(job.triggered_at * 1000).toLocaleTimeString()} ·{" "}
+                    {job.triggered_by || "admin"} ·{" "}
+                    {fmtDuration(job.finished_at && job.started_at ? job.finished_at - job.started_at : null)}
+                  </div>
+                </div>
+                <Badge color={jobStatusColor(job.status)}>{job.status}</Badge>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Job Log Viewer ── */}
+      {selectedJob && (
+        <div>
+          <SectionHeader action={
+            <button onClick={() => setSelectedJob(null)} style={{
+              background: "none", border: `1px solid ${BORDER2}`, color: TEXT_MUTED,
+              borderRadius: 4, padding: "3px 10px", fontSize: "0.7em", cursor: "pointer", fontFamily: "monospace",
+            }}>✕ CLOSE</button>
+          }>
+            JOB LOG — {selectedJob.command}{selectedJob.county ? ` [${selectedJob.county}]` : ""}{" "}
+            <Badge color={jobStatusColor(selectedJob.status)}>{selectedJob.status}</Badge>
+          </SectionHeader>
+
+          <div style={{ display: "flex", gap: 16, marginBottom: 10 }}>
+            {[
+              { label: "JOB ID",    value: selectedJob.id.slice(0, 12) + "...", mono: true },
+              { label: "STATUS",    value: selectedJob.status, color: jobStatusColor(selectedJob.status) },
+              { label: "DURATION",  value: fmtDuration(selectedJob.duration_s) },
+              { label: "EXIT CODE", value: selectedJob.exit_code != null ? String(selectedJob.exit_code) : "—",
+                color: selectedJob.exit_code === 0 ? GREEN : (selectedJob.exit_code != null ? RED : TEXT_MUTED) },
+            ].map((s) => (
+              <StatCard key={s.label} label={s.label} value={s.value}
+                color={(s as { color?: string }).color} mono={!!(s as { mono?: boolean }).mono} />
+            ))}
+          </div>
+
+          <pre
+            ref={logRef}
+            style={{
+              background: "#0a0f16", border: `1px solid ${BORDER}`, borderRadius: 8,
+              padding: "14px 16px", fontSize: "0.72em", color: "#86efac",
+              maxHeight: 380, overflowY: "auto", overflowX: "auto",
+              whiteSpace: "pre-wrap", wordBreak: "break-all", fontFamily: "monospace",
+              lineHeight: 1.5,
+            }}
+          >
+            {liveOutput || (selectedJob.status === "QUEUED" ? "Waiting to start...\n" : "No output yet.\n")}
+            {selectedJob.status === "RUNNING" && (
+              <span style={{ animation: "pulse 1s infinite", color: BLUE }}>▌</span>
+            )}
+          </pre>
+        </div>
+      )}
+
+      {/* ── Snapshot + Run Stats ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+        <div>
+          <SectionHeader>SNAPSHOT INVENTORY</SectionHeader>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {Object.entries(summary?.snapshot_counts || {}).map(([type, cnt]) => (
+              <div key={type} style={{ display: "flex", justifyContent: "space-between", fontSize: "0.82em", padding: "4px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <span style={{ color: TEXT_MUTED }}>{type}</span>
+                <span style={{ color: TEXT, fontWeight: 700 }}>{cnt.toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <SectionHeader>RUNS LAST 24H</SectionHeader>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {(summary?.runs_24h || []).length === 0 && (
+              <div style={{ color: TEXT_MUTED, fontSize: "0.82em" }}>No runs in last 24h.</div>
+            )}
+            {(summary?.runs_24h || []).map((r, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.82em", padding: "4px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <span style={{ color: TEXT_MUTED }}>{r.mode} / <span style={{ color: r.status === "SUCCESS" ? GREEN : r.status === "FAILED" ? RED : AMBER }}>{r.status}</span></span>
+                <span style={{ color: TEXT, fontWeight: 700 }}>{r.cnt}×</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Processing Status Breakdown ── */}
+      <div>
+        <SectionHeader>PROCESSING STATUS BREAKDOWN</SectionHeader>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
+          {Object.entries(statuses).sort((a, b) => b[1] - a[1]).map(([st, cnt]) => (
+            <StatCard key={st} label={st} value={cnt.toLocaleString()}
+              color={st === "VALIDATED" ? GREEN : st === "PRE_SALE" ? "#22c55e" : st === "NEEDS_REVIEW" ? AMBER : TEXT_MUTED} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Admin Component ───────────────────────────────────────────────────────
 
-type TabKey = "attorneys" | "leads" | "users" | "system";
+type TabKey = "attorneys" | "leads" | "users" | "system" | "ops";
 
 export default function Admin() {
   const { user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<TabKey>("attorneys");
+  const [activeTab, setActiveTab] = useState<TabKey>("ops");
   const [pendingCount, setPendingCount] = useState<number | null>(null);
 
   useEffect(() => {
@@ -1313,6 +2026,7 @@ export default function Admin() {
   }
 
   const TABS: { key: TabKey; label: string; badge?: number | null }[] = [
+    { key: "ops",       label: "⚡ OPS CENTER" },
     { key: "attorneys", label: "ATTORNEY QUEUE", badge: pendingCount },
     { key: "leads",     label: "LEADS" },
     { key: "users",     label: "USERS" },
@@ -1371,6 +2085,7 @@ export default function Admin() {
 
       {/* Content */}
       <div style={{ maxWidth: 1400, margin: "0 auto", padding: "28px 24px" }}>
+        {activeTab === "ops"       && <OpsCenter />}
         {activeTab === "attorneys" && <AttorneyQueue />}
         {activeTab === "leads"     && <LeadsTab />}
         {activeTab === "users"     && <UsersTab />}

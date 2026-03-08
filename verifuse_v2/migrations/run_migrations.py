@@ -79,9 +79,17 @@ def evolve_users(conn: sqlite3.Connection) -> None:
         "attorney_status": "TEXT DEFAULT 'NONE'",
         "bar_number": "TEXT",
         "bar_state": "TEXT DEFAULT 'CO'",
+        "bar_number_verified": "INTEGER DEFAULT 0",
         "firm_name": "TEXT",
+        "firm_verified": "INTEGER DEFAULT 0",
         "verification_url": "TEXT",
         "email_verified": "INTEGER DEFAULT 0",
+        "failed_login_count": "INTEGER DEFAULT 0",
+        "locked_until": "TEXT",
+        "password_reset_token": "TEXT",
+        "password_reset_sent_at": "TEXT",
+        "api_key_hash": "TEXT",
+        "api_key_created_at": "TEXT",
     }
     for col, typedef in additions.items():
         if col not in existing:
@@ -568,6 +576,139 @@ def _apply_013_column_additions(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _apply_017_column_additions(conn: sqlite3.Connection) -> None:
+    """Migration 017 — idempotent column additions for mega-refactor.
+
+    Covers: users (RBAC + API keys + attorney profile),
+            leads (enrichment + opportunity score + intake method),
+            math_audit (extended surplus math),
+            county_profiles (access method metadata).
+    """
+    # users table
+    if _table_exists(conn, "users"):
+        ucols = _get_columns(conn, "users")
+        for col_name, col_typedef in [
+            ("bar_number_verified",   "INTEGER DEFAULT 0"),
+            ("firm_verified",         "INTEGER DEFAULT 0"),
+            ("api_key_hash",          "TEXT"),
+            ("api_key_created_at",    "TEXT"),
+        ]:
+            if col_name not in ucols:
+                log.info("  ADD COLUMN users.%s", col_name)
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_typedef}")
+            else:
+                log.info("  users.%s already present — skipping", col_name)
+
+    # leads table
+    if _table_exists(conn, "leads"):
+        lcols = _get_columns(conn, "leads")
+        for col_name, col_typedef in [
+            ("county_case_id",            "TEXT"),
+            ("internal_case_id",          "TEXT"),
+            ("court_case_id",             "TEXT"),
+            ("evidence_storage_location", "TEXT"),
+            ("evidence_chain_hash",       "TEXT"),
+            ("opportunity_score",         "INTEGER DEFAULT 0"),
+            ("intake_method",             "TEXT DEFAULT 'scraper'"),
+        ]:
+            if col_name not in lcols:
+                log.info("  ADD COLUMN leads.%s", col_name)
+                conn.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_typedef}")
+            else:
+                log.info("  leads.%s already present — skipping", col_name)
+        # Backfill county_case_id from case_number
+        conn.execute(
+            "UPDATE leads SET county_case_id = case_number "
+            "WHERE county_case_id IS NULL AND case_number IS NOT NULL"
+        )
+
+    # math_audit table
+    if _table_exists(conn, "math_audit"):
+        mcols = _get_columns(conn, "math_audit")
+        for col_name, col_typedef in [
+            ("net_to_borrower_cents",     "INTEGER"),
+            ("trustee_fees_cents",        "INTEGER"),
+            ("foreclosure_costs_cents",   "INTEGER"),
+            ("senior_debt_cents",         "INTEGER"),
+            ("confidence_pct",            "INTEGER"),
+        ]:
+            if col_name not in mcols:
+                log.info("  ADD COLUMN math_audit.%s", col_name)
+                conn.execute(f"ALTER TABLE math_audit ADD COLUMN {col_name} {col_typedef}")
+            else:
+                log.info("  math_audit.%s already present — skipping", col_name)
+
+    # county_profiles table
+    if _table_exists(conn, "county_profiles"):
+        cpcols = _get_columns(conn, "county_profiles")
+        for col_name, col_typedef in [
+            ("access_method",      "TEXT DEFAULT 'unknown'"),
+            ("digital_accessible", "INTEGER DEFAULT 0"),
+            ("has_pdf_intake",     "INTEGER DEFAULT 0"),
+        ]:
+            if col_name not in cpcols:
+                log.info("  ADD COLUMN county_profiles.%s", col_name)
+                conn.execute(f"ALTER TABLE county_profiles ADD COLUMN {col_name} {col_typedef}")
+            else:
+                log.info("  county_profiles.%s already present — skipping", col_name)
+        # Backfill access_method from platform_type
+        conn.execute("""
+            UPDATE county_profiles
+            SET access_method = 'govsoft', digital_accessible = 1
+            WHERE platform_type = 'govsoft' AND access_method = 'unknown'
+        """)
+
+    conn.commit()
+    log.info("  017 column additions complete")
+
+
+def _apply_018_column_additions(conn: sqlite3.Connection) -> None:
+    """Migration 018 — ingestion observability + health layer columns."""
+    # ingestion_runs: add observability columns
+    if _table_exists(conn, "ingestion_runs"):
+        ircols = _get_columns(conn, "ingestion_runs")
+        for col_name, col_typedef in [
+            ("browser_count",  "INTEGER DEFAULT 0"),
+            ("db_count",       "INTEGER DEFAULT 0"),
+            ("delta",          "INTEGER DEFAULT 0"),   # browser_count - db_count
+            ("run_duration_s", "INTEGER"),
+            ("error_message",  "TEXT"),
+            ("mode",           "TEXT DEFAULT 'date_window'"),  # date_window|pending_sales|enum|backfill
+        ]:
+            if col_name not in ircols:
+                log.info("  ADD COLUMN ingestion_runs.%s", col_name)
+                conn.execute(f"ALTER TABLE ingestion_runs ADD COLUMN {col_name} {col_typedef}")
+    # leads: add health tracking columns
+    if _table_exists(conn, "leads"):
+        lcols = _get_columns(conn, "leads")
+        for col_name, col_typedef in [
+            ("sale_state",       "TEXT"),  # SOLD|CONTINUED|CANCELLED|PRE_SALE|UNKNOWN
+            ("doc_count",        "INTEGER DEFAULT 0"),   # denormalized count from evidence_documents
+            ("snapshot_count",   "INTEGER DEFAULT 0"),   # denormalized count from html_snapshots
+            ("last_scraped_at",  "TEXT"),    # ISO timestamp of last successful scrape
+            ("parser_version",   "TEXT"),    # version tag of parser that last wrote extraction fields
+        ]:
+            if col_name not in lcols:
+                log.info("  ADD COLUMN leads.%s", col_name)
+                conn.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_typedef}")
+    # county_profiles: add health scoring columns
+    if _table_exists(conn, "county_profiles"):
+        cpcols = _get_columns(conn, "county_profiles")
+        for col_name, col_typedef in [
+            ("health_score",           "INTEGER DEFAULT 0"),   # 0-100
+            ("sale_date_coverage_pct", "INTEGER DEFAULT 0"),
+            ("evidence_pct",           "INTEGER DEFAULT 0"),
+            ("extraction_rate_pct",    "INTEGER DEFAULT 0"),
+            ("last_health_check_ts",   "INTEGER"),
+            ("health_alert",           "TEXT"),   # NULL|STALE_7D|PARSER_DRIFT|ALL_BRONZE|NO_DATA
+        ]:
+            if col_name not in cpcols:
+                log.info("  ADD COLUMN county_profiles.%s", col_name)
+                conn.execute(f"ALTER TABLE county_profiles ADD COLUMN {col_name} {col_typedef}")
+    conn.commit()
+    log.info("  018 column additions complete")
+
+
 def _pre_migration_hooks(filename: str, conn: sqlite3.Connection) -> None:
     """
     Run pre-flight repairs before a migration SQL file is applied.
@@ -575,6 +716,10 @@ def _pre_migration_hooks(filename: str, conn: sqlite3.Connection) -> None:
     """
     if filename == "013_enterprise_architecture.sql":
         _apply_013_column_additions(conn)
+
+    if filename == "017_mega_refactor.sql":
+        _apply_017_column_additions(conn)
+        _apply_018_column_additions(conn)
 
     if filename == "006_sota_indexes.sql":
         # Dedupe probe: remove duplicate user_daily_lead_views rows
@@ -635,7 +780,18 @@ def _apply_auto_migrations(conn: sqlite3.Connection) -> None:
         log.info("[migrate] Running pre-hooks for %s", name)
         _pre_migration_hooks(name, conn)
         log.info("[migrate] Applying %s", name)
-        apply_sql_file(conn, sql_file)
+        try:
+            apply_sql_file(conn, sql_file)
+        except sqlite3.OperationalError as exc:
+            err_str = str(exc).lower()
+            if "duplicate column name" in err_str or "already exists" in err_str:
+                log.warning(
+                    "[migrate] %s: idempotency conflict (%s) — "
+                    "columns were already applied by evolve functions; marking as done.",
+                    name, exc,
+                )
+            else:
+                raise
         conn.execute(
             "INSERT OR IGNORE INTO migrations_log (filename, applied_ts) VALUES (?,?)",
             [name, int(time.time())]

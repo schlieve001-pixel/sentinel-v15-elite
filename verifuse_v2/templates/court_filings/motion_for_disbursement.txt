@@ -1,0 +1,46 @@
+IN THE DISTRICT COURT, {{court_district}} JUDICIAL DISTRICT
+STATE OF COLORADO, {{county_upper}} COUNTY
+
+Case No.: {{case_number}}
+
+IN RE THE MATTER OF FORECLOSURE OF:
+{{property_address}}
+
+CLAIMANT'S MOTION FOR DISBURSEMENT OF OVERBID FUNDS (C.R.S. § 38-38-111)
+
+COMES NOW {{claimant_name}} ("Claimant"), by and through counsel, and hereby moves this Court pursuant to C.R.S. § 38-38-111 for disbursement of overbid funds (C.R.S. § 38-38-111) and as grounds therefore states:
+
+1. JURISDICTION AND VENUE
+This Court has jurisdiction over this matter pursuant to C.R.S. § 38-38-111. Venue is proper in {{county_name}} County, Colorado.
+
+2. BACKGROUND
+On or about {{sale_date}}, the above-referenced property was sold at public foreclosure auction by the Public Trustee of {{county_name}} County, Colorado (the "Trustee Sale"). The property is legally described as located at {{property_address}}.
+
+3. OVERBID FUNDS
+At the Trustee Sale, the winning bid exceeded the total indebtedness owed, resulting in overbid funds (C.R.S. § 38-38-111) in the amount of ${{overbid_amount}}, which funds are currently held by the Public Trustee of {{county_name}} County.
+
+4. CLAIMANT'S ENTITLEMENT
+Claimant is the {{claimant_relationship}} of the former property owner and is entitled to claim these overbid funds (C.R.S. § 38-38-111) pursuant to C.R.S. § 38-38-111.
+
+5. CLAIM WINDOW
+Pursuant to C.R.S. § 38-38-111, Claimant has timely filed this Motion within the applicable claim window. The applicable statutory deadline under HB25-1224 and C.R.S. § 38-38-111 is thirty (30) months from the date of the Trustee Sale.
+
+6. ATTORNEY FEES
+Pursuant to HB25-1224 (effective June 4, 2025), attorney fees for representing claimants in surplus funds matters are capped at ten percent (10%) of the funds recovered.
+
+WHEREFORE, Claimant respectfully requests that this Court enter an Order:
+(a) Directing the Public Trustee of {{county_name}} County to disburse the overbid funds (C.R.S. § 38-38-111) of ${{overbid_amount}} to Claimant;
+(b) For such other and further relief as the Court deems just and proper.
+
+Respectfully submitted,
+
+{{attorney_name}}
+{{attorney_bar_number}}
+{{attorney_firm}}
+{{attorney_address}}
+{{attorney_phone}}
+{{attorney_email}}
+
+Attorney for Claimant
+
+Date: {{filing_date}}

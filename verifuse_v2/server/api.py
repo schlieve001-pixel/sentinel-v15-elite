@@ -331,7 +331,48 @@ def _redact_email(addr: str) -> str:
         return "***@***"
 
 
-def _send_email(to: str, subject: str, body: str) -> None:
+_VF_EMAIL_LOGO_URL = os.environ.get("VERIFUSE_LOGO_URL", "[VERIFUSE_LOGO_URL]")
+
+
+def _build_html_email(title: str, body_html: str) -> str:
+    """Return branded HTML email template with logo placeholder and VeriFuse color scheme."""
+    logo_tag = (
+        f'<img src="{_VF_EMAIL_LOGO_URL}" alt="VeriFuse" style="height:40px;margin-bottom:8px;" /><br>'
+        if _VF_EMAIL_LOGO_URL != "[VERIFUSE_LOGO_URL]"
+        else '<span style="font-size:1.4rem;font-weight:700;color:#22c55e;">VeriFuse</span><br>'
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:12px;overflow:hidden;border:1px solid #334155;">
+        <tr>
+          <td style="background:#0f172a;padding:24px 32px;border-bottom:1px solid #334155;text-align:center;">
+            {logo_tag}
+            <span style="font-size:0.75rem;color:#64748b;letter-spacing:0.05em;">VERIFIED SURPLUS INTELLIGENCE</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px;">
+            <h1 style="color:#e2e8f0;font-size:1.2rem;margin:0 0 16px;">{title}</h1>
+            {body_html}
+            <hr style="border:none;border-top:1px solid #334155;margin:24px 0;">
+            <p style="color:#64748b;font-size:0.75rem;margin:0;">
+              VeriFuse · Colorado Foreclosure Surplus Intelligence<br>
+              support@verifuse.tech · <a href="https://verifuse.tech" style="color:#22c55e;text-decoration:none;">verifuse.tech</a>
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _send_email(to: str, subject: str, body: str, html_body: str | None = None) -> None:
     """Send email via SendGrid → SES → SMTP → log fallback.
 
     Reads VERIFUSE_EMAIL_MODE env var:
@@ -380,6 +421,9 @@ def _send_email(to: str, subject: str, body: str) -> None:
             log.warning("[email] email_log cap check unavailable: %s", type(_cap_err).__name__)
         try:
             import httpx
+            content = [{"type": "text/plain", "value": body}]
+            if html_body:
+                content.append({"type": "text/html", "value": html_body})
             resp = httpx.post(
                 "https://api.sendgrid.com/v3/mail/send",
                 headers={
@@ -390,7 +434,7 @@ def _send_email(to: str, subject: str, body: str) -> None:
                     "personalizations": [{"to": [{"email": to}]}],
                     "from": {"email": FROM},
                     "subject": subject,
-                    "content": [{"type": "text/plain", "value": body}],
+                    "content": content,
                 },
                 timeout=10,
             )
@@ -1013,8 +1057,75 @@ def _row_to_safe(row: dict) -> dict:
     ).model_dump()
 
 
-def _row_to_full(row: dict) -> dict:
-    """Convert a leads row to FullAsset dict. NULL-safe."""
+def _table_exists_conn(conn, table: str) -> bool:
+    """Check if a table exists in the given connection."""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]
+    ).fetchone() is not None
+
+
+def _compute_opportunity_score(lead_row: dict, conn) -> int:
+    """Score 0-10 based on surplus size, deadline proximity, grade, and lien burden."""
+    score = 0
+    surplus = lead_row.get("overbid_amount") or lead_row.get("surplus_amount") or lead_row.get("estimated_surplus") or 0
+    try:
+        surplus = float(surplus)
+    except (ValueError, TypeError):
+        surplus = 0.0
+
+    if surplus >= 50000:
+        score += 3
+    elif surplus >= 20000:
+        score += 2
+    elif surplus >= 5000:
+        score += 1
+
+    # Deadline proximity
+    sale_date = lead_row.get("sale_date")
+    if sale_date:
+        try:
+            from datetime import date as _date
+            if isinstance(sale_date, str):
+                sd = _date.fromisoformat(sale_date[:10])
+            else:
+                sd = sale_date
+            # Colorado: 75 days after sale for redemption, then 1 year for surplus claim
+            claim_deadline = sd + timedelta(days=75 + 365)
+            days_left = (claim_deadline - _date.today()).days
+            if 90 < days_left <= 365:
+                score += 2
+            elif days_left <= 90:
+                score += 3
+        except Exception:
+            pass
+
+    grade = lead_row.get("data_grade", "")
+    if grade == "GOLD":
+        score += 2
+    elif grade == "SILVER":
+        score += 1
+
+    # No open liens = +1
+    asset_id = lead_row.get("id", "")
+    try:
+        lien_row = conn.execute(
+            "SELECT COALESCE(SUM(amount_cents), 0) as total FROM lien_records WHERE asset_id = ? AND is_open = 1",
+            [asset_id]
+        ).fetchone()
+        if lien_row and (lien_row["total"] or 0) == 0:
+            score += 1
+    except Exception:
+        pass
+
+    return min(10, score)
+
+
+def _row_to_full(row: dict, conn=None, unlocked_by_me: bool = True, is_admin: bool = False) -> dict:
+    """Convert a leads row to FullAsset dict. NULL-safe.
+
+    Optional conn enables quality_badge and opportunity_score computation.
+    unlocked_by_me / is_admin control owner_name masking (EPIC 1C).
+    """
     safe = _row_to_safe(row)
     # Exact (unrounded) surplus for authenticated users — override the $100-rounded preview value
     exact_surplus = (
@@ -1023,9 +1134,19 @@ def _row_to_full(row: dict) -> dict:
         or _safe_float(row.get("overbid_amount"))
         or 0.0
     )
+
+    owner_name = row.get("owner_name")
+    # EPIC 1C: mask owner_name for locked, non-admin users
+    if not unlocked_by_me and not is_admin and owner_name:
+        parts = owner_name.split()
+        if len(parts) >= 2:
+            owner_name = parts[0][0] + ". " + parts[-1]
+        else:
+            owner_name = owner_name[0] + "." if owner_name else owner_name
+
     safe.update({
         "estimated_surplus": round(exact_surplus, 2),
-        "owner_name": row.get("owner_name"),
+        "owner_name": owner_name,
         "property_address": row.get("property_address"),
         "winning_bid": _safe_float(row.get("winning_bid")),
         "total_debt": _safe_float(row.get("total_debt")),
@@ -1033,7 +1154,46 @@ def _row_to_full(row: dict) -> dict:
         "surplus_amount": _safe_float(row.get("surplus_amount")),
         "overbid_amount": _safe_float(row.get("overbid_amount")),
         "recorder_link": row.get("recorder_link"),
+        "verification_state": row.get("verification_state", "RAW"),
     })
+
+    # EPIC 2D: quality badge and opportunity score (require conn)
+    if conn is not None:
+        lead_id = row.get("id", "")
+        county = (row.get("county") or "").upper()
+        case_number = (row.get("case_number") or "").upper()
+        asset_id_canonical = f"FORECLOSURE:CO:{county}:{case_number}"
+
+        ev_count = 0
+        snap_count = 0
+        try:
+            if _table_exists_conn(conn, "evidence_documents"):
+                ev_count = conn.execute(
+                    "SELECT COUNT(*) FROM evidence_documents WHERE asset_id = ?", [lead_id]
+                ).fetchone()[0]
+        except Exception:
+            pass
+        try:
+            if _table_exists_conn(conn, "html_snapshots"):
+                snap_count = conn.execute(
+                    "SELECT COUNT(*) FROM html_snapshots WHERE asset_id = ?", [asset_id_canonical]
+                ).fetchone()[0]
+        except Exception:
+            pass
+
+        if ev_count > 0:
+            quality_badge = "VERIFIED"
+        elif snap_count > 0:
+            quality_badge = "PARTIAL"
+        else:
+            quality_badge = "ESTIMATED"
+
+        safe["quality_badge"] = quality_badge
+        safe["opportunity_score"] = _compute_opportunity_score(row, conn)
+    else:
+        safe["quality_badge"] = "ESTIMATED"
+        safe["opportunity_score"] = 0
+
     return safe
 
 
@@ -1427,6 +1587,27 @@ async def startup():
     except Exception as e:
         log.warning("vNEXT table detection failed: %s", e)
 
+    # Apply migration 016: auth security columns (idempotent)
+    try:
+        _mc = _get_conn()
+        try:
+            _mc_cols = {r[1] for r in _mc.execute("PRAGMA table_info(users)").fetchall()}
+            _016 = {
+                "failed_login_count": "INTEGER DEFAULT 0",
+                "locked_until": "TEXT",
+                "password_reset_token": "TEXT",
+                "password_reset_sent_at": "TEXT",
+            }
+            for _col, _typedef in _016.items():
+                if _col not in _mc_cols:
+                    _mc.execute(f"ALTER TABLE users ADD COLUMN {_col} {_typedef}")
+                    log.info("Migration 016: added users.%s", _col)
+            _mc.commit()
+        finally:
+            _mc.close()
+    except Exception as _me:
+        log.warning("Migration 016 partial: %s", _me)
+
     # Email mode
     email_mode = os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower()
     log.info("Email mode: %s", email_mode)
@@ -1443,8 +1624,34 @@ async def startup():
     except Exception:
         pass
 
+    # Apply migration 018: ops_jobs table (idempotent)
+    try:
+        _oj = _get_conn()
+        try:
+            _oj.execute("""
+                CREATE TABLE IF NOT EXISTS ops_jobs (
+                    id           TEXT PRIMARY KEY,
+                    command      TEXT NOT NULL,
+                    args_json    TEXT,
+                    status       TEXT NOT NULL DEFAULT 'QUEUED',
+                    triggered_by TEXT,
+                    triggered_at INTEGER NOT NULL,
+                    started_at   INTEGER,
+                    finished_at  INTEGER,
+                    output       TEXT,
+                    exit_code    INTEGER,
+                    county       TEXT
+                )
+            """)
+            _oj.execute("CREATE INDEX IF NOT EXISTS idx_ops_jobs_triggered ON ops_jobs(triggered_at DESC)")
+            _oj.commit()
+        finally:
+            _oj.close()
+    except Exception as _oe:
+        log.warning("Migration 018 (ops_jobs): %s", _oe)
+
     log.info(
-        "Omega v4.7 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d | build: %s",
+        "Omega v4.8 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d | build: %s",
         VERIFUSE_DB_PATH, inode, sha, rows, len(_LEADS_COLUMNS), _BUILD_ID,
     )
 
@@ -1642,6 +1849,7 @@ async def get_leads(
     include_reject: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    verification_state: Optional[str] = Query(None),
 ):
     """Return paginated leads as SafeAsset. Handles NULLs gracefully.
 
@@ -1672,6 +1880,9 @@ async def get_leads(
             if grade:
                 where += " AND data_grade = ?"
                 params.append(grade)
+            if verification_state:
+                where += " AND verification_state = ?"
+                params.append(verification_state)
 
             # Count for pagination
             total = conn.execute(f"SELECT COUNT(*) FROM leads{where}", params).fetchone()[0]
@@ -1757,6 +1968,13 @@ async def unlock_lead(lead_id: str, request: Request):
     ip = _get_client_ip(request)
     user_id = user["user_id"]
 
+    # ── Parse optional body (reason_code / ticket_id for admin audit) ─
+    _unlock_body: dict = {}
+    try:
+        _unlock_body = await request.json()
+    except Exception:
+        pass
+
     # ── Role gate ────────────────────────────────────────────────
     role = user.get("role", "public")
     if role not in ("approved_attorney", "admin") and not _effective_admin(user, request):
@@ -1797,7 +2015,12 @@ async def unlock_lead(lead_id: str, request: Request):
                     )
                 except sqlite3.IntegrityError:
                     pass
-            _audit_log(conn2, user_id, "admin_unlock_bypass", {"lead_id": lead_id}, ip)
+            _audit_log(conn2, user_id, "admin_unlock_bypass", {
+                "reason_code": _unlock_body.get("reason_code", "ADMIN_ACCESS"),
+                "ticket_id": _unlock_body.get("ticket_id"),
+                "case_id": lead_id,
+                "ip": ip,
+            }, ip)
             conn2.execute("COMMIT")
         except Exception as e:
             try:
@@ -1808,20 +2031,22 @@ async def unlock_lead(lead_id: str, request: Request):
         finally:
             conn2.close()
 
-        result = _row_to_full(dict(row))
-        # Phase 5: source_doc_count for UI evidence lock
+        _sc2 = _get_conn()
         try:
-            _sc2 = _get_conn()
+            result = _row_to_full(dict(row), conn=_sc2, unlocked_by_me=True, is_admin=True)
+            # Phase 5: source_doc_count for UI evidence lock
             _lead_id2 = dict(row).get("id", "")
             _county2 = dict(row).get("county", "")
             _case2 = dict(row).get("case_number", "")
             _asset_key2 = f"FORECLOSURE:CO:{_county2.upper()}:{_case2.upper()}"
-            _snap_ct2 = _sc2.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key2]).fetchone()[0]
-            _pdf_ct2 = _sc2.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_lead_id2]).fetchone()[0]
-            result["source_doc_count"] = _snap_ct2 + _pdf_ct2
+            try:
+                _snap_ct2 = _sc2.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key2]).fetchone()[0]
+                _pdf_ct2 = _sc2.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_lead_id2]).fetchone()[0]
+                result["source_doc_count"] = _snap_ct2 + _pdf_ct2
+            except Exception:
+                result["source_doc_count"] = 0
+        finally:
             _sc2.close()
-        except Exception:
-            result["source_doc_count"] = 0
         result["ok"] = True
         result["credits_remaining"] = -1
         result["credits_spent"] = 0
@@ -1880,7 +2105,7 @@ async def unlock_lead(lead_id: str, request: Request):
             # Already unlocked — return full asset, no credit spend
             balance = _ledger_balance(conn, user_id)
             conn.execute("COMMIT")
-            result = _row_to_full(lead)
+            result = _row_to_full(lead, conn=conn, unlocked_by_me=True, is_admin=False)
             # Phase 5: source_doc_count for UI evidence lock
             try:
                 _lead_id3 = lead.get("id", "")
@@ -1964,20 +2189,22 @@ async def unlock_lead(lead_id: str, request: Request):
     finally:
         conn.close()
 
-    result = _row_to_full(lead)
-    # Phase 5: source_doc_count for UI evidence lock
+    _sc = _get_conn()
     try:
-        _sc = _get_conn()
+        result = _row_to_full(lead, conn=_sc, unlocked_by_me=True, is_admin=False)
+        # Phase 5: source_doc_count for UI evidence lock
         _lead_uuid = lead.get("id", "")
         _county = lead.get("county", "")
         _case = lead.get("case_number", "")
         _asset_key = f"FORECLOSURE:CO:{_county.upper()}:{_case.upper()}"
-        _snap_ct = _sc.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key]).fetchone()[0]
-        _pdf_ct = _sc.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_lead_uuid]).fetchone()[0]
-        result["source_doc_count"] = _snap_ct + _pdf_ct
+        try:
+            _snap_ct = _sc.execute("SELECT COUNT(*) FROM html_snapshots WHERE asset_id=?", [_asset_key]).fetchone()[0]
+            _pdf_ct = _sc.execute("SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [_lead_uuid]).fetchone()[0]
+            result["source_doc_count"] = _snap_ct + _pdf_ct
+        except Exception:
+            result["source_doc_count"] = 0
+    finally:
         _sc.close()
-    except Exception:
-        result["source_doc_count"] = 0
     result["ok"] = True
     result["credits_remaining"] = credits_after
     result["credits_spent"] = cost
@@ -2100,20 +2327,40 @@ async def get_stats():
                 "SELECT COUNT(*) FROM leads WHERE data_grade = 'REJECT'"
             ).fetchone()[0]
 
-            # Pre-sale pipeline: upcoming auctions not yet sold
+            # Pre-sale pipeline: upcoming auctions (explicit PRE_SALE status OR future scheduled sale date)
             pre_sale_count = conn.execute(
-                "SELECT COUNT(*) FROM leads WHERE processing_status = 'PRE_SALE'"
+                "SELECT COUNT(*) FROM leads WHERE processing_status = 'PRE_SALE' "
+                "OR (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now')) "
+                "OR (sale_date IS NOT NULL AND sale_date > date('now'))"
             ).fetchone()[0]
             pre_sale_surplus = conn.execute(
-                "SELECT COALESCE(SUM(COALESCE(pre_sale_estimated_surplus, opening_bid, 0)), 0) "
-                "FROM leads WHERE processing_status = 'PRE_SALE' AND opening_bid > 0"
+                "SELECT COALESCE(SUM(COALESCE(opening_bid, 0)), 0) "
+                "FROM leads WHERE (processing_status = 'PRE_SALE' "
+                "OR (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now')) "
+                "OR (sale_date IS NOT NULL AND sale_date > date('now'))) "
+                "AND opening_bid > 0"
             ).fetchone()[0]
 
-            # County list from county_profiles (active counties in platform)
+            # County list from county_profiles (active counties in platform — for filter UI)
             county_rows = conn.execute(
                 "SELECT county FROM county_profiles ORDER BY county"
             ).fetchall()
             county_list = [r[0].replace("_", " ").title() for r in county_rows] if county_rows else []
+
+            # Counties actually covered: active GovSoft config + real GOLD/SILVER/BRONZE leads
+            active_rows = conn.execute("""
+                SELECT DISTINCT l.county FROM leads l
+                JOIN govsoft_county_configs gcc ON gcc.county = l.county AND gcc.active = 1
+                WHERE l.data_grade IN ('GOLD','SILVER','BRONZE')
+                ORDER BY l.county
+            """).fetchall()
+            counties_covered = len(active_rows)
+
+            # New leads added in last 7 days (GOLD/SILVER only)
+            new_leads_7d = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE data_grade IN ('GOLD','SILVER') "
+                "AND updated_at >= datetime('now', '-7 days')"
+            ).fetchone()[0]
         finally:
             conn.close()
 
@@ -2127,6 +2374,8 @@ async def get_stats():
             "bronze_grade": bronze_count,
             "reject_grade": reject_count,
             "county_list": county_list,
+            "counties_covered": counties_covered,
+            "new_leads_7d": new_leads_7d,
             "total_claimable_surplus": round(total_surplus, 2),
             "counties": [dict(r) for r in counties],
             "stream_breakdown": stream_breakdown,
@@ -2142,6 +2391,47 @@ async def get_stats():
     _stats_cache["data"] = result
     _stats_cache["expires"] = _time.monotonic() + _STATS_CACHE_TTL
     return result
+
+
+# ── Auth helpers ────────────────────────────────────────────────────
+
+def _trigger_verification_email(user_id: str, email: str, conn=None) -> None:
+    """Send a 6-digit verification code. Reusable from register + send-verification endpoints."""
+    code = "".join(random.choices(string.digits, k=6))
+    now_ts = datetime.now(timezone.utc).isoformat()
+    _conn = conn or _get_conn()
+    _close_after = conn is None
+    try:
+        _conn.execute(
+            "UPDATE users SET email_verify_code = ?, email_verify_sent_at = ? WHERE user_id = ?",
+            [code, now_ts, user_id],
+        )
+        _conn.commit()
+    finally:
+        if _close_after:
+            _conn.close()
+    email_mode = os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower()
+    if _IS_DEV and email_mode == "log":
+        log.info("[DEV] Verification code for %s: %s", email, code)
+        print(f"[DEV] Verification code for {email}: {code}", flush=True)
+    html = _build_html_email(
+        "Verify Your Email Address",
+        f"""<p style="color:#cbd5e1;font-size:1rem;margin:0 0 20px;">
+          Enter this code in the VeriFuse app to verify your email address:
+        </p>
+        <div style="background:#0f172a;border-radius:8px;padding:20px;text-align:center;margin:0 0 20px;border:1px solid #334155;">
+          <span style="font-size:2.5rem;font-weight:700;letter-spacing:0.2em;color:#22c55e;font-family:monospace;">{code}</span>
+        </div>
+        <p style="color:#64748b;font-size:0.875rem;margin:0;">
+          This code expires in 10 minutes. If you did not request this, you can safely ignore this email.
+        </p>""",
+    )
+    _send_email(
+        to=email,
+        subject="VeriFuse — Verify Your Email",
+        body=f"Your VeriFuse verification code is: {code}\n\nThis code expires in 10 minutes.",
+        html_body=html,
+    )
 
 
 # ── Auth endpoints (delegate to auth module) ────────────────────────
@@ -2179,6 +2469,12 @@ async def api_register(request: Request):
             conn2.commit()
         finally:
             conn2.close()
+    # Auto-send verification email at registration
+    try:
+        _trigger_verification_email(user["user_id"], email)
+    except Exception as _ve:
+        log.warning("Auto-send verification email failed for %s: %s", email, _ve)
+
     conn = _get_conn()
     try:
         balance = _ledger_balance(conn, user["user_id"])
@@ -2365,6 +2661,152 @@ async def verify_email(request: Request):
     return {"ok": True, "email_verified": True}
 
 
+# ── Forgot / Reset / Change Password ────────────────────────────────
+
+@app.post("/api/auth/forgot-password")
+@limiter.limit("3/minute")
+async def forgot_password(request: Request):
+    """Send password reset link. Returns ok=True regardless (no email enumeration)."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+    email = body.get("email", "").strip().lower()
+    if not email:
+        return {"ok": True}
+
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(32)
+    now_ts = datetime.now(timezone.utc).isoformat()
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT user_id FROM users WHERE email = ?", [email]).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE users SET password_reset_token = ?, password_reset_sent_at = ? WHERE user_id = ?",
+                [token, now_ts, row["user_id"]],
+            )
+            conn.commit()
+            reset_url = f"https://verifuse.tech/reset-password?token={token}"
+            pw_html = _build_html_email(
+                "Password Reset Request",
+                f"""<p style="color:#cbd5e1;margin:0 0 20px;">
+                  We received a request to reset your VeriFuse password.
+                  Click the button below to set a new password (link expires in 1 hour):
+                </p>
+                <div style="text-align:center;margin:0 0 24px;">
+                  <a href="{reset_url}" style="display:inline-block;background:#22c55e;color:#0f172a;padding:12px 28px;border-radius:6px;font-weight:700;text-decoration:none;font-size:0.95rem;">
+                    Reset My Password →
+                  </a>
+                </div>
+                <p style="color:#64748b;font-size:0.875rem;margin:0;">
+                  If you didn't request a password reset, you can safely ignore this email.
+                  Your password will remain unchanged.
+                </p>""",
+            )
+            _send_email(
+                to=email,
+                subject="Reset your VeriFuse password",
+                body=(
+                    f"You requested a VeriFuse password reset.\n\n"
+                    f"Click the link below (expires in 1 hour):\n{reset_url}\n\n"
+                    f"If you did not request this, ignore this email."
+                ),
+                html_body=pw_html,
+            )
+            if _IS_DEV:
+                log.info("[DEV] Password reset token for %s: %s", email, token)
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/auth/reset-password")
+@limiter.limit("5/minute")
+async def reset_password(request: Request):
+    """Reset password using token from email link. Token expires in 1 hour."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+    token = body.get("token", "").strip()
+    password = body.get("password", "")
+    if not token or not password:
+        raise HTTPException(status_code=400, detail="Token and password required.")
+
+    from verifuse_v2.server.auth import _validate_password, hash_password
+    _validate_password(password)
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT user_id, password_reset_token, password_reset_sent_at FROM users "
+            "WHERE password_reset_token = ?",
+            [token],
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+        sent_at = row["password_reset_sent_at"]
+        if sent_at:
+            try:
+                sent_dt = datetime.fromisoformat(sent_at.replace("Z", "+00:00"))
+                if sent_dt.tzinfo is None:
+                    sent_dt = sent_dt.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - sent_dt > timedelta(hours=1):
+                    raise HTTPException(status_code=400, detail="Reset token has expired. Request a new one.")
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+
+        new_hash = hash_password(password)
+        conn.execute(
+            "UPDATE users SET password_hash = ?, password_reset_token = NULL, password_reset_sent_at = NULL, "
+            "failed_login_count = 0, locked_until = NULL WHERE user_id = ?",
+            [new_hash, row["user_id"]],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/auth/change-password")
+@limiter.limit("10/minute")
+async def change_password(request: Request):
+    """Change password for authenticated user. Requires current password."""
+    user = _require_user(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+    current_pw = body.get("current_password", "")
+    new_pw = body.get("new_password", "")
+    if not current_pw or not new_pw:
+        raise HTTPException(status_code=400, detail="current_password and new_password required.")
+
+    from verifuse_v2.server.auth import _validate_password, hash_password, verify_password
+    _validate_password(new_pw)
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE user_id = ?", [user["user_id"]]
+        ).fetchone()
+        if not row or not verify_password(current_pw, row["password_hash"]):
+            raise HTTPException(status_code=401, detail="Current password is incorrect.")
+        new_hash = hash_password(new_pw)
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            [new_hash, user["user_id"]],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
 # ── GET /api/counties — County breakdown ───────────────────────────
 
 # ── GET /api/lead/{id} — Single lead detail (frontend compat) ─────
@@ -2408,7 +2850,7 @@ async def get_lead_detail(lead_id: str, request: Request):
 
             # ── Admin auto-unlock: return full PII data without click ────────
             if is_eff_admin:
-                full = _row_to_full(dict(row))
+                full = _row_to_full(dict(row), conn=conn, unlocked_by_me=True, is_admin=True)
                 result.update(full)
                 result["unlocked_by_me"] = True
                 is_unlocked = True
@@ -2422,6 +2864,9 @@ async def get_lead_detail(lead_id: str, request: Request):
                     ).fetchone()
                     is_unlocked = bool(u_row)
                 result["unlocked_by_me"] = is_unlocked
+                if is_unlocked:
+                    full = _row_to_full(dict(row), conn=conn, unlocked_by_me=True, is_admin=False)
+                    result.update(full)
 
             # ── Forensic audit data (Phase 4 — unlocked leads only) ──────────
             # surplus_math_audit: math proof behind the GOLD grade
@@ -3241,9 +3686,13 @@ async def admin_users(
             where = "WHERE upper(attorney_status) = upper(?)"
             params.append(attorney_status)
         rows = conn.execute(
-            f"SELECT user_id, email, full_name, firm_name, bar_number, bar_state, "
-            f"tier, credits_remaining, attorney_status, role, "
-            f"is_admin, is_active, email_verified, created_at, last_login_at FROM users {where}",
+            f"SELECT u.user_id, u.email, u.full_name, u.firm_name, u.bar_number, u.bar_state, "
+            f"u.tier, u.attorney_status, u.role, "
+            f"u.is_admin, u.is_active, u.email_verified, u.created_at, u.last_login_at, "
+            f"COALESCE((SELECT SUM(le.qty_remaining) FROM unlock_ledger_entries le "
+            f"WHERE le.user_id = u.user_id "
+            f"AND (le.expires_ts IS NULL OR le.expires_ts > strftime('%s','now'))), 0) as credits_remaining "
+            f"FROM users u {where}",
             params,
         ).fetchall()
     finally:
@@ -3344,7 +3793,7 @@ async def admin_system_stats(request: Request):
                     entry["meta"] = {}
             recent_audit.append(entry)
 
-        # User counts
+        # User counts (excludes admin accounts)
         user_counts = conn.execute("""
             SELECT
                 COUNT(*) as total,
@@ -3353,8 +3802,28 @@ async def admin_system_stats(request: Request):
                 SUM(CASE WHEN tier='sovereign' THEN 1 ELSE 0 END) as sovereign_users,
                 SUM(CASE WHEN tier='partner' THEN 1 ELSE 0 END) as partner_users,
                 SUM(CASE WHEN tier='associate' THEN 1 ELSE 0 END) as associate_users
-            FROM users
+            FROM users WHERE is_admin = 0
         """).fetchone()
+
+        # EPIC 4H: Attorney outcomes summary
+        attorney_outcomes_summary: dict = {}
+        try:
+            outcome_rows = conn.execute("""
+                SELECT
+                    COALESCE(outcome_type, 'PENDING') as outcome_type,
+                    COUNT(*) as case_count,
+                    COALESCE(SUM(outcome_funds_cents), 0) as total_funds_cents
+                FROM attorney_cases
+                GROUP BY outcome_type
+                ORDER BY case_count DESC
+            """).fetchall()
+            attorney_outcomes_summary = {
+                "by_outcome": [dict(r) for r in outcome_rows],
+                "total_cases": sum(r["case_count"] for r in outcome_rows),
+                "total_funds_cents": sum(r["total_funds_cents"] for r in outcome_rows),
+            }
+        except Exception:
+            attorney_outcomes_summary = {"by_outcome": [], "total_cases": 0, "total_funds_cents": 0}
 
     finally:
         conn.close()
@@ -3373,6 +3842,7 @@ async def admin_system_stats(request: Request):
         "verified_pipeline_surplus": round(vp_row["total"], 2),
         "recent_audit": recent_audit,
         "user_counts": dict(user_counts) if user_counts else {},
+        "attorney_outcomes_summary": attorney_outcomes_summary,
         "stripe_configured": stripe_configured,
         "stripe_publishable_configured": stripe_publishable_configured,
         "stripe_mode": STRIPE_MODE,
@@ -3394,21 +3864,21 @@ async def pipeline_status(request: Request):
         conn = _thread_conn()
         rows = conn.execute("""
             SELECT
-                l.county,
-                COUNT(*) as total,
-                SUM(CASE WHEN l.data_grade = 'GOLD' THEN 1 ELSE 0 END) as gold,
-                SUM(CASE WHEN l.data_grade = 'SILVER' THEN 1 ELSE 0 END) as silver,
-                SUM(CASE WHEN l.data_grade = 'BRONZE' THEN 1 ELSE 0 END) as bronze,
-                SUM(CASE WHEN l.data_grade = 'REJECT' THEN 1 ELSE 0 END) as reject,
-                SUM(CASE WHEN l.sale_date IS NULL AND l.data_grade = 'BRONZE' THEN 1 ELSE 0 END) as bronze_no_sale_date,
-                SUM(CASE WHEN (l.overbid_amount IS NULL OR l.overbid_amount = 0) AND l.data_grade = 'BRONZE' THEN 1 ELSE 0 END) as bronze_no_overbid,
+                cp.county,
+                COALESCE(SUM(CASE WHEN l.data_grade != 'REJECT' THEN 1 ELSE 0 END), 0) as total,
+                COALESCE(SUM(CASE WHEN l.data_grade = 'GOLD' THEN 1 ELSE 0 END), 0) as gold,
+                COALESCE(SUM(CASE WHEN l.data_grade = 'SILVER' THEN 1 ELSE 0 END), 0) as silver,
+                COALESCE(SUM(CASE WHEN l.data_grade = 'BRONZE' THEN 1 ELSE 0 END), 0) as bronze,
+                COALESCE(SUM(CASE WHEN l.data_grade = 'REJECT' THEN 1 ELSE 0 END), 0) as reject,
+                COALESCE(SUM(CASE WHEN l.sale_date IS NULL AND l.data_grade = 'BRONZE' THEN 1 ELSE 0 END), 0) as bronze_no_sale_date,
+                COALESCE(SUM(CASE WHEN l.overbid_amount IS NULL AND l.data_grade = 'BRONZE' THEN 1 ELSE 0 END), 0) as bronze_not_extracted,
+                COALESCE(SUM(CASE WHEN l.overbid_amount IS NOT NULL AND l.overbid_amount = 0 AND l.data_grade = 'BRONZE' THEN 1 ELSE 0 END), 0) as bronze_zero_overbid,
                 cp.platform_type,
                 cp.last_verified_ts
-            FROM leads l
-            LEFT JOIN county_profiles cp ON cp.county = l.county
-            WHERE l.data_grade != 'REJECT'
-            GROUP BY l.county
-            ORDER BY bronze DESC
+            FROM county_profiles cp
+            LEFT JOIN leads l ON l.county = cp.county
+            GROUP BY cp.county
+            ORDER BY gold DESC, silver DESC, bronze DESC, cp.county ASC
         """).fetchall()
         # SALE_INFO snapshot counts per county (asset_id = FORECLOSURE:CO:{COUNTY}:{CASE})
         snap_rows = conn.execute("""
@@ -3420,26 +3890,68 @@ async def pipeline_status(request: Request):
               AND asset_id LIKE 'FORECLOSURE:CO:%'
             GROUP BY county
         """).fetchall()
-        conn.close()
         snap_by_county = {r["county"]: r["cnt"] for r in snap_rows}
-        return rows, snap_by_county
+        # Last ingestion run per county (with run_duration_s and error_message if available)
+        try:
+            last_run_rows = conn.execute("""
+                SELECT county, MAX(start_ts) as last_ts
+                FROM ingestion_runs GROUP BY county
+            """).fetchall()
+            last_run_by_county = {r["county"]: r["last_ts"] for r in last_run_rows}
+        except Exception:
+            last_run_by_county = {}
+        # Latest run metadata per county (duration + error)
+        run_meta_by_county: dict = {}
+        try:
+            _cols = [row[1] for row in conn.execute("PRAGMA table_info(ingestion_runs)").fetchall()]
+            _has_duration = "run_duration_s" in _cols
+            _has_error = "error_message" in _cols
+            _sel_extra = ""
+            if _has_duration:
+                _sel_extra += ", ir.run_duration_s"
+            if _has_error:
+                _sel_extra += ", ir.error_message"
+            if _sel_extra:
+                _meta_rows = conn.execute(f"""
+                    SELECT ir.county{_sel_extra}
+                    FROM ingestion_runs ir
+                    INNER JOIN (
+                        SELECT county, MAX(start_ts) as max_ts FROM ingestion_runs GROUP BY county
+                    ) latest ON ir.county = latest.county AND ir.start_ts = latest.max_ts
+                """).fetchall()
+                for mr in _meta_rows:
+                    meta: dict = {}
+                    if _has_duration:
+                        meta["run_duration_s"] = mr["run_duration_s"]
+                    if _has_error:
+                        meta["error_message"] = mr["error_message"]
+                    run_meta_by_county[mr["county"]] = meta
+        except Exception:
+            pass
+        conn.close()
+        return rows, snap_by_county, last_run_by_county, run_meta_by_county
 
-    rows, snap_by_county = await _run_in_db(_query)
+    rows, snap_by_county, last_run_by_county, run_meta_by_county = await _run_in_db(_query)
     result = []
     _captcha_counties = {"mesa", "eagle"}
     for r in rows:
         bronze_no_sale_date = r["bronze_no_sale_date"] or 0
-        bronze_no_overbid = r["bronze_no_overbid"] or 0
+        bronze_not_extracted = r["bronze_not_extracted"] or 0
+        bronze_zero_overbid = r["bronze_zero_overbid"] or 0
         bronze = r["bronze"] or 0
         county = r["county"] or ""
         has_snapshots = snap_by_county.get(county, 0)
         platform = r["platform_type"] or ""
+        last_ts = last_run_by_county.get(county)
+        run_meta = run_meta_by_county.get(county, {})
         if county in _captcha_counties or "captcha" in platform:
             action = "captcha_blocked"
         elif bronze > 0 and bronze_no_sale_date > bronze * 0.5:
             action = "sale_info_backfill_needed"
-        elif bronze_no_overbid > 0 and bronze > 0:
+        elif bronze_not_extracted > 0:
             action = "gate4_ready"
+        elif bronze_zero_overbid > 0:
+            action = "no_surplus"   # Gate 4 ran — confirmed $0 overbid
         elif bronze == 0:
             action = "clean"
         else:
@@ -3452,13 +3964,201 @@ async def pipeline_status(request: Request):
             "bronze": bronze,
             "reject": r["reject"] or 0,
             "bronze_no_sale_date": bronze_no_sale_date,
-            "bronze_no_overbid": bronze_no_overbid,
+            "bronze_not_extracted": bronze_not_extracted,
+            "bronze_zero_overbid": bronze_zero_overbid,
             "has_snapshots": has_snapshots,
             "platform_type": platform,
             "last_verified_ts": r["last_verified_ts"],
+            "last_ingestion_ts": last_ts,
+            "run_duration_s": run_meta.get("run_duration_s"),
+            "error_message": run_meta.get("error_message"),
             "action_needed": action,
         })
     return {"pipeline": result, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/api/admin/county-health")
+async def admin_county_health(request: Request):
+    """Layer 6: Per-county health scores — sale_date coverage, extraction rate, evidence, parser drift (admin only)."""
+    _require_admin_or_api_key(request)
+
+    def _query():
+        conn = _thread_conn()
+        # ── Lead quality per county ──────────────────────────────────────────
+        quality_rows = conn.execute("""
+            SELECT
+                cp.county,
+                cp.platform_type,
+                COALESCE(SUM(CASE WHEN l.data_grade != 'REJECT' THEN 1 ELSE 0 END), 0) as total,
+                COALESCE(SUM(CASE WHEN l.data_grade = 'GOLD' THEN 1 ELSE 0 END), 0)   as gold,
+                COALESCE(SUM(CASE WHEN l.data_grade = 'SILVER' THEN 1 ELSE 0 END), 0) as silver,
+                COALESCE(SUM(CASE WHEN l.data_grade = 'BRONZE' THEN 1 ELSE 0 END), 0) as bronze,
+                COALESCE(SUM(CASE WHEN l.data_grade = 'REJECT' THEN 1 ELSE 0 END), 0) as reject,
+                COALESCE(SUM(CASE WHEN l.data_grade != 'REJECT' AND l.sale_date IS NOT NULL THEN 1 ELSE 0 END), 0) as has_sale_date,
+                COALESCE(SUM(CASE WHEN l.data_grade != 'REJECT' AND l.overbid_amount IS NOT NULL THEN 1 ELSE 0 END), 0) as has_overbid,
+                COALESCE(SUM(CASE WHEN l.data_grade != 'REJECT' AND l.overbid_amount IS NOT NULL AND l.overbid_amount > 0 THEN 1 ELSE 0 END), 0) as has_positive_overbid
+            FROM county_profiles cp
+            LEFT JOIN leads l ON l.county = cp.county
+            GROUP BY cp.county, cp.platform_type
+        """).fetchall()
+
+        # ── Last ingestion run per county ──────────────────────────────────
+        now_ts = int(__import__("time").time())
+        try:
+            _ir_cols = {r[1] for r in conn.execute("PRAGMA table_info(ingestion_runs)").fetchall()}
+            _has_browser = "browser_count" in _ir_cols
+            _extra = ", ir.browser_count, ir.db_count, ir.delta" if _has_browser else ""
+            run_rows = conn.execute(f"""
+                SELECT ir.county, ir.start_ts, ir.status, ir.cases_processed{_extra}
+                FROM ingestion_runs ir
+                INNER JOIN (
+                    SELECT county, MAX(start_ts) max_ts FROM ingestion_runs GROUP BY county
+                ) latest ON ir.county = latest.county AND ir.start_ts = latest.max_ts
+            """).fetchall()
+            runs_by_county = {}
+            for r in run_rows:
+                runs_by_county[r["county"]] = {
+                    "last_run_age_days": round((now_ts - r["start_ts"]) / 86400, 1) if r["start_ts"] else None,
+                    "last_run_status": r["status"],
+                    "cases_processed": r["cases_processed"],
+                    "browser_count": r["browser_count"] if _has_browser else 0,
+                    "db_count": r["db_count"] if _has_browser else 0,
+                    "delta": r["delta"] if _has_browser else 0,
+                }
+        except Exception:
+            runs_by_county = {}
+
+        # ── Parser drift from county_ingestion_runs ─────────────────────────
+        try:
+            cir_rows = conn.execute("""
+                SELECT cir.county, cir.browser_count, cir.db_count, cir.delta, cir.status
+                FROM county_ingestion_runs cir
+                INNER JOIN (
+                    SELECT county, MAX(run_ts) max_ts FROM county_ingestion_runs GROUP BY county
+                ) latest ON cir.county = latest.county AND cir.run_ts = latest.max_ts
+            """).fetchall()
+            drift_by_county = {r["county"]: dict(r) for r in cir_rows}
+        except Exception:
+            drift_by_county = {}
+
+        # ── Evidence doc counts per county ─────────────────────────────────
+        try:
+            ev_rows = conn.execute("""
+                SELECT LOWER(SUBSTR(ed.asset_id, 17,
+                       INSTR(SUBSTR(ed.asset_id, 17), ':') - 1)) as county,
+                       COUNT(DISTINCT l.id) as leads_with_evidence
+                FROM evidence_documents ed
+                JOIN leads l ON l.id = ed.asset_id
+                WHERE ed.asset_id LIKE 'FORECLOSURE:CO:%'
+                GROUP BY county
+            """).fetchall()
+            evidence_by_county = {r["county"]: r["leads_with_evidence"] for r in ev_rows}
+        except Exception:
+            evidence_by_county = {}
+
+        # ── Build per-county health records ────────────────────────────────
+        counties_out = []
+        healthy = warning = critical = 0
+        for r in quality_rows:
+            county = r["county"] or ""
+            total = r["total"] or 0
+            gold = r["gold"] or 0
+            silver = r["silver"] or 0
+            bronze = r["bronze"] or 0
+            has_sale_date = r["has_sale_date"] or 0
+            has_overbid = r["has_overbid"] or 0
+            leads_with_ev = evidence_by_county.get(county, 0)
+
+            gold_pct = round(gold / max(gold + silver + bronze, 1) * 100, 1)
+            sale_date_coverage_pct = round(has_sale_date / max(total, 1) * 100, 1) if total > 0 else 0
+            extraction_rate_pct = round(has_overbid / max(total - (r["reject"] or 0), 1) * 100, 1) if total > 0 else 0
+            evidence_pct = round(leads_with_ev / max(total, 1) * 100, 1) if total > 0 else 0
+
+            run = runs_by_county.get(county, {})
+            last_run_age_days = run.get("last_run_age_days")
+            last_run_status = run.get("last_run_status")
+            browser_count = run.get("browser_count", 0) or 0
+            db_count = run.get("db_count", 0) or 0
+            delta = run.get("delta", 0) or 0
+
+            # Drift from county_ingestion_runs (more granular)
+            drift_info = drift_by_county.get(county, {})
+            cir_browser = drift_info.get("browser_count") or 0
+            cir_db = drift_info.get("db_count") or 0
+            cir_delta = drift_info.get("delta") or 0
+            parser_drift = cir_browser > 0 and abs(cir_delta) > max(2, cir_browser * 0.05)
+
+            # Health score (0-100)
+            s = 0
+            if gold_pct >= 30:   s += 25
+            elif gold_pct >= 10: s += 15
+            elif gold_pct >= 1:  s += 5
+            s += min(25, int(sale_date_coverage_pct * 0.25))
+            s += min(20, int(extraction_rate_pct * 0.20))
+            s += min(20, int(evidence_pct * 0.20))
+            if last_run_age_days is not None and last_run_age_days <= 7:   s += 10
+            elif last_run_age_days is None or last_run_age_days > 30:       s -= 10
+            if total == 0: s = 0
+            health_score = max(0, min(100, s))
+
+            # Alert (worst-first priority)
+            alert = None
+            if total == 0:                                      alert = "NO_DATA"
+            elif last_run_age_days and last_run_age_days > 30: alert = "STALE_30D"
+            elif last_run_age_days and last_run_age_days > 7:  alert = "STALE_7D"
+            elif parser_drift:                                  alert = "PARSER_DRIFT"
+            elif gold == 0 and silver == 0 and bronze > 0:    alert = "ALL_BRONZE"
+
+            if health_score >= 70:   healthy += 1
+            elif health_score >= 40: warning += 1
+            else:                    critical += 1
+
+            counties_out.append({
+                "county": county,
+                "platform_type": r["platform_type"] or "unknown",
+                "total": total,
+                "gold": gold, "silver": silver, "bronze": bronze,
+                "gold_pct": gold_pct,
+                "health_score": health_score,
+                "sale_date_coverage_pct": sale_date_coverage_pct,
+                "extraction_rate_pct": extraction_rate_pct,
+                "evidence_pct": evidence_pct,
+                "last_run_age_days": last_run_age_days,
+                "last_run_status": last_run_status,
+                "browser_count": cir_browser or browser_count,
+                "db_count": cir_db or db_count,
+                "delta": cir_delta or delta,
+                "parser_drift": parser_drift,
+                "alert": alert,
+            })
+
+        # Persist health scores back to county_profiles
+        for rec in counties_out:
+            try:
+                conn.execute("""
+                    UPDATE county_profiles SET
+                        health_score = ?, sale_date_coverage_pct = ?,
+                        evidence_pct = ?, extraction_rate_pct = ?,
+                        last_health_check_ts = ?, health_alert = ?
+                    WHERE county = ?
+                """, [
+                    rec["health_score"], int(rec["sale_date_coverage_pct"]),
+                    int(rec["evidence_pct"]), int(rec["extraction_rate_pct"]),
+                    now_ts, rec["alert"], rec["county"],
+                ])
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+
+        counties_out.sort(key=lambda x: (-x["total"], -x["health_score"]))
+        return {
+            "counties": counties_out,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "summary": {"healthy": healthy, "warning": warning, "critical": critical, "total": len(counties_out)},
+        }
+
+    return await _run_in_db(_query)
 
 
 @app.get("/api/admin/revenue-metrics")
@@ -4361,7 +5061,9 @@ async def get_presale_leads(
     def _run():
         conn = _thread_conn()
         try:
-            where = " WHERE processing_status = 'PRE_SALE'"
+            where = (" WHERE (processing_status = 'PRE_SALE'"
+                     " OR (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now'))"
+                     " OR (sale_date IS NOT NULL AND sale_date > date('now')))")
             params: list = []
             if county:
                 where += " AND county = ?"
@@ -4860,3 +5562,1018 @@ async def generate_heir_letter(asset_id: str, request: Request):
             "Cache-Control": "no-store",
         },
     )
+
+
+# ── EPIC 2A: Global Search Endpoint ─────────────────────────────────
+
+@app.get("/api/search")
+@limiter.limit("60/minute")
+async def search_leads(request: Request, q: str = "", limit: int = Query(20, ge=1, le=100)):
+    """Search leads by case_number, property_address, owner_name, or county. Requires auth."""
+    user = _require_user(request)
+    if not q or len(q.strip()) < 2:
+        return []
+
+    def _search(q=q, limit=limit):
+        conn = _thread_conn()
+        try:
+            term = f"%{q.strip()}%"
+            rows = conn.execute("""
+                SELECT id as asset_id, case_number, property_address, county,
+                       data_grade, overbid_amount
+                FROM leads
+                WHERE case_number LIKE ? OR property_address LIKE ?
+                   OR owner_name LIKE ? OR county = ?
+                ORDER BY
+                  CASE data_grade WHEN 'GOLD' THEN 1 WHEN 'SILVER' THEN 2 WHEN 'BRONZE' THEN 3 ELSE 4 END,
+                  overbid_amount DESC
+                LIMIT ?
+            """, [term, term, term, q.strip().lower(), limit]).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    return await _run_in_db(_search)
+
+
+# ── EPIC 2C: Case Timeline Endpoint ─────────────────────────────────
+
+@app.get("/api/lead/{asset_id}/timeline")
+async def get_lead_timeline(asset_id: str, request: Request):
+    """Return chronological case events from pipeline_events + audit_log."""
+    user = _require_user(request)
+
+    def _timeline(asset_id=asset_id):
+        conn = _thread_conn()
+        try:
+            events = []
+            # pipeline_events
+            if _table_exists_conn(conn, "pipeline_events"):
+                rows = conn.execute("""
+                    SELECT event_type, notes, created_at as ts
+                    FROM pipeline_events WHERE asset_id = ?
+                    ORDER BY created_at ASC
+                """, [asset_id]).fetchall()
+                for r in rows:
+                    events.append({
+                        "ts": r["ts"],
+                        "event_type": r["event_type"],
+                        "notes": r["notes"],
+                        "source": "pipeline",
+                    })
+            # audit_log for this lead
+            if _table_exists_conn(conn, "audit_log"):
+                rows = conn.execute("""
+                    SELECT action as event_type, meta_json as notes, created_at as ts
+                    FROM audit_log WHERE resource_id = ? OR meta_json LIKE ?
+                    ORDER BY created_at ASC
+                    LIMIT 50
+                """, [asset_id, f"%{asset_id}%"]).fetchall()
+                for r in rows:
+                    events.append({
+                        "ts": r["ts"],
+                        "event_type": r["event_type"],
+                        "notes": r["notes"],
+                        "source": "audit",
+                    })
+            events.sort(key=lambda x: x.get("ts") or "")
+            return events
+        finally:
+            conn.close()
+
+    return await _run_in_db(_timeline)
+
+
+# ── EPIC 2E: Coverage Map Endpoint ──────────────────────────────────
+
+@app.get("/api/coverage-map")
+async def get_coverage_map():
+    """Return county array for CO coverage choropleth. No auth required."""
+    def _map():
+        conn = _thread_conn()
+        try:
+            rows = conn.execute("""
+                SELECT
+                    cp.county as county_slug,
+                    cp.platform_type,
+                    cp.access_method,
+                    cp.last_verified_ts as last_scraped_at,
+                    COALESCE(cp.digital_accessible, 0) as digital_accessible,
+                    COUNT(CASE WHEN l.data_grade = 'GOLD' THEN 1 END) as gold_count,
+                    COUNT(CASE WHEN l.data_grade = 'SILVER' THEN 1 END) as silver_count,
+                    COUNT(CASE WHEN l.data_grade = 'BRONZE' THEN 1 END) as bronze_count,
+                    COUNT(l.id) as total_leads
+                FROM county_profiles cp
+                LEFT JOIN leads l ON l.county = cp.county
+                GROUP BY cp.county
+            """).fetchall()
+
+            result = []
+            for r in rows:
+                gold = r["gold_count"] or 0
+                silver = r["silver_count"] or 0
+                bronze = r["bronze_count"] or 0
+                total = r["total_leads"] or 0
+
+                if gold > 0 or silver > 0:
+                    status = "active"
+                elif bronze > 0:
+                    status = "partial"
+                elif r["digital_accessible"]:
+                    status = "configured"
+                else:
+                    status = "no_data"
+
+                county_slug = r["county_slug"]
+                county_name = county_slug.replace("_", " ").title() + " County"
+
+                result.append({
+                    "county_slug": county_slug,
+                    "county_name": county_name,
+                    "status": status,
+                    "gold_count": gold,
+                    "silver_count": silver,
+                    "bronze_count": bronze,
+                    "total_leads": total,
+                    "last_scraped_at": r["last_scraped_at"],
+                    "access_method": r["access_method"] or r["platform_type"] or "unknown",
+                })
+            return result
+        finally:
+            conn.close()
+
+    return await _run_in_db(_map)
+
+
+# ── EPIC 2I: API Key Endpoints ───────────────────────────────────────
+
+@app.post("/api/admin/users/{user_id}/api-key")
+async def generate_api_key(user_id: int, request: Request):
+    """Generate a new API key for a user. Admin only."""
+    _require_admin_or_api_key(request)
+    import secrets as _secrets
+    raw_key = "vf_" + _secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    now_str = datetime.now(timezone.utc).isoformat()
+
+    def _store(user_id=user_id, key_hash=key_hash, now_str=now_str):
+        conn = _thread_conn()
+        try:
+            conn.execute(
+                "UPDATE users SET api_key_hash = ?, api_key_created_at = ? WHERE user_id = ?",
+                [key_hash, now_str, user_id]
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    await _run_in_db(_store)
+    return {
+        "api_key": raw_key,
+        "created_at": now_str,
+        "note": "Store this key — it will not be shown again.",
+    }
+
+
+@app.get("/api/admin/users/{user_id}/api-key-status")
+async def get_api_key_status(user_id: int, request: Request):
+    """Return whether a user has an API key configured. Admin only."""
+    _require_admin_or_api_key(request)
+
+    def _status(user_id=user_id):
+        conn = _thread_conn()
+        try:
+            row = conn.execute(
+                "SELECT api_key_hash, api_key_created_at FROM users WHERE user_id = ?",
+                [user_id]
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="User not found")
+            return {"has_key": bool(row["api_key_hash"]), "created_at": row["api_key_created_at"]}
+        finally:
+            conn.close()
+
+    return await _run_in_db(_status)
+
+
+@app.delete("/api/admin/users/{user_id}/api-key")
+async def revoke_api_key(user_id: int, request: Request):
+    """Revoke a user's API key. Admin only."""
+    _require_admin_or_api_key(request)
+
+    def _revoke(user_id=user_id):
+        conn = _thread_conn()
+        try:
+            conn.execute(
+                "UPDATE users SET api_key_hash = NULL, api_key_created_at = NULL WHERE user_id = ?",
+                [user_id]
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    await _run_in_db(_revoke)
+    return {"status": "revoked"}
+
+
+# ── EPIC 4A: Attorney Cases Endpoints ───────────────────────────────
+
+@app.get("/api/my-cases")
+async def list_my_cases(request: Request):
+    """List all attorney cases for the authenticated user."""
+    user = _require_user(request)
+    user_id = user["user_id"]
+
+    def _list(user_id=user_id):
+        conn = _thread_conn()
+        try:
+            rows = conn.execute("""
+                SELECT ac.id, ac.asset_id, ac.stage, ac.outcome_type, ac.notes,
+                       ac.created_at, ac.updated_at,
+                       l.case_number, l.county, l.data_grade, l.overbid_amount,
+                       l.property_address, l.sale_date
+                FROM attorney_cases ac
+                JOIN leads l ON l.id = ac.asset_id
+                WHERE ac.user_id = ?
+                ORDER BY ac.updated_at DESC
+            """, [user_id]).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    return await _run_in_db(_list)
+
+
+class AttorneyCaseCreate(BaseModel):
+    asset_id: str
+    stage: str = "LEADS"
+    notes: Optional[str] = None
+
+
+@app.post("/api/my-cases")
+async def create_my_case(body: AttorneyCaseCreate, request: Request):
+    """Create a new attorney case tracker entry."""
+    user = _require_user(request)
+    user_id = user["user_id"]
+    import uuid as _uuid
+    case_id = _uuid.uuid4().hex
+
+    def _create(user_id=user_id, case_id=case_id):
+        conn = _thread_conn()
+        try:
+            conn.execute("""
+                INSERT INTO attorney_cases (id, asset_id, user_id, stage, notes)
+                VALUES (?, ?, ?, ?, ?)
+            """, [case_id, body.asset_id, user_id, body.stage, body.notes])
+            conn.commit()
+            return {"id": case_id, "asset_id": body.asset_id, "stage": body.stage}
+        finally:
+            conn.close()
+
+    return await _run_in_db(_create)
+
+
+class AttorneyCasePatch(BaseModel):
+    stage: Optional[str] = None
+    notes: Optional[str] = None
+    outcome_type: Optional[str] = None
+    outcome_notes: Optional[str] = None
+    outcome_funds_cents: Optional[int] = None
+
+
+@app.patch("/api/my-cases/{case_id}")
+async def update_my_case(case_id: str, body: AttorneyCasePatch, request: Request):
+    """Update stage, notes, or outcome for an attorney case."""
+    user = _require_user(request)
+    user_id = user["user_id"]
+
+    def _update(user_id=user_id, case_id=case_id):
+        conn = _thread_conn()
+        try:
+            row = conn.execute(
+                "SELECT id FROM attorney_cases WHERE id = ? AND user_id = ?",
+                [case_id, user_id]
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Case not found")
+            updates = []
+            vals = []
+            if body.stage is not None:
+                updates.append("stage = ?"); vals.append(body.stage)
+            if body.notes is not None:
+                updates.append("notes = ?"); vals.append(body.notes)
+            if body.outcome_type is not None:
+                updates.append("outcome_type = ?"); vals.append(body.outcome_type)
+            if body.outcome_notes is not None:
+                updates.append("outcome_notes = ?"); vals.append(body.outcome_notes)
+            if body.outcome_funds_cents is not None:
+                updates.append("outcome_funds_cents = ?"); vals.append(body.outcome_funds_cents)
+            if updates:
+                updates.append("updated_at = datetime('now')")
+                conn.execute(
+                    f"UPDATE attorney_cases SET {', '.join(updates)} WHERE id = ?",
+                    vals + [case_id]
+                )
+                conn.commit()
+            return {"status": "updated"}
+        finally:
+            conn.close()
+
+    return await _run_in_db(_update)
+
+
+@app.delete("/api/my-cases/{case_id}")
+async def delete_my_case(case_id: str, request: Request):
+    """Delete an attorney case tracker entry."""
+    user = _require_user(request)
+    user_id = user["user_id"]
+
+    def _delete(user_id=user_id, case_id=case_id):
+        conn = _thread_conn()
+        try:
+            conn.execute(
+                "DELETE FROM attorney_cases WHERE id = ? AND user_id = ?",
+                [case_id, user_id]
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    await _run_in_db(_delete)
+    return {"status": "deleted"}
+
+
+@app.post("/api/my-cases/{case_id}/outcome")
+async def record_case_outcome(case_id: str, request: Request):
+    """Record the outcome (funds recovered, notes) for an attorney case."""
+    user = _require_user(request)
+    user_id = user["user_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    def _outcome(user_id=user_id, case_id=case_id, body=body):
+        conn = _thread_conn()
+        try:
+            conn.execute("""
+                UPDATE attorney_cases
+                SET outcome_type = ?, outcome_notes = ?, outcome_funds_cents = ?,
+                    updated_at = datetime('now')
+                WHERE id = ? AND user_id = ?
+            """, [body.get("outcome_type"), body.get("notes"), body.get("funds_recovered"),
+                  case_id, user_id])
+            conn.commit()
+        finally:
+            conn.close()
+
+    await _run_in_db(_outcome)
+    return {"status": "recorded"}
+
+
+# ── EPIC 4C: Title Stack Endpoint ───────────────────────────────────
+
+@app.get("/api/lead/{asset_id}/title-stack")
+async def get_title_stack(asset_id: str, request: Request):
+    """Return lien records ordered by priority with risk assessment."""
+    user = _require_user(request)
+
+    def _stack(asset_id=asset_id):
+        conn = _thread_conn()
+        try:
+            rows = conn.execute("""
+                SELECT id, lien_type, lienholder_name, priority, amount_cents, is_open, source
+                FROM lien_records WHERE asset_id = ?
+                ORDER BY priority ASC, amount_cents DESC
+            """, [asset_id]).fetchall()
+            liens = [dict(r) for r in rows]
+            total_open = sum(r["amount_cents"] for r in liens if r["is_open"])
+            open_count = len([r for r in liens if r["is_open"]])
+            if len(liens) == 0:
+                risk = "LOW"
+            elif open_count <= 2:
+                risk = "MEDIUM"
+            else:
+                risk = "HIGH"
+            return {"liens": liens, "risk_score": risk, "total_open_cents": total_open}
+        finally:
+            conn.close()
+
+    return await _run_in_db(_stack)
+
+
+# ── EPIC 4E: Territory Locking Endpoints ────────────────────────────
+
+@app.get("/api/territories")
+async def list_territories(request: Request):
+    """List territories locked by the authenticated user."""
+    user = _require_user(request)
+    user_id = user["user_id"]
+
+    def _list(user_id=user_id):
+        conn = _thread_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM attorney_territories WHERE user_id = ? ORDER BY locked_at DESC",
+                [user_id]
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    return await _run_in_db(_list)
+
+
+class TerritoryCreate(BaseModel):
+    territory_type: str
+    territory_value: str
+
+
+@app.post("/api/territories")
+async def lock_territory(body: TerritoryCreate, request: Request):
+    """Lock a territory (county/zip). Requires Sovereign tier."""
+    user = _require_user(request)
+    user_id = user["user_id"]
+    if user.get("tier") not in ("sovereign",):
+        raise HTTPException(status_code=403, detail="Territory locking requires Sovereign tier.")
+
+    def _lock(user_id=user_id):
+        conn = _thread_conn()
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO attorney_territories (user_id, territory_type, territory_value)
+                VALUES (?, ?, ?)
+            """, [user_id, body.territory_type, body.territory_value])
+            conn.commit()
+            return {"status": "locked", "territory": body.territory_value}
+        finally:
+            conn.close()
+
+    return await _run_in_db(_lock)
+
+
+@app.delete("/api/territories/{territory_id}")
+async def release_territory(territory_id: int, request: Request):
+    """Release a locked territory."""
+    user = _require_user(request)
+    user_id = user["user_id"]
+
+    def _release(user_id=user_id, territory_id=territory_id):
+        conn = _thread_conn()
+        try:
+            conn.execute(
+                "DELETE FROM attorney_territories WHERE id = ? AND user_id = ?",
+                [territory_id, user_id]
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    await _run_in_db(_release)
+    return {"status": "released"}
+
+
+# ── PDF Intake Endpoint ──────────────────────────────────────────────
+
+from fastapi import UploadFile, File, Form as FastAPIForm
+
+
+@app.post("/api/intake/pdf-upload")
+async def pdf_intake(
+    request: Request,
+    file: UploadFile = File(...),
+    county: str = FastAPIForm(...),
+    case_number: str = FastAPIForm(...),
+    sale_date: Optional[str] = FastAPIForm(None),
+    overbid_amount: Optional[float] = FastAPIForm(None),
+):
+    """Accept PDF upload for paper-only counties. Creates lead + queues for OCR."""
+    import uuid as _uuid
+    asset_id = str(_uuid.uuid4())
+    pdf_bytes = await file.read()
+
+    # Store PDF to vault
+    vault_dir = VAULT_ROOT / county
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = vault_dir / f"{case_number.replace('/', '_')}.pdf"
+    pdf_path.write_bytes(pdf_bytes)
+
+    def _create_lead(asset_id=asset_id):
+        conn = _thread_conn()
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO leads
+                    (id, county, case_number, sale_date, overbid_amount,
+                     data_grade, intake_method, verification_state, evidence_storage_location)
+                VALUES (?, ?, ?, ?, ?, 'BRONZE', 'pdf_upload', 'RAW', ?)
+            """, [asset_id, county, case_number, sale_date, overbid_amount, str(pdf_path)])
+            conn.commit()
+        finally:
+            conn.close()
+
+    await _run_in_db(_create_lead)
+    return {
+        "asset_id": asset_id,
+        "status": "queued",
+        "message": "PDF received — queued for OCR extraction",
+    }
+
+
+# ── EPIC 4D: Court Filing Automation ────────────────────────────────
+
+@app.post("/api/lead/{asset_id}/court-filing")
+async def generate_court_filing(asset_id: str, request: Request):
+    """Generate ZIP containing Motion, Notice of Claim, and Affidavit for this lead.
+
+    Returns: ZIP file download (Content-Disposition: attachment).
+    """
+    from verifuse_v2.server.auth import get_current_user as _gcu
+    user = _gcu(request)
+    import zipfile, io, textwrap
+
+    TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "court_filings"
+
+    def _filing(asset_id=asset_id):
+        conn = _thread_conn()
+        try:
+            row = conn.execute("""
+                SELECT case_number, county, sale_date, overbid_amount,
+                       property_address, owner_name
+                FROM leads WHERE id = ?
+            """, [asset_id]).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Lead not found")
+            return dict(row)
+        finally:
+            conn.close()
+
+    lead = await _run_in_db(_filing)
+
+    def _render_template(tmpl_path: Path, vars_: dict) -> str:
+        text = tmpl_path.read_text() if tmpl_path.exists() else ""
+        for k, v in vars_.items():
+            text = text.replace(f"{{{{{k}}}}}", str(v or ""))
+        return text
+
+    county = lead.get("county", "")
+    county_upper = county.replace("_", " ").upper()
+
+    filing_vars = {
+        "court_district": "18th",  # Default — attorneys must verify
+        "county_upper": county_upper,
+        "county_name": county.replace("_", " ").title(),
+        "case_number": lead.get("case_number", ""),
+        "property_address": lead.get("property_address", ""),
+        "sale_date": lead.get("sale_date", ""),
+        "overbid_amount": f"{float(lead.get('overbid_amount') or 0):,.2f}",
+        "claimant_name": "[CLAIMANT NAME — ATTORNEY TO COMPLETE]",
+        "claimant_relationship": "[RELATIONSHIP — e.g., former owner, heir]",
+        "attorney_name": user.get("full_name", "[ATTORNEY NAME]"),
+        "attorney_bar_number": user.get("bar_number", "[BAR NUMBER]"),
+        "attorney_firm": user.get("firm_name", "[FIRM NAME]"),
+        "attorney_address": "[ATTORNEY ADDRESS]",
+        "attorney_phone": "[ATTORNEY PHONE]",
+        "attorney_email": user.get("email", "[ATTORNEY EMAIL]"),
+        "filing_date": datetime.now(timezone.utc).strftime("%B %d, %Y"),
+    }
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for tmpl_file, out_name in [
+            ("motion_for_disbursement.txt", "01_Motion_for_Disbursement.txt"),
+            ("notice_of_claim.txt",         "02_Notice_of_Claim.txt"),
+            ("affidavit_of_representation.txt", "03_Affidavit_of_Representation.txt"),
+        ]:
+            tmpl_path = TEMPLATES_DIR / tmpl_file
+            content = _render_template(tmpl_path, filing_vars)
+            zf.writestr(out_name, content)
+        # Add a README
+        readme = textwrap.dedent(f"""
+            VeriFuse Court Filing Package
+            =============================
+            Case: {lead.get('case_number')} — {county_upper} County
+            Property: {lead.get('property_address')}
+            Overbid: ${filing_vars['overbid_amount']}
+
+            IMPORTANT: Review and complete all placeholders before filing.
+            Attorney fees are capped at 10% per HB25-1224 (C.R.S. § 38-38-111).
+            Verify court district number before filing.
+
+            Generated: {filing_vars['filing_date']}
+        """).strip()
+        zf.writestr("README.txt", readme)
+
+    buf.seek(0)
+    case_num = (lead.get("case_number") or asset_id[:8]).replace("/", "_")
+    filename = f"verifuse_filing_{case_num}.zip"
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN OPS CENTER — Pipeline Command Center
+# POST /api/admin/ops/run       — trigger a pipeline job
+# GET  /api/admin/ops/jobs      — list recent jobs
+# GET  /api/admin/ops/jobs/{id} — get job status + output
+# POST /api/admin/ops/promote-presale — scan existing leads → PRE_SALE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Allowed commands whitelist (security: never exec arbitrary shell) ──────────
+_OPS_WHITELIST: dict[str, list[str]] = {
+    # Pre-sale pipeline
+    "pending-sales":        ["pending-sales"],
+    "pre-sale-scan":        ["pre-sale-scan"],
+    # Post-sale scrapers
+    "scraper-run-window":   ["scraper-run-window"],
+    "scraper-run":          ["scraper-run"],
+    "sale-info-backfill":   ["sale-info-backfill"],
+    # Extraction
+    "extract-batch":        ["extract-batch"],
+    "gate4-run-all":        ["gate4-run-all"],
+    # Promotion
+    "promote-eligible":     ["promote-eligible"],
+    # DB ops
+    "backup-db":            ["backup-db"],
+    "migrate":              ["migrate"],
+    # Scraper enum
+    "scraper-enum":         ["scraper-enum"],
+    # Denver
+    "denver-scrape":        ["denver-scrape"],
+    # Tax lien
+    "tax-lien-run":         ["tax-lien-run"],
+    # Assessor
+    "assessor-lookup":      ["assessor-lookup"],
+}
+
+# ── Background job executor (separate from DB executor) ───────────────────────
+_OPS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2,  # max 2 concurrent pipeline jobs (scraper is resource-heavy)
+    thread_name_prefix="vf-ops",
+)
+
+_OUTPUT_MAX_BYTES = 65_536  # 64 KB max job output stored in DB
+
+
+def _run_ops_job(job_id: str, vf_args: list[str]) -> None:
+    """Execute a bin/vf command in a subprocess and track output in ops_jobs."""
+    import subprocess
+    import threading
+
+    proj_root = str(Path(VERIFUSE_DB_PATH).parent.parent.parent)
+    vf_bin = str(Path(proj_root) / "bin" / "vf")
+    # Use explicit bash path — subprocess environment may not have /usr/bin/env bash
+    bash_bin = "/bin/bash"
+
+    conn = _get_conn()
+    try:
+        started = int(_time.time())
+        conn.execute(
+            "UPDATE ops_jobs SET status='RUNNING', started_at=? WHERE id=?",
+            [started, job_id],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    output_chunks: list[str] = []
+    exit_code = -1
+
+    try:
+        proc = subprocess.Popen(
+            [bash_bin, vf_bin] + vf_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=proj_root,
+            env={**os.environ,
+                 "VERIFUSE_DB_PATH": VERIFUSE_DB_PATH,
+                 "PATH": "/usr/bin:/bin:/usr/local/bin:" + os.environ.get("PATH", "")},
+        )
+
+        def _stream():
+            for line in proc.stdout:  # type: ignore[union-attr]
+                output_chunks.append(line)
+                # Flush partial output to DB every 20 lines
+                if len(output_chunks) % 20 == 0:
+                    _flush_output(job_id, output_chunks)
+
+        t = threading.Thread(target=_stream, daemon=True)
+        t.start()
+        proc.wait(timeout=1800)  # 30-min hard cap
+        t.join(timeout=5)
+        exit_code = proc.returncode
+
+    except subprocess.TimeoutExpired:
+        proc.kill()  # type: ignore[possibly-undefined]
+        output_chunks.append("\n[TIMEOUT] Job exceeded 30-minute limit and was killed.\n")
+        exit_code = -9
+    except Exception as exc:
+        output_chunks.append(f"\n[ERROR] {exc}\n")
+        exit_code = -1
+    finally:
+        finished = int(_time.time())
+        status = "SUCCESS" if exit_code == 0 else "FAILED"
+        raw_output = "".join(output_chunks)
+        if len(raw_output.encode()) > _OUTPUT_MAX_BYTES:
+            # Keep last 64KB
+            raw_output = "...[truncated]\n" + raw_output[-_OUTPUT_MAX_BYTES:]
+
+        conn2 = _get_conn()
+        try:
+            conn2.execute(
+                "UPDATE ops_jobs SET status=?, finished_at=?, output=?, exit_code=? WHERE id=?",
+                [status, finished, raw_output, exit_code, job_id],
+            )
+            conn2.commit()
+        finally:
+            conn2.close()
+
+    log.info("[ops_job] %s finished: exit=%d status=%s", job_id, exit_code, status)
+
+
+def _flush_output(job_id: str, chunks: list[str]) -> None:
+    """Write partial output to DB without changing status (live tail)."""
+    try:
+        raw = "".join(chunks)
+        if len(raw.encode()) > _OUTPUT_MAX_BYTES:
+            raw = "...[truncated]\n" + raw[-_OUTPUT_MAX_BYTES:]
+        c = _get_conn()
+        c.execute("UPDATE ops_jobs SET output=? WHERE id=?", [raw, job_id])
+        c.commit()
+        c.close()
+    except Exception:
+        pass
+
+
+class OpsRunRequest(BaseModel):
+    command: str
+    county: Optional[str] = None
+    extra_args: list[str] = []
+
+
+@app.post("/api/admin/ops/run")
+@limiter.limit("20/minute")
+async def ops_run(body: OpsRunRequest, request: Request):
+    """Trigger a pipeline job from the Admin Ops Center.
+
+    Security: command must be in _OPS_WHITELIST. Args are passed as a fixed
+    list — no shell interpolation possible.
+    """
+    user = _require_user(request)
+    if not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    if body.command not in _OPS_WHITELIST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Command '{body.command}' not allowed. Allowed: {sorted(_OPS_WHITELIST.keys())}",
+        )
+
+    # Build safe arg list: base command + optional county + extra args (whitelist-validated)
+    base_args = list(_OPS_WHITELIST[body.command])
+    if body.county:
+        # County must be a simple slug: only lowercase letters, digits, underscore
+        import re as _re
+        if not _re.match(r'^[a-z_]{2,30}$', body.county):
+            raise HTTPException(status_code=400, detail="Invalid county slug.")
+        base_args += ["--county", body.county]
+
+    # Validate extra_args: only allow safe flag patterns
+    safe_extras: list[str] = []
+    for arg in body.extra_args[:8]:
+        if _re.match(r'^(--[a-z][a-z0-9-]{1,30}(=[a-zA-Z0-9._/-]{1,60})?)$|^([0-9]{1,6})$', arg):
+            safe_extras.append(arg)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsafe extra arg: {arg!r}")
+    vf_args = base_args + safe_extras
+
+    job_id = str(uuid.uuid4())
+    now = int(_time.time())
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO ops_jobs (id, command, args_json, status, triggered_by, triggered_at, county)
+               VALUES (?, ?, ?, 'QUEUED', ?, ?, ?)""",
+            [job_id, body.command, json.dumps(vf_args), user.get("email", "admin"), now, body.county],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Fire-and-forget in the ops executor
+    _OPS_EXECUTOR.submit(_run_ops_job, job_id, vf_args)
+
+    log.info("[ops] %s triggered job %s: %s", user.get("email"), job_id, vf_args)
+    return {"job_id": job_id, "status": "QUEUED", "command": body.command, "args": vf_args}
+
+
+@app.get("/api/admin/ops/jobs")
+@limiter.limit("60/minute")
+async def ops_jobs_list(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    status: Optional[str] = Query(None),
+):
+    """List recent ops jobs (admin only)."""
+    user = _require_user(request)
+    if not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            where = "WHERE 1=1"
+            params: list = []
+            if status:
+                where += " AND status = ?"
+                params.append(status.upper())
+            rows = conn.execute(
+                f"""SELECT id, command, args_json, status, triggered_by,
+                           triggered_at, started_at, finished_at, exit_code, county,
+                           SUBSTR(COALESCE(output,''), -2000) as output_tail
+                    FROM ops_jobs {where}
+                    ORDER BY triggered_at DESC LIMIT ?""",
+                params + [limit],
+            ).fetchall()
+        finally:
+            conn.close()
+        return {"jobs": [dict(r) for r in rows]}
+
+    return await _run_in_db(_run)
+
+
+@app.get("/api/admin/ops/jobs/{job_id}")
+@limiter.limit("120/minute")
+async def ops_job_detail(job_id: str, request: Request):
+    """Get full output of an ops job (admin only). Poll at 2s for live tail."""
+    user = _require_user(request)
+    if not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM ops_jobs WHERE id = ?", [job_id]
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        d = dict(row)
+        # Calculate duration
+        if d.get("started_at") and d.get("finished_at"):
+            d["duration_s"] = d["finished_at"] - d["started_at"]
+        elif d.get("started_at"):
+            d["duration_s"] = int(_time.time()) - d["started_at"]
+        else:
+            d["duration_s"] = None
+        return d
+
+    return await _run_in_db(_run)
+
+
+@app.post("/api/admin/ops/promote-presale")
+@limiter.limit("5/minute")
+async def ops_promote_presale(request: Request, county: Optional[str] = Query(None)):
+    """Scan existing PENDING leads with future scheduled_sale_date or sale_date
+    and promote them to processing_status='PRE_SALE'. Safe to run anytime.
+    """
+    user = _require_user(request)
+    if not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            where = ""
+            params: list = []
+            if county:
+                where = " AND county = ?"
+                params.append(county)
+
+            # Promote leads with future scheduled_sale_date
+            r1 = conn.execute(
+                f"""UPDATE leads
+                    SET processing_status = 'PRE_SALE',
+                        ned_source = COALESCE(ned_source, 'govsoft_active'),
+                        updated_at = datetime('now')
+                    WHERE processing_status != 'PRE_SALE'
+                      AND data_grade NOT IN ('GOLD', 'SILVER')
+                      AND (
+                          (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now'))
+                          OR
+                          (sale_date IS NOT NULL AND sale_date > date('now'))
+                      ){where}""",
+                params,
+            )
+            promoted_count = r1.rowcount
+            conn.commit()
+
+            # Also count how many PRE_SALE leads now exist
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM leads WHERE processing_status='PRE_SALE'{where}",
+                params,
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        return {
+            "promoted": promoted_count,
+            "total_pre_sale": total,
+            "county_filter": county,
+            "message": f"Promoted {promoted_count} leads to PRE_SALE. Total PRE_SALE: {total}",
+        }
+
+    return await _run_in_db(_run)
+
+
+@app.get("/api/admin/ops/pipeline-summary")
+@limiter.limit("30/minute")
+async def ops_pipeline_summary(request: Request):
+    """Real-time pipeline health snapshot for the Ops Center dashboard."""
+    user = _require_user(request)
+    if not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            # Grade distribution
+            grades = {r["data_grade"]: r["cnt"] for r in conn.execute(
+                "SELECT data_grade, COUNT(*) as cnt FROM leads GROUP BY data_grade"
+            ).fetchall()}
+
+            # Processing status distribution
+            statuses = {r["processing_status"]: r["cnt"] for r in conn.execute(
+                "SELECT processing_status, COUNT(*) as cnt FROM leads GROUP BY processing_status"
+            ).fetchall()}
+
+            # PRE_SALE leads
+            pre_sale = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE processing_status='PRE_SALE'"
+            ).fetchone()[0]
+
+            # Future-dated (candidates for PRE_SALE promotion)
+            future_dated = conn.execute(
+                """SELECT COUNT(*) FROM leads
+                   WHERE processing_status != 'PRE_SALE'
+                     AND data_grade NOT IN ('GOLD','SILVER')
+                     AND (
+                         (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now'))
+                         OR (sale_date IS NOT NULL AND sale_date > date('now'))
+                     )"""
+            ).fetchone()[0]
+
+            # Recent job history
+            jobs = conn.execute(
+                """SELECT command, status, triggered_at, finished_at, exit_code
+                   FROM ops_jobs ORDER BY triggered_at DESC LIMIT 10"""
+            ).fetchall()
+
+            # Ingestion runs last 24h
+            cutoff = int(_time.time()) - 86400
+            runs_24h = conn.execute(
+                "SELECT mode, status, COUNT(*) as cnt FROM ingestion_runs WHERE start_ts > ? GROUP BY mode, status",
+                [cutoff],
+            ).fetchall()
+
+            # BRONZE with SALE_INFO snapshots (Gate 4 ready)
+            # html_snapshots.asset_id = 'FORECLOSURE:CO:{COUNTY_UPPER}:{CASE_NUMBER}'
+            # Join via case_number substring match (county_upper in asset_id)
+            gate4_ready = conn.execute(
+                """SELECT COUNT(DISTINCT l.id)
+                   FROM leads l
+                   INNER JOIN html_snapshots h
+                     ON h.asset_id LIKE '%' || l.case_number || '%'
+                   WHERE l.data_grade = 'BRONZE'
+                     AND l.case_number IS NOT NULL
+                     AND h.snapshot_type = 'SALE_INFO'"""
+            ).fetchone()[0]
+
+            # Snapshot counts
+            snapshot_counts = conn.execute(
+                "SELECT snapshot_type, COUNT(*) as cnt FROM html_snapshots GROUP BY snapshot_type"
+            ).fetchall()
+
+        finally:
+            conn.close()
+
+        return {
+            "grade_distribution": grades,
+            "status_distribution": statuses,
+            "pre_sale_leads": pre_sale,
+            "pre_sale_promotion_candidates": future_dated,
+            "gate4_ready": gate4_ready,
+            "snapshot_counts": {r["snapshot_type"]: r["cnt"] for r in snapshot_counts},
+            "recent_jobs": [dict(r) for r in jobs],
+            "runs_24h": [dict(r) for r in runs_24h],
+        }
+
+    return await _run_in_db(_run)

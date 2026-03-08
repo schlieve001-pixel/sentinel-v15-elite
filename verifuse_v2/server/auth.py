@@ -8,10 +8,12 @@ Provides register, login, and token verification.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
 from functools import wraps
+from math import ceil
 from typing import Optional
 
 import bcrypt
@@ -41,11 +43,13 @@ def verify_password(password: str, hashed: str) -> bool:
 
 # ── JWT tokens ───────────────────────────────────────────────────────
 
-def create_token(user_id: str, email: str, tier: str) -> str:
+def create_token(user_id: str, email: str, tier: str, role: str = "viewer", is_admin: bool = False) -> str:
     payload = {
         "sub": user_id,
         "email": email,
         "tier": tier,
+        "role": role,
+        "is_admin": is_admin,
         "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
@@ -105,9 +109,48 @@ def is_admin_user(user: dict) -> bool:
     return bool(user.get("is_admin", 0))
 
 
+# Role hierarchy: admin > staff > attorney > viewer
+_ROLE_RANK = {"admin": 4, "staff": 3, "attorney": 2, "viewer": 1}
+
+
+def _require_role(user: dict, min_role: str) -> None:
+    """Raise 403 if user's role is below min_role in hierarchy.
+
+    Backward-compat: is_admin=1 always passes any role check.
+    """
+    if user.get("is_admin"):
+        return  # Admin passes everything
+    role = user.get("role", "viewer")
+    if _ROLE_RANK.get(role, 0) < _ROLE_RANK.get(min_role, 0):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Requires {min_role} role or higher.",
+        )
+
+
 def verify_attorney(user: dict) -> bool:
     """Check if a user has a verified bar number."""
     return bool(user.get("bar_number") and str(user["bar_number"]).strip())
+
+
+# ── Password validation ──────────────────────────────────────────────
+
+def _validate_password(password: str) -> None:
+    """Enforce complexity: 8+ chars, uppercase, number, special char."""
+    errors = []
+    if len(password) < 8:
+        errors.append("at least 8 characters")
+    if not re.search(r"[A-Z]", password):
+        errors.append("one uppercase letter")
+    if not re.search(r"[0-9]", password):
+        errors.append("one number")
+    if not re.search(r"[^a-zA-Z0-9]", password):
+        errors.append("one special character (!@#$%^&*...)")
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain: " + ", ".join(errors),
+        )
 
 
 # ── Registration & Login ─────────────────────────────────────────────
@@ -128,8 +171,7 @@ def register_user(
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered.")
 
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    _validate_password(password)
 
     user_id = str(uuid.uuid4())
     password_hashed = hash_password(password)
@@ -144,7 +186,7 @@ def register_user(
         tier=tier,
     )
 
-    token = create_token(user_id, email, tier)
+    token = create_token(user_id, email, tier, role=user.get("role", "viewer"), is_admin=bool(user.get("is_admin", 0)))
     log.info("New user registered: %s (%s)", email, tier)
     return user, token
 
@@ -152,19 +194,73 @@ def register_user(
 def login_user(email: str, password: str) -> tuple[dict, str]:
     """Authenticate a user. Returns (user_dict, jwt_token).
 
-    Raises HTTPException on failure.
+    Raises HTTPException on failure. Implements 5-attempt lockout (15 min).
     """
+    import sqlite3 as _sqlite3
     user = db.get_user_by_email(email)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    if not verify_password(password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    # Check lockout
+    locked_until = user.get("locked_until")
+    now = datetime.now(timezone.utc)
+    if locked_until:
+        try:
+            lu_dt = datetime.fromisoformat(locked_until.replace("Z", "+00:00"))
+            if lu_dt.tzinfo is None:
+                lu_dt = lu_dt.replace(tzinfo=timezone.utc)
+            if lu_dt > now:
+                minutes_left = ceil((lu_dt - now).total_seconds() / 60)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Account temporarily locked. Try again in {minutes_left} minute(s).",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Malformed locked_until — treat as not locked
 
     if not user["is_active"]:
         raise HTTPException(status_code=403, detail="Account deactivated.")
 
+    if not verify_password(password, user["password_hash"]):
+        # Increment failed count
+        conn = db.get_connection()
+        try:
+            new_count = (user.get("failed_login_count") or 0) + 1
+            new_locked = None
+            if new_count >= 5:
+                new_locked = (now + timedelta(minutes=15)).isoformat()
+            conn.execute(
+                "UPDATE users SET failed_login_count = ?, locked_until = ? WHERE user_id = ?",
+                [new_count, new_locked, user["user_id"]],
+            )
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    # Success — reset lockout
+    try:
+        conn = db.get_connection()
+        try:
+            conn.execute(
+                "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE user_id = ?",
+                [user["user_id"]],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
     db.update_user_login(user["user_id"])
-    token = create_token(user["user_id"], email, user["tier"])
+    token = create_token(
+        user["user_id"], email, user["tier"],
+        role=user.get("role", "admin" if user.get("is_admin") else "viewer"),
+        is_admin=bool(user.get("is_admin", 0)),
+    )
     log.info("User logged in: %s", email)
     return user, token

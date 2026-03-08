@@ -807,6 +807,23 @@ def run_extraction_batch(county: str | None = None, limit: int = 500) -> dict:
     return results
 
 
+# ── EPIC 4G: Recorder Doc Auto-Pull Stub ─────────────────────────────────────
+
+def _try_pull_recorder_doc(county: str, case_number: str, conn) -> bool:
+    """Attempt to fetch deed/recording from county recorder. Stub — jefferson only.
+
+    Returns True if a recorder document was successfully retrieved and stored,
+    False otherwise. This is a no-op stub; per-county recorder API pulls are
+    not yet implemented.
+
+    Jefferson uses the GovSoft viewer — html_snapshot pattern already handles
+    this county's document capture during scraping.
+    """
+    # TODO: Implement per-county recorder API pulls
+    # Jefferson: uses GovSoft viewer — html_snapshot pattern already handles this
+    return False
+
+
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -1,0 +1,25 @@
+IN THE DISTRICT COURT, {{court_district}} JUDICIAL DISTRICT
+STATE OF COLORADO, {{county_upper}} COUNTY
+
+Case No.: {{case_number}}
+
+NOTICE OF CLAIM TO OVERBID FUNDS (C.R.S. § 38-38-111)
+
+TO: Public Trustee of {{county_name}} County, Colorado
+AND TO ALL INTERESTED PARTIES:
+
+PLEASE TAKE NOTICE that {{claimant_name}}, as {{claimant_relationship}} of the former owner of the property located at {{property_address}}, {{county_name}} County, Colorado, hereby gives notice of claim to the overbid funds (C.R.S. § 38-38-111) resulting from the Public Trustee's Sale conducted on {{sale_date}}.
+
+The overbid funds (C.R.S. § 38-38-111) in the amount of approximately ${{overbid_amount}} are currently held by the Public Trustee of {{county_name}} County pursuant to C.R.S. § 38-38-111.
+
+This Notice is given pursuant to C.R.S. § 38-38-111 and Colorado law governing the distribution of overbid funds (C.R.S. § 38-38-111) from foreclosure sales.
+
+Respectfully submitted,
+
+{{attorney_name}}
+{{attorney_bar_number}}
+{{attorney_firm}}
+
+Attorney for Claimant
+
+Date: {{filing_date}}

@@ -214,6 +214,14 @@ export interface Lead {
   missing_inputs?: string[];
   // Junior liens and encumbrances (always included when data available)
   junior_liens?: LienRecord[];
+  // EPIC 2D: evidence quality badge
+  quality_badge?: "VERIFIED" | "PARTIAL" | "ESTIMATED";
+  // EPIC 4B: AI opportunity score 0-10
+  opportunity_score?: number | null;
+  // EPIC 1C: owner name (may be masked for locked leads)
+  owner_name?: string | null;
+  property_address?: string | null;
+  overbid_amount?: number | null;
 }
 
 export interface LeadsResponse {
@@ -277,18 +285,30 @@ export function getPreSaleLeads(params?: {
 export function getLeads(params?: {
   county?: string;
   min_surplus?: number;
+  max_surplus?: number;
   grade?: string;
   bucket?: string;
   limit?: number;
   offset?: number;
+  sale_date_from?: string;
+  sale_date_to?: string;
+  sort?: string;
+  actionable_only?: boolean;
+  verification_state?: string;
 }, signal?: AbortSignal): Promise<LeadsResponse> {
   const qs = new URLSearchParams();
   if (params?.county) qs.set("county", params.county);
   if (params?.min_surplus) qs.set("min_surplus", String(params.min_surplus));
+  if (params?.max_surplus) qs.set("max_surplus", String(params.max_surplus));
   if (params?.grade) qs.set("grade", params.grade);
   if (params?.bucket) qs.set("bucket", params.bucket);
   if (params?.limit) qs.set("limit", String(params.limit));
   if (params?.offset) qs.set("offset", String(params.offset));
+  if (params?.sale_date_from) qs.set("sale_date_from", params.sale_date_from);
+  if (params?.sale_date_to) qs.set("sale_date_to", params.sale_date_to);
+  if (params?.sort) qs.set("sort", params.sort);
+  if (params?.actionable_only) qs.set("actionable_only", "1");
+  if (params?.verification_state) qs.set("verification_state", params.verification_state);
   const q = qs.toString();
   return request(`/api/leads${q ? `?${q}` : ""}`, {}, signal);
 }
@@ -313,6 +333,8 @@ export interface Stats {
   total_raw_volume: number;
   total_raw_volume_surplus?: number;
   county_list: string[];
+  counties_covered?: number;
+  new_leads_7d?: number;
   counties: { county: string; cnt: number; total: number }[];
   stream_breakdown?: { stream: string; cnt: number; total: number }[];
   pre_sale_count?: number;
@@ -505,4 +527,142 @@ export interface LeadAuditTrail {
   pipeline_events: Record<string, unknown>[];
   audit_entries: LeadAuditEntry[];
   unlock_history: Record<string, unknown>[];
+}
+
+// ── Search ────────────────────────────────────────────────────────
+
+export interface SearchResult {
+  asset_id: string;
+  case_number: string | null;
+  property_address: string | null;
+  county: string;
+  data_grade: string;
+  overbid_amount: number | null;
+}
+
+export function searchLeads(q: string, limit = 20, signal?: AbortSignal): Promise<SearchResult[]> {
+  return request(`/api/search?q=${encodeURIComponent(q)}&limit=${limit}`, {}, signal);
+}
+
+// ── Coverage Map ──────────────────────────────────────────────────
+
+export interface CountyCoverage {
+  county_slug: string;
+  county_name: string;
+  status: "active" | "partial" | "configured" | "no_data";
+  gold_count: number;
+  silver_count: number;
+  bronze_count: number;
+  total_leads: number;
+  last_scraped_at: string | null;
+  access_method: string;
+}
+
+export function getCoverageMap(signal?: AbortSignal): Promise<CountyCoverage[]> {
+  return request("/api/coverage-map", {}, signal);
+}
+
+// ── Case Timeline ─────────────────────────────────────────────────
+
+export interface TimelineEvent {
+  ts: string | null;
+  event_type: string;
+  notes: string | null;
+  source: "pipeline" | "audit";
+}
+
+export function getLeadTimeline(assetId: string, signal?: AbortSignal): Promise<TimelineEvent[]> {
+  return request(`/api/lead/${encodeURIComponent(assetId)}/timeline`, {}, signal);
+}
+
+// ── Title Stack ───────────────────────────────────────────────────
+
+export interface TitleStack {
+  liens: Array<{
+    id: string;
+    lien_type: string;
+    lienholder_name: string | null;
+    priority: number;
+    amount_cents: number;
+    is_open: number;
+    source: string | null;
+  }>;
+  risk_score: "LOW" | "MEDIUM" | "HIGH";
+  total_open_cents: number;
+}
+
+export function getLeadTitleStack(assetId: string, signal?: AbortSignal): Promise<TitleStack> {
+  return request(`/api/lead/${encodeURIComponent(assetId)}/title-stack`, {}, signal);
+}
+
+// ── Attorney Cases ─────────────────────────────────────────────────
+
+export type CaseStage = "LEADS" | "CONTACTED" | "RETAINER_SIGNED" | "FILED" | "FUNDS_RELEASED";
+
+export interface AttorneyCase {
+  id: string;
+  asset_id: string;
+  stage: CaseStage;
+  notes: string | null;
+  outcome_type: string | null;
+  created_at: string;
+  updated_at: string;
+  case_number: string;
+  county: string;
+  data_grade: string;
+  overbid_amount: number | null;
+  property_address: string | null;
+  sale_date: string | null;
+}
+
+export function getMyCases(signal?: AbortSignal): Promise<AttorneyCase[]> {
+  return request("/api/my-cases", {}, signal);
+}
+
+export function createMyCase(data: { asset_id: string; stage?: CaseStage; notes?: string }): Promise<{ id: string; asset_id: string; stage: string }> {
+  return request("/api/my-cases", { method: "POST", body: JSON.stringify(data) });
+}
+
+export function updateMyCase(caseId: string, data: Partial<{ stage: CaseStage; notes: string; outcome_type: string; outcome_notes: string; outcome_funds_cents: number }>): Promise<{ status: string }> {
+  return request(`/api/my-cases/${caseId}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+
+export function deleteMyCase(caseId: string): Promise<{ status: string }> {
+  return request(`/api/my-cases/${caseId}`, { method: "DELETE" });
+}
+
+// ── Territories ───────────────────────────────────────────────────
+
+export interface Territory {
+  id: number;
+  territory_type: string;
+  territory_value: string;
+  locked_at: string;
+  expires_at: string | null;
+}
+
+export function getTerritories(signal?: AbortSignal): Promise<Territory[]> {
+  return request("/api/territories", {}, signal);
+}
+
+export function lockTerritory(data: { territory_type: string; territory_value: string }): Promise<{ status: string; territory: string }> {
+  return request("/api/territories", { method: "POST", body: JSON.stringify(data) });
+}
+
+export function releaseTerritory(id: number): Promise<{ status: string }> {
+  return request(`/api/territories/${id}`, { method: "DELETE" });
+}
+
+// ── Admin API Keys ────────────────────────────────────────────────
+
+export function generateApiKey(userId: number): Promise<{ api_key: string; created_at: string; note: string }> {
+  return request(`/api/admin/users/${userId}/api-key`, { method: "POST" });
+}
+
+export function getApiKeyStatus(userId: number): Promise<{ has_key: boolean; created_at: string | null }> {
+  return request(`/api/admin/users/${userId}/api-key-status`);
+}
+
+export function revokeApiKey(userId: number): Promise<{ status: string }> {
+  return request(`/api/admin/users/${userId}/api-key`, { method: "DELETE" });
 }

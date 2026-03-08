@@ -161,6 +161,45 @@ def _sum_open_junior_liens_cents(asset_id: str, conn: sqlite3.Connection) -> int
     return int(row[0] or 0) if row and row[0] is not None else 0
 
 
+def _get_field_evidence_cents(asset_id: str, evidence_type: str, conn: sqlite3.Connection) -> int:
+    """Query field_evidence for a specific evidence_type and return cents value.
+
+    Returns 0 if not found or value is NULL.
+    Expects field_evidence.amount_cents or field_evidence.amount (dollars).
+    """
+    try:
+        row = conn.execute(
+            """SELECT amount_cents, amount FROM field_evidence
+               WHERE asset_id = ? AND evidence_type = ?
+               ORDER BY created_at DESC LIMIT 1""",
+            [asset_id, evidence_type],
+        ).fetchone()
+        if not row:
+            return 0
+        if row["amount_cents"] is not None:
+            return int(row["amount_cents"])
+        if row["amount"] is not None:
+            return int(Decimal(str(row["amount"])) * 100)
+    except Exception:
+        pass
+    return 0
+
+
+def _get_trustee_fees(asset_id: str, conn: sqlite3.Connection) -> int:
+    """Return trustee fees in cents from field_evidence. 0 if not found."""
+    return _get_field_evidence_cents(asset_id, "TRUSTEE_FEES", conn)
+
+
+def _get_foreclosure_costs(asset_id: str, conn: sqlite3.Connection) -> int:
+    """Return foreclosure costs in cents from field_evidence. 0 if not found."""
+    return _get_field_evidence_cents(asset_id, "FORECLOSURE_COSTS", conn)
+
+
+def _get_senior_debt(asset_id: str, conn: sqlite3.Connection) -> int:
+    """Return senior debt in cents from field_evidence. 0 if not found."""
+    return _get_field_evidence_cents(asset_id, "SENIOR_DEBT", conn)
+
+
 def _months_since_sale(asset_id: str, conn: sqlite3.Connection) -> int | None:
     """Return months since sale date (event_ts from asset_registry) as integer.
 
@@ -365,8 +404,18 @@ def resolve(asset_id: str, conn: sqlite3.Connection) -> dict:
             "resolved_ts": None,
             "notes": "Malformed asset_id — equity resolution skipped",
         }
-    liens_cents = _sum_open_junior_liens_cents(asset_id, conn)
-    net_cents   = max(0, gross_cents - liens_cents)
+    liens_cents             = _sum_open_junior_liens_cents(asset_id, conn)
+    trustee_fees_cents      = _get_trustee_fees(asset_id, conn)
+    foreclosure_costs_cents = _get_foreclosure_costs(asset_id, conn)
+    senior_debt_cents       = _get_senior_debt(asset_id, conn)
+
+    net_cents = max(0,
+        gross_cents
+        - trustee_fees_cents
+        - foreclosure_costs_cents
+        - senior_debt_cents
+        - liens_cents
+    )
 
     notes_parts: list[str] = []
 
@@ -439,8 +488,39 @@ def resolve(asset_id: str, conn: sqlite3.Connection) -> dict:
                 f"Months since sale: {months!r} (< 30 or unknown) — pending"
             )
 
+    # Add cost deduction notes if non-zero
+    if trustee_fees_cents:
+        notes_parts.append(f"Trustee fees: {trustee_fees_cents}¢")
+    if foreclosure_costs_cents:
+        notes_parts.append(f"Foreclosure costs: {foreclosure_costs_cents}¢")
+    if senior_debt_cents:
+        notes_parts.append(f"Senior debt: {senior_debt_cents}¢")
+
     notes = "; ".join(notes_parts) if notes_parts else None
     resolved_ts = _now_ts()
+
+    # ── Confidence pct ────────────────────────────────────────────────────────
+    # GOLD (>=80%): gross verified by evidence_doc AND sale_date confirmed AND no missing senior debt
+    # SILVER (60-79%): gross from html_snapshot only OR missing trustee_fees
+    # BRONZE (<60%): gross from seed/estimate OR missing sale_date
+    ev_doc = conn.execute(
+        "SELECT 1 FROM evidence_documents WHERE asset_id = ? LIMIT 1", [asset_id]
+    ).fetchone()
+    html_snap = conn.execute(
+        "SELECT 1 FROM html_snapshots WHERE asset_id = ? AND snapshot_type IN ('SALE_INFO','CASE_DETAIL') LIMIT 1",
+        [asset_id],
+    ).fetchone()
+    event_ts_row = conn.execute(
+        "SELECT event_ts FROM asset_registry WHERE asset_id = ?", [asset_id]
+    ).fetchone()
+    has_sale_date = bool(event_ts_row and event_ts_row[0])
+
+    if ev_doc and has_sale_date and senior_debt_cents == 0:
+        confidence_pct = 85
+    elif html_snap and has_sale_date:
+        confidence_pct = 65
+    else:
+        confidence_pct = 40
 
     # ── Step 4: Persist to equity_resolution ─────────────────────────────────
     eq_id = str(uuid4())
@@ -456,17 +536,44 @@ def resolve(asset_id: str, conn: sqlite3.Connection) -> dict:
         ],
     )
 
+    # ── Persist extended math to math_audit if table has new columns ──────────
+    try:
+        ma_cols = {r[1] for r in conn.execute("PRAGMA table_info(math_audit)").fetchall()}
+        if "net_to_borrower_cents" in ma_cols:
+            conn.execute(
+                """INSERT OR REPLACE INTO math_audit
+                   (id, asset_id, net_to_borrower_cents, trustee_fees_cents,
+                    foreclosure_costs_cents, senior_debt_cents, confidence_pct,
+                    gross_surplus_cents, junior_liens_total_cents)
+                   VALUES (lower(hex(randomblob(16))),?,?,?,?,?,?,?,?)""",
+                [
+                    asset_id, net_cents,
+                    trustee_fees_cents, foreclosure_costs_cents,
+                    senior_debt_cents, confidence_pct,
+                    gross_cents, liens_cents,
+                ],
+            )
+    except Exception as exc:
+        log.debug("[equity] math_audit extended write skipped: %s", exc)
+
     result = {
         "asset_id":                 asset_id,
         "gross_surplus_cents":      gross_cents,
         "junior_liens_total_cents": liens_cents,
         "net_owner_equity_cents":   net_cents,
+        "net_to_borrower_cents":    net_cents,
+        "trustee_fees_cents":       trustee_fees_cents,
+        "foreclosure_costs_cents":  foreclosure_costs_cents,
+        "senior_debt_cents":        senior_debt_cents,
+        "confidence_pct":           confidence_pct,
         "classification":           classification,
         "resolved_ts":              resolved_ts,
         "notes":                    notes,
     }
     log.info(
-        "[equity] %s → %s (gross=%d¢ liens=%d¢ net=%d¢)",
-        asset_id, classification, gross_cents, liens_cents, net_cents,
+        "[equity] %s → %s (gross=%d¢ liens=%d¢ fees=%d¢ net=%d¢ conf=%d%%)",
+        asset_id, classification, gross_cents, liens_cents,
+        trustee_fees_cents + foreclosure_costs_cents + senior_debt_cents,
+        net_cents, confidence_pct,
     )
     return result

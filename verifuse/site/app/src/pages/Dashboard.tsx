@@ -48,7 +48,7 @@ function useHealth() {
 interface KpiProps {
   label: string;
   value: string | number;
-  sub?: string;
+  sub?: React.ReactNode;
   accent?: boolean;
   grade?: "gold" | "silver" | "bronze";
   href?: string;
@@ -144,6 +144,8 @@ function SkeletonKpi() {
 function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) => void }) {
   const isRestricted = lead.restriction_status === "RESTRICTED";
   const isOwned = lead.unlocked_by_me === true;
+  const isNew = (lead.data_grade === "GOLD" || lead.data_grade === "SILVER")
+    && lead.data_age_days != null && lead.data_age_days <= 7;
   const streamLabel = lead.surplus_stream === "TAX_LIEN" ? "Tax Lien"
     : lead.surplus_stream === "TAX_DEED" ? "Tax Deed"
     : lead.surplus_stream === "HOA" ? "HOA"
@@ -155,6 +157,14 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
       <div className="card-header">
         <span className="county-badge">{lead.county?.replace(/_/g, " ").toUpperCase()}</span>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {isNew && (
+            <span style={{
+              fontSize: "0.65em", padding: "2px 6px", borderRadius: 4,
+              background: "rgba(16,185,129,0.15)", color: "#10b981",
+              letterSpacing: "0.08em", fontWeight: 700, border: "1px solid rgba(16,185,129,0.3)",
+              animation: "pulse 2s infinite",
+            }}>● NEW</span>
+          )}
           {isOwned && (
             <Tooltip content="You have unlocked this lead. Full PII and documents are available." position="top">
               <span className="owned-badge" style={{ cursor: "default" }}>● OWNED</span>
@@ -423,6 +433,20 @@ export default function Dashboard() {
   const [grade, setGrade] = useState("");
   const [sortBy, setSortBy] = useState<"surplus" | "newest" | "grade">("surplus");
   const [viewMode, setViewMode] = useState<"actionable" | "watchlist" | "my_leads">("actionable");
+
+  // Search bar state (2A)
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+
+  // Advanced filters state (2B)
+  const [showFilters, setShowFilters] = useState(false);
+  const [filterSaleDateFrom, setFilterSaleDateFrom] = useState("");
+  const [filterSaleDateTo, setFilterSaleDateTo] = useState("");
+  const [filterMinSurplus, setFilterMinSurplus] = useState("");
+  const [filterMaxSurplus, setFilterMaxSurplus] = useState("");
+  const [filterActionableOnly, setFilterActionableOnly] = useState(false);
+  const [advSortBy, setAdvSortBy] = useState("surplus_desc");
   const [loading, setLoading] = useState(true);
   const [statsLoading, setStatsLoading] = useState(true);
   const [fetchError, setFetchError] = useState("");
@@ -469,6 +493,33 @@ export default function Dashboard() {
     }
     window.location.reload();
   }
+
+  // Search debounce (2A)
+  useEffect(() => {
+    if (searchQuery.length < 2) {
+      setSearchResults([]);
+      setShowDropdown(false);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const base = API_BASE || "";
+        const res = await fetch(`${base}/api/search?q=${encodeURIComponent(searchQuery)}&limit=5`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem("vf_token") || ""}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setSearchResults(data || []);
+          setShowDropdown(true);
+        } else {
+          setSearchResults([]);
+        }
+      } catch {
+        setSearchResults([]);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   // Stats polling
   const fetchStatsOnly = useCallback(() => {
@@ -548,6 +599,23 @@ export default function Dashboard() {
   const watchlist = sortLeads(leads.filter((l) => l.restriction_status === "RESTRICTED"));
   const myLeads = sortLeads(leads.filter((l) => l.unlocked_by_me === true));
 
+  // Advanced filter + sort helper (2B)
+  function applyAdvancedFilters(arr: Lead[]): Lead[] {
+    let result = arr;
+    if (filterSaleDateFrom) result = result.filter((l) => (l.sale_date || "") >= filterSaleDateFrom);
+    if (filterSaleDateTo) result = result.filter((l) => (l.sale_date || "") <= filterSaleDateTo);
+    if (filterMinSurplus) result = result.filter((l) => (l.estimated_surplus || 0) >= Number(filterMinSurplus));
+    if (filterMaxSurplus) result = result.filter((l) => (l.estimated_surplus || 0) <= Number(filterMaxSurplus));
+    if (filterActionableOnly) result = result.filter((l) => l.restriction_status === "ACTIONABLE" || (l.days_until_actionable != null && (l as any).days_until_eligible != null && (l as any).days_until_eligible <= 0));
+    return [...result].sort((a, b) => {
+      if (advSortBy === "surplus_desc") return (b.estimated_surplus || 0) - (a.estimated_surplus || 0);
+      if (advSortBy === "deadline_asc") return (a.sale_date || "").localeCompare(b.sale_date || "");
+      if (advSortBy === "county_az") return (a.county || "").localeCompare(b.county || "");
+      if (advSortBy === "opportunity_desc") return ((b as any).opportunity_score || 0) - ((a as any).opportunity_score || 0);
+      return 0; // newest — keep API order
+    });
+  }
+
   // Grade counts for badges
   const goldCount = stats?.gold_grade ?? 0;
   const silverCount = stats?.silver_grade ?? 0;
@@ -580,9 +648,10 @@ export default function Dashboard() {
                   {simMode === "user" ? "VIEW: USER" : "VIEW: ADMIN"}
                 </button>
               )}
+              <Link to="/my-cases" className="btn-outline-sm">MY PIPELINE</Link>
               <Link to="/pricing" className="btn-outline-sm">PRICING</Link>
               {user.is_admin && (
-                <Link to="/admin" className="btn-outline-sm">ADMIN</Link>
+                <Link to="/admin" className="btn-outline-sm">ADMIN PANEL</Link>
               )}
               <button className="btn-outline-sm" onClick={logout}>LOGOUT</button>
             </>
@@ -606,7 +675,7 @@ export default function Dashboard() {
       {/* Email Verification Banner */}
       {user && !user.email_verified && (
         <div className="verify-banner">
-          <strong>Verify your email to unlock leads</strong>
+          <strong>We sent a 6-digit code to {user.email} — enter it below to unlock leads</strong>
           <div className="verify-row">
             <input
               type="text" placeholder="Enter verification code"
@@ -709,16 +778,17 @@ export default function Dashboard() {
               />
               <KpiCard
                 label="Counties Covered"
-                value={countyOptions.length || stats.counties.length}
-                sub="Colorado"
+                value={stats.counties_covered ?? countyOptions.length ?? stats.counties.length}
+                sub={<><span>Colorado (active + leads)</span><Link to="/coverage" className="kpi-link">View Coverage Map →</Link></>}
                 icon={MapPin}
-                tooltip="Active Colorado counties with live GovSoft scraper coverage. New counties are added quarterly. Mesa and Eagle are CAPTCHA-blocked (manual review only)."
+                tooltip="Active Colorado counties with live GovSoft scraper coverage AND confirmed GOLD/SILVER/BRONZE leads. New counties are added quarterly."
               />
               <KpiCard
-                label="Last Refreshed"
-                value={lastUpdated ? lastUpdated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
-                sub={secondsAgo > 0 ? `${secondsAgo}s ago` : "just now"}
-                tooltip="Dashboard stats refresh every 30 seconds automatically. Click any filter to force an immediate refresh."
+                label="New This Week"
+                value={(stats as any).new_leads_7d ?? 0}
+                sub="leads added in last 7 days"
+                icon={Star}
+                tooltip="New leads ingested in the past 7 days across all counties and grades. Reflects recent scraper activity."
               />
             </>
           ) : null}
@@ -861,6 +931,91 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Search Bar (2A) */}
+      {!isPreview && user && (
+        <div style={{ padding: "8px 20px 0" }}>
+          <div className="search-bar-wrapper" style={{ position: "relative", marginBottom: "0.5rem" }}>
+            <input
+              className="search-input"
+              type="text"
+              placeholder="Search by case number, address, owner, or county..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape") { setShowDropdown(false); setSearchQuery(""); } }}
+              style={{ width: "100%", padding: "0.625rem 1rem", border: "1px solid #374151", borderRadius: "0.5rem", fontSize: "0.9rem", background: "#111827", color: "#e5e7eb", boxSizing: "border-box" }}
+            />
+            {showDropdown && searchResults.length > 0 && (
+              <div className="search-dropdown" style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#1e293b", border: "1px solid #374151", borderRadius: "0.5rem", zIndex: 100, maxHeight: "300px", overflowY: "auto" }}>
+                {searchResults.map((r: any) => (
+                  <div
+                    key={r.asset_id}
+                    onClick={() => { navigate(`/lead/${r.asset_id}`); setShowDropdown(false); setSearchQuery(""); }}
+                    style={{ padding: "0.75rem 1rem", cursor: "pointer", borderBottom: "1px solid #374151", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.05)")}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                  >
+                    <div>
+                      <span style={{ fontWeight: 600, marginRight: "0.5rem", fontFamily: "monospace" }}>{r.case_number}</span>
+                      <span style={{ fontSize: "0.8rem", color: "#64748b" }}>{r.county?.replace(/_/g, " ").toUpperCase()}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                      <span className={`grade-badge grade-${r.data_grade?.toLowerCase()}`}>{r.data_grade}</span>
+                      {r.overbid_amount && <span style={{ fontSize: "0.8rem" }}>${r.overbid_amount.toLocaleString()}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Advanced Filters (2B) */}
+          <div style={{ marginBottom: "0.5rem" }}>
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              style={{ fontSize: "0.8rem", background: "none", border: "1px solid #374151", padding: "0.25rem 0.75rem", borderRadius: "0.375rem", cursor: "pointer", color: "#64748b", fontFamily: "monospace" }}
+            >
+              {showFilters ? "▲ Hide Filters" : "▼ Advanced Filters"}
+            </button>
+            {showFilters && (
+              <div style={{ marginTop: "0.75rem", padding: "1rem", background: "#111827", border: "1px solid #374151", borderRadius: "0.5rem", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: "0.75rem" }}>
+                <div>
+                  <label style={{ fontSize: "0.75rem", color: "#64748b", display: "block", marginBottom: 4 }}>Sale Date From</label>
+                  <input type="date" value={filterSaleDateFrom} onChange={(e) => setFilterSaleDateFrom(e.target.value)} style={{ width: "100%", padding: "0.375rem", border: "1px solid #374151", borderRadius: "0.375rem", background: "#0d1117", color: "#e5e7eb", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: "0.75rem", color: "#64748b", display: "block", marginBottom: 4 }}>Sale Date To</label>
+                  <input type="date" value={filterSaleDateTo} onChange={(e) => setFilterSaleDateTo(e.target.value)} style={{ width: "100%", padding: "0.375rem", border: "1px solid #374151", borderRadius: "0.375rem", background: "#0d1117", color: "#e5e7eb", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: "0.75rem", color: "#64748b", display: "block", marginBottom: 4 }}>Min Surplus ($)</label>
+                  <input type="number" value={filterMinSurplus} onChange={(e) => setFilterMinSurplus(e.target.value)} placeholder="0" style={{ width: "100%", padding: "0.375rem", border: "1px solid #374151", borderRadius: "0.375rem", background: "#0d1117", color: "#e5e7eb", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: "0.75rem", color: "#64748b", display: "block", marginBottom: 4 }}>Max Surplus ($)</label>
+                  <input type="number" value={filterMaxSurplus} onChange={(e) => setFilterMaxSurplus(e.target.value)} placeholder="500000" style={{ width: "100%", padding: "0.375rem", border: "1px solid #374151", borderRadius: "0.375rem", background: "#0d1117", color: "#e5e7eb", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: "0.75rem", color: "#64748b", display: "block", marginBottom: 4 }}>Sort By</label>
+                  <select value={advSortBy} onChange={(e) => setAdvSortBy(e.target.value)} style={{ width: "100%", padding: "0.375rem", border: "1px solid #374151", borderRadius: "0.375rem", background: "#0d1117", color: "#e5e7eb" }}>
+                    <option value="surplus_desc">Surplus ↓</option>
+                    <option value="deadline_asc">Deadline ↑</option>
+                    <option value="newest">Newest</option>
+                    <option value="county_az">County A→Z</option>
+                    <option value="opportunity_desc">Opportunity Score ↓</option>
+                  </select>
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: "0.5rem" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.375rem", fontSize: "0.8rem", cursor: "pointer", color: "#e5e7eb" }}>
+                    <input type="checkbox" checked={filterActionableOnly} onChange={(e) => setFilterActionableOnly(e.target.checked)} />
+                    Actionable now only
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="filters-row">
         <select
@@ -880,7 +1035,7 @@ export default function Dashboard() {
             { value: "",       label: `ALL`,                tip: "Show all validated leads regardless of confidence grade" },
             { value: "GOLD",   label: `GOLD (${goldCount})`,   tip: "Math-confirmed overbid + provenance doc. Highest confidence. Ready for immediate attorney action." },
             { value: "SILVER", label: `SILVER (${silverCount})`, tip: "Probable overbid. Restriction window active or secondary validation pending. Monitor for promotion." },
-            { value: "BRONZE", label: `BRONZE (${bronzeCount})`, tip: "Pre-validation. Gate 4 extraction in progress. Overbid likely but not yet confirmed by sale documents." },
+            { value: "BRONZE", label: `BRONZE (PENDING VERIFICATION) (${bronzeCount})`, tip: "Pre-validation. Gate 4 extraction in progress. Overbid likely but not yet confirmed by sale documents." },
           ].map((g) => (
             <Tooltip key={g.value || "ALL"} content={g.tip} position="top">
               <button
@@ -949,66 +1104,75 @@ export default function Dashboard() {
       ) : (
         <>
           {/* MY LEADS view */}
-          {viewMode === "my_leads" && (
-            <div className="bucket-section">
-              <div className="bucket-header actionable">
-                <h2>MY LEADS — UNLOCKED INTEL</h2>
-                <span className="bucket-count">{myLeads.length} leads</span>
-                <p className="bucket-desc">
-                  Leads you have unlocked. Full owner data and case details are available.
-                </p>
-              </div>
-              {myLeads.length === 0 ? (
-                <div className="center-content" style={{ paddingTop: 40 }}>
-                  <p style={{ color: "#64748b" }}>No leads unlocked yet — browse the intelligence below</p>
+          {viewMode === "my_leads" && (() => {
+            const displayedMyLeads = applyAdvancedFilters(myLeads);
+            return (
+              <div className="bucket-section">
+                <div className="bucket-header actionable">
+                  <h2>MY LEADS — UNLOCKED INTEL</h2>
+                  <span className="bucket-count">{displayedMyLeads.length} leads</span>
+                  <p className="bucket-desc">
+                    Leads you have unlocked. Full owner data and case details are available.
+                  </p>
                 </div>
-              ) : (
+                {displayedMyLeads.length === 0 ? (
+                  <div className="center-content" style={{ paddingTop: 40 }}>
+                    <p style={{ color: "#64748b" }}>No leads unlocked yet — browse the intelligence below</p>
+                  </div>
+                ) : (
+                  <div className="vault-grid">
+                    {displayedMyLeads.map((lead) => (
+                      <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ACTIONABLE view */}
+          {viewMode === "actionable" && (() => {
+            const displayedActionable = applyAdvancedFilters(actionable);
+            return displayedActionable.length > 0 ? (
+              <div className="bucket-section">
+                <div className="bucket-header actionable">
+                  <h2>ESCROW ENDED — ACTIONABLE</h2>
+                  <span className="bucket-count">{displayedActionable.length} leads</span>
+                  <p className="bucket-desc">
+                    Sold &gt; 6 months ago. C.R.S. § 38-38-111 restriction period has passed.
+                    Attorney-client agreements are permitted.
+                  </p>
+                </div>
                 <div className="vault-grid">
-                  {myLeads.map((lead) => (
+                  {displayedActionable.map((lead) => (
                     <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
                   ))}
                 </div>
-              )}
-            </div>
-          )}
-
-          {/* ACTIONABLE view */}
-          {viewMode === "actionable" && actionable.length > 0 && (
-            <div className="bucket-section">
-              <div className="bucket-header actionable">
-                <h2>ESCROW ENDED — ACTIONABLE</h2>
-                <span className="bucket-count">{actionable.length} leads</span>
-                <p className="bucket-desc">
-                  Sold &gt; 6 months ago. C.R.S. § 38-38-111 restriction period has passed.
-                  Attorney-client agreements are permitted.
-                </p>
               </div>
-              <div className="vault-grid">
-                {actionable.map((lead) => (
-                  <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
-                ))}
-              </div>
-            </div>
-          )}
+            ) : null;
+          })()}
 
           {/* WATCHLIST view */}
-          {viewMode === "watchlist" && watchlist.length > 0 && (
-            <div className="bucket-section">
-              <div className="bucket-header watchlist">
-                <h2>DATA ACCESS ONLY — RESTRICTION PERIOD</h2>
-                <span className="bucket-count">{watchlist.length} leads</span>
-                <p className="bucket-desc">
-                  Sold &lt; 6 months ago. Statutory restrictions under C.R.S. § 38-38-111 and
-                  § 38-13-1304 may apply depending on sale date and fund status. Consult counsel.
-                </p>
+          {viewMode === "watchlist" && (() => {
+            const displayedWatchlist = applyAdvancedFilters(watchlist);
+            return displayedWatchlist.length > 0 ? (
+              <div className="bucket-section">
+                <div className="bucket-header watchlist">
+                  <h2>DATA ACCESS ONLY — RESTRICTION PERIOD</h2>
+                  <span className="bucket-count">{displayedWatchlist.length} leads</span>
+                  <p className="bucket-desc">
+                    Sold &lt; 6 months ago. Statutory restrictions under C.R.S. § 38-38-111 and
+                    § 38-13-1304 may apply depending on sale date and fund status. Consult counsel.
+                  </p>
+                </div>
+                <div className="vault-grid">
+                  {displayedWatchlist.map((lead) => (
+                    <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
+                  ))}
+                </div>
               </div>
-              <div className="vault-grid">
-                {watchlist.map((lead) => (
-                  <LeadCard key={lead.asset_id} lead={lead} onNavigate={navigateToLead} />
-                ))}
-              </div>
-            </div>
-          )}
+            ) : null;
+          })()}
 
           {/* Old dual-section view for preview/no-tabs */}
           {!user && actionable.length > 0 && (
