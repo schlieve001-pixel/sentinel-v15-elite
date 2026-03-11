@@ -56,47 +56,50 @@ function RoiCalculator() {
 const TIERS = [
   {
     name: "Investigator",
+    key: "associate",
     price: "$199",
     credits: 30,
-    perCredit: "$6.63",
+    highlight: false,
     features: [
-      "30 lead unlocks / month",
+      "30 unlocks/month · 30-day rollover",
       "All 18+ Colorado counties",
-      "Dossier PDF downloads",
-      "Deadline alert emails (30 / 14 / 7 day)",
-      "4-gate GOLD certification",
+      "GOLD/SILVER/BRONZE graded leads",
+      "Evidence document access",
+      "Deadline alert emails",
       "Foreclosure + Tax Deed streams",
-      "1 seat",
+      "Unlimited devices",
     ],
   },
   {
     name: "Partner",
+    key: "partner",
     price: "$399",
     credits: 75,
-    perCredit: "$5.32",
-    popular: true,
+    highlight: true,
     features: [
-      "75 lead unlocks / month",
-      "All surplus streams (4 types)",
-      "Priority new-lead alerts",
-      "Multi-county coverage dashboard",
-      "Court Filing Packet access",
-      "2 seats",
+      "75 unlocks/month · 60-day rollover",
+      "All 4 surplus streams",
+      "Court Filing Packet (3 credits)",
+      "Bulk CSV export",
+      "Priority data updates",
+      "Skip Trace add-on ($29/record)",
+      "Unlimited devices",
     ],
   },
   {
     name: "Enterprise",
+    key: "sovereign",
     price: "$899",
     credits: 200,
-    perCredit: "$4.50",
-    bestValue: true,
+    highlight: false,
     features: [
-      "200 lead unlocks / month",
-      "Full API access",
+      "200 unlocks/month · 90-day rollover",
+      "All 4 streams + estate cases",
+      "Full REST API access",
       "White-label dossier exports",
-      "All 4 surplus streams",
-      "Unclaimed Property pipeline",
-      "5 seats + priority support",
+      "10 Skip Traces/month included",
+      "County coverage reports",
+      "Unlimited devices",
     ],
   },
 ];
@@ -226,56 +229,117 @@ export default function Landing() {
       </section>
 
       {/* Pricing */}
-      <section className="landing-section" id="pricing">
-        <h2>Transparent, Strategic Pricing</h2>
-        <p style={{ textAlign: "center", color: "#94a3b8", marginBottom: "0.5rem" }}>
-          Scale as you grow. No contracts, cancel anytime.
-        </p>
-        <p style={{ textAlign: "center", color: "#10b981", fontSize: "0.9rem", marginBottom: "2rem" }}>
-          4 surplus streams: Foreclosure Overbid · Tax Deed · Tax Lien · Unclaimed Property
-        </p>
-        <div className="pricing-grid">
+      <section className="landing-section" id="pricing" style={{ paddingBottom: "3rem" }}>
+        <div style={{ textAlign: "center", marginBottom: "2.5rem" }}>
+          <div style={{ fontSize: "0.72rem", letterSpacing: "0.15em", color: "#22c55e", marginBottom: "0.75rem" }}>
+            INTELLIGENCE PLANS
+          </div>
+          <h2 style={{ margin: "0 0 0.75rem", fontSize: "1.8rem" }}>Pay for results, not software</h2>
+          <p style={{ color: "#94a3b8", margin: "0 auto", maxWidth: 480, fontSize: "0.9rem", lineHeight: 1.6 }}>
+            One credit = one fully unlocked case with all evidence documents.
+            No per-document fees. Credits roll over. Cancel anytime.
+          </p>
+        </div>
+
+        {/* Tier cards */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "1.25rem", marginBottom: "2rem" }}>
           {TIERS.map((tier) => (
             <div
               key={tier.name}
-              className={`plan-card ${tier.popular ? "sovereign" : ""}`}
+              style={{
+                background: tier.highlight ? "rgba(34,197,94,0.04)" : "#0d1117",
+                border: `1px solid ${tier.highlight ? "#22c55e" : "#1f2937"}`,
+                borderRadius: 10,
+                padding: "28px 24px",
+                position: "relative",
+                display: "flex",
+                flexDirection: "column",
+              }}
             >
-              {tier.popular && <div className="best-value">MOST POPULAR</div>}
-              {tier.bestValue && <div className="best-value" style={{ background: "#0ea5e9" }}>BEST VALUE</div>}
-              {(tier as any).freeForever && <div className="best-value" style={{ background: "#374151" }}>FREE FOREVER</div>}
-              <h3>{tier.name}</h3>
-              <div className="price">
-                {tier.price}
-                <span>{(tier as any).freeForever ? "" : "/mo"}</span>
-              </div>
-              {tier.perCredit && (
-                <div style={{ color: "#10b981", fontSize: "0.85rem", marginBottom: "0.25rem" }}>
-                  {tier.perCredit} per unlock
+              {tier.highlight && (
+                <div style={{
+                  position: "absolute", top: -12, left: "50%", transform: "translateX(-50%)",
+                  background: "#22c55e", color: "#0a0f1a", fontSize: "0.68rem", fontWeight: 700,
+                  padding: "3px 14px", borderRadius: 20, letterSpacing: "0.1em", whiteSpace: "nowrap",
+                  fontFamily: "monospace",
+                }}>
+                  MOST POPULAR
                 </div>
               )}
-              <div style={{ color: "#64748b", fontSize: "0.8rem", marginBottom: "1rem" }}>
-                {(tier as any).freeForever ? "No credit card required" : `${tier.credits} credits included`}
+              <div style={{ fontSize: "0.72rem", letterSpacing: "0.1em", opacity: 0.5, marginBottom: 8, fontFamily: "monospace" }}>
+                {tier.name.toUpperCase()}
               </div>
-              <ul>
+              <div style={{ marginBottom: 4 }}>
+                <span style={{ fontSize: "2.4rem", fontWeight: 700, fontFamily: "monospace" }}>{tier.price}</span>
+                <span style={{ opacity: 0.45, fontSize: "0.85rem", fontFamily: "monospace" }}>/mo</span>
+              </div>
+              <div style={{ color: "#22c55e", fontSize: "0.78rem", marginBottom: "1.25rem", fontFamily: "monospace" }}>
+                {tier.credits} credits/month
+              </div>
+              <ul style={{ margin: "0 0 1.5rem", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8, flex: 1 }}>
                 {tier.features.map((f) => (
-                  <li key={f}>{f}</li>
+                  <li key={f} style={{ fontSize: "0.82rem", display: "flex", gap: 8, alignItems: "flex-start", color: "#d1d5db" }}>
+                    <span style={{ color: "#22c55e", flexShrink: 0, marginTop: 1 }}>✓</span>
+                    <span>{f}</span>
+                  </li>
                 ))}
               </ul>
-              <Link to="/register" className={`plan-btn ${tier.popular ? "glow" : ""}`}>
-                {(tier as any).freeForever ? "START FREE" : "GET STARTED"}
+              <Link
+                to="/register"
+                style={{
+                  display: "block", textAlign: "center",
+                  padding: "10px 0", borderRadius: 6,
+                  background: tier.highlight ? "#22c55e" : "transparent",
+                  color: tier.highlight ? "#0a0f1a" : "#22c55e",
+                  border: tier.highlight ? "none" : "1px solid #22c55e",
+                  textDecoration: "none", fontSize: "0.82rem", fontWeight: 700,
+                  letterSpacing: "0.06em", fontFamily: "monospace",
+                }}
+              >
+                GET STARTED
               </Link>
             </div>
           ))}
         </div>
+
+        {/* Founding attorney callout */}
+        <div style={{
+          background: "rgba(245,158,11,0.05)", border: "1px solid #78350f",
+          borderRadius: 8, padding: "18px 24px", display: "flex",
+          alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 16,
+          marginBottom: "1.5rem",
+        }}>
+          <div>
+            <div style={{ fontSize: "0.68rem", color: "#f59e0b", letterSpacing: "0.1em", fontFamily: "monospace", marginBottom: 4 }}>
+              ★ FOUNDING ATTORNEY PROGRAM — LIMITED SPOTS
+            </div>
+            <div style={{ fontSize: "0.88rem", color: "#e5e7eb" }}>
+              First 10 attorneys lock in current pricing forever + 5 bonus credits.
+              After that, prices increase 30%.
+            </div>
+          </div>
+          <Link to="/register" style={{
+            display: "inline-block", padding: "9px 20px",
+            background: "#f59e0b", color: "#0a0f1a",
+            textDecoration: "none", borderRadius: 6,
+            fontSize: "0.78rem", fontWeight: 700, letterSpacing: "0.06em",
+            fontFamily: "monospace", whiteSpace: "nowrap",
+          }}>
+            CLAIM FOUNDING SPOT →
+          </Link>
+        </div>
+
+        {/* Bottom trust strip */}
         <div style={{
           display: "flex", justifyContent: "center", gap: "2rem",
-          marginTop: "2rem", flexWrap: "wrap", color: "#94a3b8", fontSize: "0.85rem"
+          flexWrap: "wrap", color: "#4b5563", fontSize: "0.8rem",
+          fontFamily: "monospace",
         }}>
-          <span>Cancel anytime — no contract</span>
-          <span>Unused credits roll over 30 days</span>
-          <span>Founding member rates locked in</span>
+          <span>No contracts · cancel anytime</span>
+          <span>Annual billing saves 10%</span>
+          <span>🔒 Stripe-secured payments</span>
+          <Link to="/pricing" style={{ color: "#22c55e", textDecoration: "none" }}>Full pricing details →</Link>
         </div>
-        <p className="stripe-badge">🔒 Secure payments powered by Stripe</p>
       </section>
 
       {/* Legal Disclaimer */}

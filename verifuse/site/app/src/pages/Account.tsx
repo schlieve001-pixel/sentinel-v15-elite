@@ -291,10 +291,19 @@ function ApiKeySection({ user }: { user: any }) {
 
   return (
     <section style={SECTION}>
-      <h2 style={SH2}>API Key — Scraper Integration</h2>
-      <p style={{ fontSize: "0.8em", opacity: 0.5, marginBottom: 16 }}>
-        Use your API key for machine-to-machine integrations (case management systems, custom workflows).
-        Send as <code style={{ background: "#1f2937", padding: "1px 6px", borderRadius: 3 }}>x-verifuse-api-key</code> header.
+      <h2 style={SH2}>API Key — Programmatic Access</h2>
+      <p style={{ fontSize: "0.8em", opacity: 0.5, marginBottom: 8 }}>
+        Authenticate automated requests from your case management system, custom dashboard, or data pipeline.
+        Send alongside your <code style={{ background: "#1f2937", padding: "1px 6px", borderRadius: 3 }}>Authorization: Bearer</code> JWT token:
+      </p>
+      <div style={{ fontFamily: "monospace", background: "#0a0f1a", border: "1px solid #1f2937", borderRadius: 6, padding: "8px 14px", fontSize: "0.78em", color: "#6b7280", marginBottom: 14 }}>
+        curl -H <span style={{ color: "#22c55e" }}>"Authorization: Bearer &lt;your-jwt&gt;"</span> \<br />
+        &nbsp;&nbsp;&nbsp;&nbsp; -H <span style={{ color: "#22c55e" }}>"x-verifuse-api-key: vf_..."</span> \<br />
+        &nbsp;&nbsp;&nbsp;&nbsp; https://verifuse.tech/api/leads
+      </div>
+      <p style={{ fontSize: "0.75em", opacity: 0.4, marginBottom: 16 }}>
+        The API key bypasses rate limiting for legitimate integrations. Both headers are required — the JWT authenticates <em>who</em> you are, the API key signals automated access.
+        Enterprise tier includes full REST API access.
       </p>
 
       {hasKey === null && <div style={{ opacity: 0.4, fontSize: "0.85em" }}>Loading...</div>}
