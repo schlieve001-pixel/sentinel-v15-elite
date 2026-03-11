@@ -15,6 +15,11 @@ import Pricing from "./pages/Pricing";
 import PreSale from "./pages/PreSale";
 import Coverage from "./pages/Coverage";
 import MyCases from "./pages/MyCases";
+import TaxDeed from "./pages/TaxDeed";
+import UnclaimedProperty from "./pages/UnclaimedProperty";
+import Account from "./pages/Account";
+import Terms from "./pages/Terms";
+import Privacy from "./pages/Privacy";
 import "./App.css";
 
 // Detect admin.verifuse.tech subdomain and auto-redirect to /admin
@@ -50,6 +55,11 @@ export default function App() {
           <Route path="/pre-sale" element={<ErrorBoundary><PreSale /></ErrorBoundary>} />
           <Route path="/coverage" element={<ErrorBoundary><Coverage /></ErrorBoundary>} />
           <Route path="/my-cases" element={<ErrorBoundary><MyCases /></ErrorBoundary>} />
+          <Route path="/tax-deed" element={<ErrorBoundary><TaxDeed /></ErrorBoundary>} />
+          <Route path="/unclaimed" element={<ErrorBoundary><UnclaimedProperty /></ErrorBoundary>} />
+          <Route path="/account" element={<ErrorBoundary><Account /></ErrorBoundary>} />
+          <Route path="/terms" element={<Terms />} />
+          <Route path="/privacy" element={<Privacy />} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

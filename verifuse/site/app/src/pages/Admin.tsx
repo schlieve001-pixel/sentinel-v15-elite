@@ -176,8 +176,8 @@ async function adminFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
     },
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new ApiError(res.status, body.detail || "Request failed");
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.detail || body.error?.message || res.statusText || "Request failed");
   }
   return res.json();
 }
@@ -641,13 +641,38 @@ function LeadsTab() {
                     </td>
                     <td style={{ padding: "7px 10px", color: TEXT_MUTED, fontSize: "0.88em" }}>{l.sale_date || "—"}</td>
                     <td style={{ padding: "7px 10px" }}>
-                      <button onClick={() => setGradeOverride({ lead: l, newGrade: l.data_grade || "BRONZE", reason: "" })}
-                        style={{
-                          background: "none", border: `1px solid ${BORDER2}`, color: TEXT_MUTED,
-                          borderRadius: 4, padding: "3px 9px", cursor: "pointer", fontFamily: "monospace", fontSize: "0.72em",
-                        }}>
-                        GRADE ↕
-                      </button>
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <button onClick={() => setGradeOverride({ lead: l, newGrade: l.data_grade || "BRONZE", reason: "" })}
+                          style={{
+                            background: "none", border: `1px solid ${BORDER2}`, color: TEXT_MUTED,
+                            borderRadius: 4, padding: "3px 9px", cursor: "pointer", fontFamily: "monospace", fontSize: "0.72em",
+                          }}>
+                          GRADE ↕
+                        </button>
+                        {/* B3: RTF promote button */}
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Promote lead ${l.id?.slice(0, 8)} to READY_TO_FILE? All RTF gates will be validated.`)) return;
+                            try {
+                              const res = await fetch(`${API_BASE}/api/admin/leads/${l.id}/promote-rtf`, {
+                                method: "POST",
+                                headers: { Authorization: `Bearer ${localStorage.getItem("vf_token") || ""}` }
+                              });
+                              const body = await res.json().catch(() => ({}));
+                              if (res.ok) alert("Lead promoted to READY_TO_FILE");
+                              else alert(body.detail || "RTF gate failed — check lead fields");
+                            } catch { alert("Request failed"); }
+                          }}
+                          style={{
+                            padding: "3px 7px", fontSize: "0.7em",
+                            background: "#14532d", border: "1px solid #16a34a",
+                            color: "#4ade80", borderRadius: "0.25rem",
+                            cursor: "pointer", fontFamily: "monospace",
+                          }}
+                        >
+                          RTF
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -1123,6 +1148,8 @@ function SystemTab() {
   const [error, setError] = useState("");
   const [subTab, setSubTab] = useState<SystemSubTab>("operations");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // A8: Override log state
+  const [overrideLog, setOverrideLog] = useState<any[]>([]);
 
   const load = useCallback(() => {
     Promise.all([
@@ -1284,6 +1311,7 @@ function SystemTab() {
                         { h: "SILVER", right: true },
                         { h: "BRONZE", right: true },
                         { h: "GOLD%", right: true },
+                        { h: "HEALTH", right: true },
                         { h: "STATUS", right: false },
                         { h: "LAST RUN", right: false },
                       ].map(({ h, right }) => (
@@ -1350,6 +1378,17 @@ function SystemTab() {
                               <td style={{ padding: "6px 10px", textAlign: "right", color: goldPctColor, fontWeight: goldPct >= 10 ? 700 : 400, fontSize: "0.8em" }}>
                                 {(p.gold + p.silver + p.bronze) > 0 ? `${goldPct}%` : "—"}
                               </td>
+                              {/* E2: County Health Score */}
+                              <td style={{ padding: "6px 10px", textAlign: "right" }}>
+                                {(() => {
+                                  const total = (p.gold || 0) + (p.silver || 0) + (p.bronze || 0) + (p.reject || 0);
+                                  const gpct = total > 0 ? (p.gold || 0) / total : 0;
+                                  const recency = p.last_verified_ts ? (Date.now()/1000 - p.last_verified_ts) < 86400 ? 1.0 : (Date.now()/1000 - p.last_verified_ts) < 259200 ? 0.5 : 0.0 : 0.0;
+                                  const health = Math.round((gpct * 0.7 + recency * 0.3) * 100);
+                                  const hColor = health >= 80 ? GREEN : health >= 50 ? AMBER : RED;
+                                  return <span style={{ color: hColor, fontWeight: 600, fontSize: "0.8em" }}>{health}%</span>;
+                                })()}
+                              </td>
                               <td style={{ padding: "6px 10px" }}>
                                 <span title={actionTooltip} style={{ color: actionColor, fontWeight: 700, fontSize: "0.8em", letterSpacing: "0.04em", cursor: actionTooltip ? "help" : "default" }}>{actionLabel}</span>
                               </td>
@@ -1366,9 +1405,11 @@ function SystemTab() {
                         <tr key={c.county_code || c.county} style={{ borderBottom: `1px solid ${BORDER}` }}>
                           <td style={{ padding: "6px 10px", fontWeight: 600 }}>{(c.county || c.county_code || "—").toUpperCase()}</td>
                           <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.75em" }}>{c.platform_type || c.platform || "—"}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>—</td>
                           <td style={{ padding: "6px 10px", textAlign: "right", color: "#f59e0b" }}>{c.gold || "—"}</td>
                           <td style={{ padding: "6px 10px", textAlign: "right", color: "#94a3b8" }}>{c.silver || "—"}</td>
                           <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>{c.bronze || "—"}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>—</td>
                           <td style={{ padding: "6px 10px", textAlign: "right", color: TEXT_MUTED }}>—</td>
                           <td style={{ padding: "6px 10px" }}>—</td>
                           <td style={{ padding: "6px 10px", color: TEXT_MUTED, fontSize: "0.8em" }}>
@@ -1387,6 +1428,54 @@ function SystemTab() {
           <section>
             <SectionHeader>AUDIT LOG</SectionHeader>
             <AuditLog />
+          </section>
+
+          {/* A8: Admin Override Log */}
+          <section>
+            <SectionHeader
+              action={
+                <button
+                  onClick={() => {
+                    adminFetch<{ entries: any[] }>("/api/admin/override-log")
+                      .then((d) => setOverrideLog(d.entries || []))
+                      .catch(() => {});
+                  }}
+                  style={{ padding: "0.25rem 0.625rem", fontSize: "0.75rem", background: BG2, border: `1px solid ${BORDER2}`, color: TEXT, borderRadius: "0.25rem", cursor: "pointer", fontFamily: "monospace" }}
+                >
+                  LOAD
+                </button>
+              }
+            >
+              ADMIN OVERRIDE LOG
+            </SectionHeader>
+            {overrideLog.length > 0 ? (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.78rem" }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${BORDER2}`, color: TEXT_MUTED }}>
+                    <th style={{ textAlign: "left", padding: "0.375rem" }}>ACTION</th>
+                    <th style={{ textAlign: "left", padding: "0.375rem" }}>LEAD</th>
+                    <th style={{ textAlign: "left", padding: "0.375rem" }}>REASON</th>
+                    <th style={{ textAlign: "left", padding: "0.375rem" }}>TIMESTAMP</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {overrideLog.map((entry: any, i: number) => (
+                    <tr key={i} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                      <td style={{ padding: "0.375rem", color: entry.action === "admin_force_unlock" ? RED : AMBER }}>
+                        {entry.action}
+                      </td>
+                      <td style={{ padding: "0.375rem" }}>{entry.target_lead_id || "—"}</td>
+                      <td style={{ padding: "0.375rem", color: TEXT_MUTED }}>{entry.reason_code || "—"}</td>
+                      <td style={{ padding: "0.375rem", color: TEXT_MUTED, fontSize: "0.73rem" }}>
+                        {entry.created_ts ? new Date(entry.created_ts * 1000).toLocaleString() : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p style={{ color: TEXT_MUTED, fontSize: "0.8rem" }}>Click LOAD to view override log entries.</p>
+            )}
           </section>
 
           {/* Scraper Health (2G) */}
@@ -1599,26 +1688,35 @@ const COUNTY_SLUGS = [
 ];
 
 const PIPELINE_COMMANDS: {
-  id: string; label: string; desc: string; needsCounty?: boolean;
-  danger?: boolean; color?: string;
+  id: string; label: string; desc: string; hint: string; needsCounty?: boolean;
+  danger?: boolean; color?: string; eta?: string; group?: string;
 }[] = [
-  // Pre-Sale
-  { id: "pending-sales",       label: "▶ RUN PRE-SALE SCAN",    desc: "Scrape Active/Pending cases from GovSoft (pre-sale pipeline)", needsCounty: true,  color: "#22c55e" },
-  // Post-Sale Scraper
-  { id: "scraper-run-window",  label: "▶ DATE-WINDOW SCRAPE",   desc: "Scrape post-sale cases for a county date window", needsCounty: true },
-  { id: "sale-info-backfill",  label: "▶ SALE-INFO BACKFILL",   desc: "Re-scrape BRONZE leads missing SALE_INFO tab", needsCounty: true },
-  // Gate 4
-  { id: "extract-batch",       label: "▶ GATE 4 EXTRACT",       desc: "Extract overbid data from captured SALE_INFO snapshots", needsCounty: true },
-  { id: "gate4-run-all",       label: "▶ GATE 4 ALL COUNTIES",  desc: "Full Gate 4 pipeline: all counties (slow, 30+ min)", color: "#f59e0b" },
-  // Promotion
-  { id: "promote-eligible",    label: "▶ PROMOTE ELIGIBLE",     desc: "Promote SILVER → GOLD when 6-month restriction expires" },
-  // Denver
-  { id: "denver-scrape",       label: "▶ DENVER SCRAPE",        desc: "Denver Public Trustee PDF scraper" },
-  // Tax lien
-  { id: "tax-lien-run",        label: "▶ TAX LIEN RUN",         desc: "Tax lien surplus pipeline (C.R.S. § 39-11-151)" },
-  // DB
-  { id: "backup-db",           label: "⬇ BACKUP DB",            desc: "SQLite online backup (timestamped .bak)" },
-  { id: "migrate",             label: "⬆ MIGRATE",              desc: "Run all pending DB migrations (idempotent)" },
+  // ── Pre-Sale ──────────────────────────────────────────────────────
+  { id: "pending-sales",       label: "▶ PRE-SALE SCAN",       desc: "Scrape Active/Pending cases from GovSoft (pre-sale pipeline)", hint: "Use weekly to capture upcoming trustee sales before they occur. Results appear in PRE-SALE pipeline.", needsCounty: true, color: "#22c55e", eta: "2–5 min", group: "PRE-SALE" },
+  // ── Post-Sale Scraper ─────────────────────────────────────────────
+  { id: "scraper-run-window",  label: "▶ DATE-WINDOW SCRAPE",  desc: "Scrape post-sale Sold cases for a county (last 90 days)", hint: "Run after new sales occur to ingest fresh post-sale leads. Use when LAST RUN shows stale data.", needsCounty: true, eta: "5–15 min", group: "SCRAPER" },
+  { id: "scraper-enum",        label: "▶ SEQUENTIAL ENUM",     desc: "Enumerate sequential case numbers for a county to find hidden cases", hint: "Use when date-window scraper misses cases. Iterates J250 0001-9999 style case numbers.", needsCounty: true, eta: "15–45 min", group: "SCRAPER" },
+  { id: "sale-info-backfill",  label: "▶ SALE-INFO BACKFILL",  desc: "Re-scrape BRONZE leads missing SALE_INFO tab data", hint: "Required before Gate 4. Run when Admin → Pipeline shows NEEDS SALE DATE action for a county.", needsCounty: true, eta: "10–30 min", group: "SCRAPER" },
+  { id: "denver-scrape",       label: "▶ DENVER SCRAPE",       desc: "Denver Public Trustee PDF scraper (special non-GovSoft path)", hint: "Denver uses a separate PDF-based system. Run separately from GovSoft counties.", eta: "5–15 min", group: "SCRAPER" },
+  // ── Gate 4 ────────────────────────────────────────────────────────
+  { id: "extract-batch",       label: "▶ GATE 4 EXTRACT",      desc: "Extract overbid amount from SALE_INFO HTML snapshots → promote to GOLD/SILVER", hint: "Core pipeline step. Run after Sale-Info Backfill. Turns BRONZE leads with snapshots into GOLD/SILVER.", needsCounty: true, eta: "5–20 min", group: "GATE 4" },
+  { id: "gate4-run-all",       label: "▶ GATE 4 ALL COUNTIES", desc: "Full Gate 4 pipeline across all configured counties (slow)", hint: "Runs Gate 4 extraction for every county in sequence. Use for full refresh. Takes 30+ min.", color: "#f59e0b", eta: "30–90 min", group: "GATE 4" },
+  // ── AI Verification ───────────────────────────────────────────────
+  { id: "verify-sota",         label: "▶ SOTA VERIFY ALL",     desc: "Run triple-verification (Document AI + Gemini) on all GOLD leads with vault PDFs", hint: "Uses GCP Document AI + Gemini vision to confirm overbid amounts. Upgrades pool_source to TRIPLE_VERIFIED or AI_VERIFIED.", color: "#a78bfa", eta: "10–40 min", group: "VERIFY" },
+  { id: "evidence-audit",      label: "▶ EVIDENCE AUDIT",      desc: "List all GOLD leads with zero evidence documents (flags gaps)", hint: "Identifies GOLD/ATTORNEY_READY leads that are missing html_snapshots or evidence_documents. Run before client demos.", color: "#a78bfa", eta: "< 1 min", group: "VERIFY" },
+  // ── Promotion ─────────────────────────────────────────────────────
+  { id: "promote-eligible",    label: "▶ PROMOTE ELIGIBLE",    desc: "Promote SILVER → GOLD when 6-month restriction expires", hint: "Run daily or weekly. Checks if any SILVER leads have passed the § 38-38-111(5) restriction window.", eta: "< 1 min", group: "PROMOTE" },
+  // ── Owner Intelligence ────────────────────────────────────────────
+  { id: "assessor-lookup",     label: "▶ ASSESSOR LOOKUP",     desc: "Pull owner mailing address from county assessor (8 counties)", hint: "Free assessor API. Populates owner_mailing_address on GOLD leads. Run after scraping new county.", eta: "5–20 min", group: "INTEL" },
+  { id: "enrich-owners",       label: "▶ ENRICH OWNERS",       desc: "Run full owner enrichment pipeline (assessor + SOS + USPS)", hint: "Combines assessor, CO Secretary of State, and USPS validation to produce owner_contact_json. Best run weekly.", eta: "10–30 min", group: "INTEL" },
+  { id: "unclaimed-crossref",  label: "▶ UNCLAIMED CROSSREF",  desc: "Print expired-window leads that may have transferred to CO Treasurer", hint: "Identifies leads with sale_date ≤ 2025-09-01 (past 6-month window) as unclaimed property candidates.", eta: "< 1 min", group: "INTEL" },
+  // ── Alternative Streams ───────────────────────────────────────────
+  { id: "tax-lien-run",           label: "▶ TAX LIEN RUN",        desc: "Tax lien surplus pipeline (C.R.S. § 39-11-151)", hint: "Populates TAX_LIEN surplus stream. Run monthly to capture county tax sale overages.", eta: "5–10 min", group: "STREAMS" },
+  { id: "unclaimed-property-run", label: "▶ UNCLAIMED PROPERTY",  desc: "CO State Treasurer unclaimed property scraper (§ 38-13-101)", hint: "Populates UNCLAIMED_PROPERTY stream. Queries the CO State Treasurer's unclaimed property database.", eta: "5–15 min", group: "STREAMS" },
+  // ── DB / System ───────────────────────────────────────────────────
+  { id: "coverage-report",     label: "▶ COVERAGE REPORT",     desc: "Print full county coverage report (active/inactive/leads/GOLD per county)", hint: "Diagnostic report. Useful for identifying counties with stale data or zero leads.", eta: "< 1 min", group: "SYSTEM" },
+  { id: "backup-db",           label: "⬇ BACKUP DB",           desc: "SQLite online backup → timestamped .bak file", hint: "Safe to run anytime — does not lock the DB. Creates a point-in-time snapshot.", eta: "< 1 min", group: "SYSTEM" },
+  { id: "migrate",             label: "⬆ RUN MIGRATIONS",      desc: "Apply all pending DB migrations (idempotent — safe to re-run)", hint: "Run after deploying new code. Idempotent — will not re-apply already-applied migrations.", eta: "< 1 min", group: "SYSTEM" },
 ];
 
 function jobStatusColor(status: string) {
@@ -1762,6 +1860,71 @@ function OpsCenter() {
         ))}
       </div>
 
+      {/* ── Snapshot counts + 24h runs ── */}
+      {summary && (Object.keys(summary.snapshot_counts).length > 0 || summary.runs_24h.length > 0) && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          {/* Snapshot inventory */}
+          {Object.keys(summary.snapshot_counts).length > 0 && (
+            <div style={{ background: BG2, border: `1px solid ${BORDER2}`, borderRadius: 8, padding: "12px 16px" }}>
+              <div style={{ fontSize: "0.65em", letterSpacing: "0.1em", color: TEXT_MUTED, marginBottom: 10 }}>HTML SNAPSHOT INVENTORY</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {Object.entries(summary.snapshot_counts).map(([type, cnt]) => (
+                  <div key={type} style={{ background: BG3, border: `1px solid ${BORDER}`, borderRadius: 5, padding: "4px 10px", fontSize: "0.72em" }}>
+                    <span style={{ color: TEXT_MUTED }}>{type}</span>
+                    <span style={{ color: BLUE, fontWeight: 700, marginLeft: 8 }}>{cnt.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* 24h ingestion runs */}
+          {summary.runs_24h.length > 0 && (
+            <div style={{ background: BG2, border: `1px solid ${BORDER2}`, borderRadius: 8, padding: "12px 16px" }}>
+              <div style={{ fontSize: "0.65em", letterSpacing: "0.1em", color: TEXT_MUTED, marginBottom: 10 }}>INGESTION RUNS (LAST 24H)</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {summary.runs_24h.map((r, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: "0.72em" }}>
+                    <span style={{ color: TEXT_MUTED }}>{r.mode}</span>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <Badge color={r.status === "SUCCESS" ? GREEN : r.status === "RUNNING" ? BLUE : RED}>{r.status}</Badge>
+                      <span style={{ color: TEXT }}>{r.cnt}×</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Quick Actions ── */}
+      <div style={{ background: BG2, border: `1px solid ${BORDER2}`, borderRadius: 8, padding: "12px 16px" }}>
+        <div style={{ fontSize: "0.68em", letterSpacing: "0.1em", color: TEXT_MUTED, marginBottom: 10 }}>QUICK ACTIONS</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[
+            { label: "▶ PRE-SALE SCAN ALL", cmd: "pending-sales", needsCounty: false, color: "#22c55e", hint: "Runs pre-sale scan on all counties" },
+            { label: "▶ GATE 4 ALL",        cmd: "gate4-run-all",  needsCounty: false, color: "#f59e0b", hint: "Full Gate 4 extraction (30+ min)" },
+            { label: "⬇ BACKUP NOW",         cmd: "backup-db",      needsCounty: false, color: BLUE,      hint: "Safe DB backup (< 1 min)" },
+            { label: "▶ PROMOTE ELIGIBLE",  cmd: "promote-eligible", needsCounty: false, color: "#a78bfa", hint: "SILVER → GOLD promotion check" },
+          ].map(qa => (
+            <button
+              key={qa.cmd}
+              title={qa.hint}
+              onClick={() => triggerJob(qa.cmd)}
+              disabled={!!runningCmd}
+              style={{
+                background: qa.color + "18", border: `1px solid ${qa.color + "55"}`, color: qa.color,
+                borderRadius: 5, padding: "6px 14px", fontFamily: "monospace", fontSize: "0.73em",
+                fontWeight: 700, cursor: runningCmd ? "not-allowed" : "pointer", letterSpacing: "0.04em",
+                opacity: runningCmd ? 0.5 : 1,
+              }}
+            >
+              {runningCmd === qa.cmd ? "QUEUING..." : qa.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* ── Trigger messages ── */}
       {triggerMsg && <ActionMsg msg={triggerMsg} error={triggerErr} />}
 
@@ -1790,42 +1953,67 @@ function OpsCenter() {
             </select>
           </div>
 
-          {/* Command buttons */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {PIPELINE_COMMANDS.map((cmd) => {
-              const isRunning = runningCmd === cmd.id;
-              const countyRequired = cmd.needsCounty && !selectedCounty;
-              return (
-                <div key={cmd.id} style={{
-                  border: `1px solid ${(cmd.color || BORDER2) + "44"}`,
-                  borderRadius: 8, padding: "10px 14px", background: BG,
-                  display: "flex", alignItems: "center", gap: 10,
-                }}>
-                  <button
-                    onClick={() => triggerJob(cmd.id, cmd.needsCounty ? (selectedCounty || undefined) : undefined)}
-                    disabled={isRunning || !!runningCmd || countyRequired}
-                    style={{
-                      background: (cmd.color || BLUE) + "22",
-                      border: `1px solid ${(cmd.color || BLUE) + "55"}`,
-                      color: countyRequired ? TEXT_MUTED : (cmd.color || BLUE),
-                      borderRadius: 5, padding: "5px 14px",
-                      fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700,
-                      cursor: (isRunning || !!runningCmd || countyRequired) ? "not-allowed" : "pointer",
-                      letterSpacing: "0.04em", flexShrink: 0,
-                      opacity: (isRunning || !!runningCmd) ? 0.6 : 1,
-                    }}
-                  >
-                    {isRunning ? "QUEUING..." : cmd.label}
-                  </button>
-                  <div>
-                    <div style={{ fontSize: "0.78em", color: TEXT, fontWeight: 600 }}>{cmd.id}</div>
-                    <div style={{ fontSize: "0.7em", color: TEXT_MUTED, marginTop: 2 }}>
-                      {countyRequired ? "⚠ SELECT A COUNTY ABOVE" : cmd.desc}
+          {/* Command buttons — grouped */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {(() => {
+              const rendered: React.ReactNode[] = [];
+              let lastGroup = "";
+              PIPELINE_COMMANDS.forEach((cmd) => {
+                if (cmd.group && cmd.group !== lastGroup) {
+                  lastGroup = cmd.group;
+                  rendered.push(
+                    <div key={`g-${cmd.group}`} style={{
+                      fontSize: "0.62em", letterSpacing: "0.12em", color: "#4b5563",
+                      borderBottom: `1px solid ${BORDER}`, paddingBottom: 3, marginTop: 8,
+                    }}>{cmd.group}</div>
+                  );
+                }
+                const isRunning = runningCmd === cmd.id;
+                const countyRequired = !!(cmd.needsCounty && !selectedCounty);
+                rendered.push(
+                  <div key={cmd.id} style={{
+                    border: `1px solid ${(cmd.color || BORDER2) + "44"}`,
+                    borderRadius: 8, padding: "10px 14px", background: BG,
+                    display: "flex", alignItems: "flex-start", gap: 10,
+                  }}>
+                    <button
+                      onClick={() => triggerJob(cmd.id, cmd.needsCounty ? (selectedCounty || undefined) : undefined)}
+                      disabled={isRunning || !!runningCmd || countyRequired}
+                      title={cmd.hint}
+                      style={{
+                        background: (cmd.color || BLUE) + "22",
+                        border: `1px solid ${(cmd.color || BLUE) + "55"}`,
+                        color: countyRequired ? TEXT_MUTED : (cmd.color || BLUE),
+                        borderRadius: 5, padding: "5px 14px",
+                        fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700,
+                        cursor: (isRunning || !!runningCmd || countyRequired) ? "not-allowed" : "pointer",
+                        letterSpacing: "0.04em", flexShrink: 0,
+                        opacity: (isRunning || !!runningCmd) ? 0.6 : 1,
+                        marginTop: 2,
+                      }}
+                    >
+                      {isRunning ? "QUEUING..." : cmd.label}
+                    </button>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: "0.78em", color: TEXT, fontWeight: 600 }}>{cmd.id}</span>
+                        {cmd.needsCounty && <span style={{ fontSize: "0.65em", color: countyRequired ? "#f59e0b" : TEXT_MUTED, border: `1px solid ${countyRequired ? "#f59e0b44" : BORDER}`, padding: "1px 5px", borderRadius: 3 }}>COUNTY</span>}
+                        {cmd.eta && <span style={{ fontSize: "0.65em", color: TEXT_MUTED, marginLeft: "auto" }}>~{cmd.eta}</span>}
+                      </div>
+                      <div style={{ fontSize: "0.7em", color: TEXT_MUTED, marginTop: 3, lineHeight: 1.4 }}>
+                        {countyRequired ? "⚠ SELECT A COUNTY ABOVE FIRST" : cmd.desc}
+                      </div>
+                      {!countyRequired && cmd.hint && (
+                        <div style={{ fontSize: "0.68em", color: "#4b5563", marginTop: 3, lineHeight: 1.35, fontStyle: "italic" }}>
+                          {cmd.hint}
+                        </div>
+                      )}
                     </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              });
+              return rendered;
+            })()}
 
             {/* PRE-SALE PROMOTE special button */}
             <div style={{

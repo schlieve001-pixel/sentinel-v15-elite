@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
 import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downloadSample, generateLetter, sendVerification, verifyEmail, getAssetEvidence, downloadEvidenceDoc, getLeadAudit, API_BASE, type Lead, type UnlockResponse, type EvidenceDoc, type LeadAuditTrail, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import ClassificationBadge from "../components/ClassificationBadge";
 import { toast } from "../components/Toast";
 
 function isVerifyEmailError(err: unknown): boolean {
@@ -173,947 +172,936 @@ export default function LeadDetail() {
     }
   }
 
-  if (loading) {
-    return (
-      <div className="detail-page">
-        <div className="center-content">
-          <div className="loader-ring"></div>
-          <p className="processing-text">LOADING ASSET...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error && !lead) {
-    return (
-      <div className="detail-page">
-        <div className="center-content">
-          <p className="auth-error">{error}</p>
-          <button className="btn-outline" style={{ marginTop: 20 }} onClick={goBack}>
-            BACK TO VAULT
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   const isRestricted = lead?.restriction_status === "RESTRICTED";
-  const isExpired = lead?.deadline_passed === true || lead?.restriction_status === ("EXPIRED" as any);
+  const _isExpired = lead?.deadline_passed === true || lead?.restriction_status === ("EXPIRED" as any); void _isExpired;
+
+  // Derived display values
+  const gradeColor = lead?.data_grade === "GOLD" ? "#f59e0b"
+    : lead?.data_grade === "SILVER" ? "#94a3b8"
+    : lead?.data_grade === "BRONZE" ? "#b45309"
+    : "#6b7280";
+  const oppScore = (lead as any)?.opportunity_score;
+  const oppGrade = oppScore >= 90 ? "A+" : oppScore >= 80 ? "A" : oppScore >= 70 ? "B" : oppScore >= 60 ? "C" : "D";
+  const oppColor = oppScore >= 80 ? "#22c55e" : oppScore >= 60 ? "#f59e0b" : "#94a3b8";
+  const verTier = (lead as any)?.verification_tier || ((lead?.pool_source as any) === "TRIPLE_VERIFIED" ? "TRIPLE_VERIFIED" : (lead?.pool_source as any) === "AI_VERIFIED" ? "AI_VERIFIED" : lead?.pool_source === "HTML_MATH" ? "HTML_MATH" : null);
+  const tierColor = verTier === "TRIPLE_VERIFIED" ? "#22c55e" : verTier === "AI_VERIFIED" ? "#818cf8" : verTier === "HTML_MATH" ? "#f59e0b" : "#64748b";
 
   return (
-    <div className="detail-page">
-      <header className="dash-header">
-        <Link to={user ? "/dashboard" : "/preview"} className="dash-logo">
-          VERIFUSE <span className="text-green">// INTELLIGENCE</span>
+    <div style={{ minHeight: "100vh", background: "#0d1117", color: "#e5e7eb", fontFamily: "'JetBrains Mono','Fira Mono',monospace" }}>
+
+      {/* ── Command Bar ── */}
+      <header style={{ background: "#0d1117", borderBottom: "1px solid #1f2937", padding: "0 24px", height: 52, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 }}>
+        <Link to={user ? "/dashboard" : "/preview"} style={{ color: "#e5e7eb", textDecoration: "none", fontWeight: 700, fontSize: "0.88em", letterSpacing: "0.08em" }}>
+          VERIFUSE <span style={{ color: "#22c55e" }}>//</span> INTELLIGENCE
         </Link>
-        <div className="dash-status">
-          <span className="blink-dot">●</span>
-          ASSET DETAIL
+        <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+          <span style={{ fontSize: "0.7em", color: "#22c55e", letterSpacing: "0.06em" }}>
+            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#22c55e", marginRight: 6, boxShadow: "0 0 4px #22c55e" }} />
+            LIVE DATA
+          </span>
+          {user && <Link to="/account" style={{ fontSize: "0.75em", color: "#64748b", textDecoration: "none" }}>{user.email}</Link>}
         </div>
       </header>
 
-      <div className="detail-container">
-        <button className="back-link" onClick={goBack} style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}>&larr; Back to Vault</button>
+      <div style={{ maxWidth: 1280, margin: "0 auto", padding: "20px 24px 60px" }}>
+
+        {/* ── Breadcrumb ── */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+          <button onClick={goBack} style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontFamily: "inherit", fontSize: "0.78em", padding: 0, display: "flex", alignItems: "center", gap: 6 }}>
+            ← BACK TO VAULT
+          </button>
+          <span style={{ color: "#1f2937" }}>·</span>
+          <span style={{ fontSize: "0.72em", color: "#374151", letterSpacing: "0.1em" }}>
+            {lead?.county?.toUpperCase().replace(/_/g, " ")} COUNTY
+          </span>
+          <span style={{ color: "#1f2937" }}>·</span>
+          <span style={{ fontSize: "0.72em", color: "#374151" }}>CASE DOSSIER</span>
+        </div>
+
+        {loading && (
+          <div style={{ padding: 60, textAlign: "center", color: "#374151", fontSize: "0.85em", letterSpacing: "0.1em" }}>LOADING INTELLIGENCE...</div>
+        )}
+        {error && !lead && (
+          <div style={{ padding: 40, textAlign: "center", color: "#ef4444", fontSize: "0.85em" }}>{error}</div>
+        )}
 
         {lead && (
-          <div className="detail-card">
-            <div className="detail-header">
-              <div>
-                <span className="county-badge">{lead.county}</span>
-                <span
-                  className={`grade-badge grade-${lead.data_grade?.toLowerCase()}`}
-                  style={{ marginLeft: 8 }}
-                  title={
-                    lead.data_grade === "GOLD" ? "GOLD: Math-confirmed overbid with provenance document"
-                    : lead.data_grade === "SILVER" ? "SILVER: Probable overbid, pending full validation"
-                    : lead.data_grade === "BRONZE" ? "BRONZE: Pre-validation — math or provenance unconfirmed"
-                    : lead.data_grade === "REJECT" ? "REJECT: Insufficient evidence or $0 overbid"
-                    : "Grade pending"
-                  }
-                >
+          <>
+
+          {/* ══════════════════════════════════════════════════════════
+              HERO SECTION — Grade + Surplus + Claim Window
+              ══════════════════════════════════════════════════════════ */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 20, marginBottom: 20, background: "#111827", border: "1px solid #1f2937", borderRadius: 10, overflow: "hidden" }}>
+
+            {/* LEFT: Main intelligence */}
+            <div style={{ padding: "28px 32px" }}>
+              {/* Badge row */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+                <span style={{ background: gradeColor + "22", border: `1px solid ${gradeColor}55`, color: gradeColor, padding: "3px 10px", borderRadius: 4, fontSize: "0.72em", fontWeight: 700, letterSpacing: "0.1em" }}>
                   {lead.data_grade}
                 </span>
-                {!lead.surplus_verified && (
-                  <span className="unverified-badge" style={{ marginLeft: 8 }}>PRELIMINARY</span>
+                {verTier && (
+                  <span style={{ background: tierColor + "18", border: `1px solid ${tierColor}44`, color: tierColor, padding: "3px 10px", borderRadius: 4, fontSize: "0.68em", fontWeight: 700, letterSpacing: "0.08em" }}>
+                    {verTier.replace(/_/g, " ")}
+                  </span>
+                )}
+                {(lead as any).verification_state === "READY_TO_FILE" && (
+                  <span style={{ background: "#14532d", border: "1px solid #16a34a", color: "#4ade80", padding: "3px 10px", borderRadius: 4, fontSize: "0.68em", fontWeight: 700, letterSpacing: "0.08em" }}>
+                    ✓ READY TO FILE
+                  </span>
                 )}
                 {(lead as any).attorney_packet_ready === 1 && (
-                  <span className="grade-badge grade-gold" style={{ marginLeft: 8 }}>
+                  <span style={{ background: "#1e3a2e", border: "1px solid #22c55e44", color: "#22c55e", padding: "3px 10px", borderRadius: 4, fontSize: "0.68em", letterSpacing: "0.06em" }}>
                     ATTORNEY READY
                   </span>
                 )}
-                {(lead as any).quality_badge && (
-                  <span
-                    className={`quality-badge quality-${((lead as any).quality_badge as string).toLowerCase()}`}
-                    style={{
-                      fontSize: "0.7rem", padding: "0.2rem 0.5rem", borderRadius: "0.25rem", marginLeft: "0.5rem",
-                      background: (lead as any).quality_badge === "VERIFIED" ? "#16a34a22" : (lead as any).quality_badge === "PARTIAL" ? "#d9770622" : "#64748b22",
-                      color: (lead as any).quality_badge === "VERIFIED" ? "#16a34a" : (lead as any).quality_badge === "PARTIAL" ? "#d97706" : "#64748b",
-                      border: `1px solid ${(lead as any).quality_badge === "VERIFIED" ? "#16a34a44" : (lead as any).quality_badge === "PARTIAL" ? "#d9770644" : "#64748b44"}`,
-                    }}
-                  >
-                    {(lead as any).quality_badge}
+                {(lead as any).processing_status === "PRE_SALE" && (
+                  <span style={{ background: "#0c4a6e22", border: "1px solid #0284c744", color: "#38bdf8", padding: "3px 10px", borderRadius: 4, fontSize: "0.68em", letterSpacing: "0.06em" }}>
+                    PRE-SALE MONITORING
                   </span>
                 )}
-                {(lead as any).opportunity_score != null && (
-                  <span style={{
-                    fontSize: "0.75rem", padding: "0.2rem 0.5rem", borderRadius: "0.25rem", marginLeft: "0.5rem",
-                    background: (lead as any).opportunity_score >= 7 ? "#16a34a22" : (lead as any).opportunity_score >= 4 ? "#d9770622" : "#64748b22",
-                    color: (lead as any).opportunity_score >= 7 ? "#16a34a" : (lead as any).opportunity_score >= 4 ? "#d97706" : "#64748b",
-                    border: "1px solid currentColor",
-                  }}>
-                    OPPORTUNITY: {(lead as any).opportunity_score}/10
+                {lead.unlocked_by_me && (
+                  <span style={{ background: "#14532d22", border: "1px solid #22c55e44", color: "#4ade80", padding: "3px 10px", borderRadius: 4, fontSize: "0.68em", letterSpacing: "0.06em" }}>
+                    ✓ UNLOCKED
                   </span>
                 )}
               </div>
-              {isRestricted ? (
-                <span className="restriction-badge">
-                  WINDOW NOT YET OPEN — {lead.days_until_actionable} DAYS
-                </span>
-              ) : lead.restriction_status === "UNKNOWN" ? (
-                <span className="status-badge" style={{ background: "#374151", color: "#9ca3af" }}>
-                  SALE DATE PENDING
-                </span>
-              ) : lead.deadline_passed ? (
-                <span className={`timer-badge expired`}>
-                  WINDOW CLOSED
-                </span>
-              ) : lead.days_to_claim != null ? (
-                <span className={`timer-badge ${lead.days_to_claim < 60 ? "urgent" : ""}`}>
-                  {`${lead.days_to_claim} DAYS TO CLAIM`}
-                </span>
-              ) : null}
+
+              {/* Surplus — the big number */}
+              <div style={{ fontSize: "0.65em", letterSpacing: "0.12em", color: lead.display_tier === "VERIFIED" ? "#10b981" : "#f59e0b", marginBottom: 6 }}>
+                {lead.net_to_owner_label || (lead.display_tier === "VERIFIED" ? "VERIFIED NET TO OWNER" : "OVERBID POOL — POTENTIAL SURPLUS")}
+              </div>
+              <div style={{ fontSize: "3.2em", fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1, marginBottom: 8, color: lead.estimated_surplus == null ? "#374151" : lead.estimated_surplus > 10000 ? "#f0fdf4" : "#e5e7eb" }}>
+                {lead.estimated_surplus == null ? (
+                  <span style={{ color: "#374151", fontSize: "0.5em", fontStyle: "italic", letterSpacing: "0.05em" }}>SURPLUS NOT AVAILABLE</span>
+                ) : fmt(lead.estimated_surplus)}
+              </div>
+
+              {/* Case identifier + county */}
+              <div style={{ display: "flex", gap: 16, alignItems: "baseline", flexWrap: "wrap" }}>
+                <div style={{ fontFamily: "monospace", fontSize: "0.85em", color: "#94a3b8", letterSpacing: "0.06em" }}>
+                  CASE {lead.case_number || lead.registry_asset_id?.split(":")[3] || lead.asset_id?.substring(0, 12)}
+                </div>
+                <div style={{ fontSize: "0.72em", color: "#4b5563", letterSpacing: "0.06em" }}>
+                  {lead.county?.toUpperCase().replace(/_/g, " ")} COUNTY, CO
+                </div>
+                {lead.sale_date && (
+                  <div style={{ fontSize: "0.72em", color: "#4b5563" }}>
+                    SOLD {lead.sale_date}
+                  </div>
+                )}
+              </div>
             </div>
 
-            <div style={{ fontSize: "0.68em", letterSpacing: "0.1em", color: lead.display_tier === "VERIFIED" ? "#10b981" : "#f59e0b", marginBottom: 2 }}>
-              {lead.net_to_owner_label || (lead.display_tier === "VERIFIED" ? "VERIFIED NET TO OWNER" : "OVERBID POOL (Potential)")}
+            {/* RIGHT: Opportunity score + status */}
+            <div style={{ background: "#0d1117", borderLeft: "1px solid #1f2937", padding: "28px 28px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20, minWidth: 200 }}>
+              {oppScore != null ? (
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#4b5563", marginBottom: 8 }}>OPP SCORE</div>
+                  <div style={{ fontSize: "3.5em", fontWeight: 700, color: oppColor, lineHeight: 1 }}>{oppGrade}</div>
+                  <div style={{ fontSize: "0.72em", color: "#374151", marginTop: 4 }}>{oppScore}/100</div>
+                </div>
+              ) : (
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 8 }}>OPP SCORE</div>
+                  <div style={{ fontSize: "2em", fontWeight: 700, color: "#374151" }}>—</div>
+                </div>
+              )}
+              {/* Window status pill */}
+              <div style={{ textAlign: "center" }}>
+                {isRestricted ? (
+                  <div style={{ background: "#7f1d1d22", border: "1px solid #ef444444", borderRadius: 6, padding: "8px 12px" }}>
+                    <div style={{ fontSize: "0.65em", color: "#ef4444", fontWeight: 700, letterSpacing: "0.08em" }}>WINDOW LOCKED</div>
+                    <div style={{ fontSize: "0.72em", color: "#9ca3af", marginTop: 2 }}>{lead.days_until_actionable}d remaining</div>
+                  </div>
+                ) : lead.deadline_passed ? (
+                  <div style={{ background: "#1f293722", border: "1px solid #374151", borderRadius: 6, padding: "8px 12px" }}>
+                    <div style={{ fontSize: "0.65em", color: "#6b7280", fontWeight: 700, letterSpacing: "0.08em" }}>WINDOW CLOSED</div>
+                  </div>
+                ) : lead.days_to_claim != null ? (
+                  <div style={{ background: lead.days_to_claim < 60 ? "#7f1d1d22" : "#14532d22", border: `1px solid ${lead.days_to_claim < 60 ? "#ef444444" : "#22c55e44"}`, borderRadius: 6, padding: "8px 12px" }}>
+                    <div style={{ fontSize: "0.65em", color: lead.days_to_claim < 60 ? "#ef4444" : "#22c55e", fontWeight: 700, letterSpacing: "0.08em" }}>CLAIM WINDOW</div>
+                    <div style={{ fontSize: "1.3em", fontWeight: 700, color: lead.days_to_claim < 60 ? "#ef4444" : "#22c55e", marginTop: 2 }}>{lead.days_to_claim}d</div>
+                  </div>
+                ) : null}
+              </div>
             </div>
-            <h2 className="detail-value">{fmt(lead.estimated_surplus)}</h2>
-            <p className="detail-case">Case: {lead.case_number || lead.registry_asset_id?.split(":")[3] || lead.asset_id?.substring(0, 12)}</p>
+          </div>
 
-            {/* Grade Reasons / Data Gap Warnings */}
-            {lead.grade_reasons && lead.grade_reasons.length > 0 && (
-              <div style={{ margin: "8px 0 12px", padding: "10px 14px", border: "1px solid #78350f", borderRadius: 6, background: "rgba(120,53,15,0.1)" }}>
-                <div style={{ fontSize: "0.7em", letterSpacing: "0.08em", color: "#f59e0b", marginBottom: 6 }}>DATA GAPS</div>
-                <ul style={{ margin: 0, padding: "0 0 0 14px", listStyle: "disc" }}>
-                  {lead.grade_reasons.map((r, i) => (
-                    <li key={i} style={{ fontSize: "0.8em", color: "#fbbf24", marginBottom: 2 }}>{r}</li>
+          {/* ══════════════════════════════════════════════════════════
+              TWO-COLUMN INTELLIGENCE GRID
+              ══════════════════════════════════════════════════════════ */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 16, marginBottom: 16 }}>
+
+            {/* LEFT COLUMN — Case Intel */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+
+              {/* Case data table */}
+              <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px" }}>
+                <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>CASE INTELLIGENCE</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 24px" }}>
+                  {[
+                    { label: "PROPERTY", value: lead.address_hint || lead.property_address || `${lead.county?.toUpperCase()} COUNTY, CO` },
+                    { label: "CASE NUMBER", value: lead.case_number || "—" },
+                    { label: "COUNTY", value: lead.county?.replace(/_/g, " ").toUpperCase() + ", CO" },
+                    { label: "SALE DATE", value: lead.sale_date || "PENDING" },
+                    { label: "SURPLUS STREAM", value: lead.surplus_stream?.replace(/_/g, " ") || "FORECLOSURE OVERBID" },
+                    { label: "POOL SOURCE", value: lead.pool_source || "UNVERIFIED" },
+                    { label: "FILING STATUS", value: isRestricted ? "WINDOW NOT YET OPEN" : lead.deadline_passed ? "WINDOW CLOSED" : "OPEN FOR FILING" },
+                    { label: "DATA AGE", value: lead.data_age_days != null ? `${lead.data_age_days} days` : "—" },
+                  ].map(({ label, value }) => (
+                    <div key={label}>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>{label}</div>
+                      <div style={{ fontSize: "0.82em", color: "#e5e7eb", fontWeight: 600 }}>{value}</div>
+                    </div>
                   ))}
-                </ul>
+                </div>
               </div>
-            )}
 
-            {/* Gate 7: Equity Resolution Panel */}
-            {lead.net_owner_equity_cents != null && (
-              <div style={{
-                margin: "12px 0",
-                padding: "10px 16px",
-                border: "1px solid #374151",
-                borderRadius: 6,
-                background: "rgba(17,24,39,0.6)",
-                display: "flex",
-                gap: 24,
-                alignItems: "center",
-                flexWrap: "wrap",
-              }}>
-                {lead.gross_surplus_cents != null && (
+              {/* Financial analysis */}
+              <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px" }}>
+                <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>FINANCIAL ANALYSIS</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 24px" }}>
                   <div>
-                    <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>GROSS SURPLUS</div>
-                    <div style={{ fontWeight: 600, fontSize: "0.95em" }}>
-                      {fmt(lead.gross_surplus_cents / 100)}
+                    <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>OVERBID AMOUNT</div>
+                    <div style={{ fontSize: "1.1em", color: "#f59e0b", fontWeight: 700 }}>{fmt(lead.overbid_amount)}</div>
+                  </div>
+                  {lead.gross_surplus_cents != null && (
+                    <div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>GROSS SURPLUS</div>
+                      <div style={{ fontSize: "1.1em", color: "#e5e7eb", fontWeight: 700 }}>{fmt(lead.gross_surplus_cents / 100)}</div>
                     </div>
-                  </div>
-                )}
-                <div>
-                  <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>NET OWNER EQUITY</div>
-                  <div style={{ fontWeight: 600, fontSize: "0.95em" }}>
-                    {fmt(lead.net_owner_equity_cents / 100)}
-                  </div>
-                </div>
-                {lead.classification && (
-                  <ClassificationBadge classification={lead.classification} />
-                )}
-              </div>
-            )}
-
-            {/* C.R.S. § 38-38-111 RESTRICTION NOTICE */}
-            {isRestricted && (
-              <div className="restriction-banner">
-                <strong>C.R.S. § 38-38-111 RESTRICTION ACTIVE</strong>
-                <p>
-                  Statutory restrictions under C.R.S. § 38-38-111 and § 38-13-1304 may apply
-                  depending on sale date and fund status. Consult counsel.
-                </p>
-                <p>
-                  Restriction lifts: <strong>{lead.restriction_end_date}</strong>
-                  {lead.days_until_actionable != null && (
-                    <span> ({lead.days_until_actionable} days remaining)</span>
                   )}
-                </p>
-              </div>
-            )}
-
-            {/* CLAIM WINDOW PANEL */}
-            {!isRestricted && lead.claim_deadline && (() => {
-              const days = lead.days_to_claim;
-              const passed = lead.deadline_passed;
-              const urgencyColor = passed ? "#ef4444"
-                : days != null && days <= 180 ? "#ef4444"
-                : days != null && days <= 365 ? "#f59e0b"
-                : "#22c55e";
-              const urgencyLabel = passed ? "EXPIRED — FILE IMMEDIATELY"
-                : days != null && days <= 180 ? "URGENT — ACT NOW"
-                : days != null && days <= 365 ? "PLAN AHEAD"
-                : "AMPLE TIME";
-              // Progress bar: 30 months = 912 days total window
-              const totalDays = 912;
-              const elapsed = passed ? totalDays : Math.max(0, totalDays - (days ?? totalDays));
-              const pct = Math.min(100, Math.round(elapsed / totalDays * 100));
-              return (
-                <div style={{
-                  background: "#0f172a", border: `1px solid ${urgencyColor}40`,
-                  borderRadius: 8, padding: "14px 16px", marginBottom: 12,
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
-                    <div style={{ fontSize: "0.68em", letterSpacing: "0.1em", color: "#64748b" }}>
-                      C.R.S. § 38-38-111 CLAIM WINDOW
+                  {lead.net_owner_equity_cents != null && (
+                    <div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>NET TO OWNER</div>
+                      <div style={{ fontSize: "1.1em", color: "#22c55e", fontWeight: 700 }}>{fmt(lead.net_owner_equity_cents / 100)}</div>
                     </div>
-                    <div style={{ fontSize: "0.75em", fontWeight: 700, color: urgencyColor, letterSpacing: "0.06em" }}>
-                      {urgencyLabel}
+                  )}
+                  {lead.estimated_surplus != null && lead.estimated_surplus > 0 && (
+                    <div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>MAX FEE CAP (10%)</div>
+                      <div style={{ fontSize: "1.1em", color: "#94a3b8", fontWeight: 700 }}>{fmt(lead.estimated_surplus * 0.1)}</div>
                     </div>
+                  )}
+                  <div>
+                    <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>VERIFICATION</div>
+                    <div style={{ fontSize: "0.82em", color: tierColor, fontWeight: 700 }}>{verTier?.replace(/_/g, " ") || "UNVERIFIED"}</div>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-                    <div style={{ fontSize: "0.85em", color: "#e5e7eb" }}>
-                      Deadline: <strong>{lead.claim_deadline}</strong>
+                  {(lead as any).verification_confidence != null && (
+                    <div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>CONFIDENCE</div>
+                      <div style={{ fontSize: "0.82em", color: "#e5e7eb", fontWeight: 700 }}>{Math.round((lead as any).verification_confidence * 100)}%</div>
                     </div>
-                    {!passed && days != null && (
-                      <div style={{ fontSize: "1.1em", fontWeight: 700, color: urgencyColor }}>
-                        {days} days remaining
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ background: "#1f2937", borderRadius: 4, height: 6, overflow: "hidden" }}>
-                    <div style={{
-                      width: `${pct}%`, height: "100%", borderRadius: 4,
-                      background: urgencyColor, transition: "width 0.3s",
-                    }} />
-                  </div>
-                  <div style={{ fontSize: "0.72em", color: "#64748b", marginTop: 4 }}>
-                    {pct}% of 30-month window elapsed
-                    {passed && " — Funds may have escheated to the state."}
-                  </div>
+                  )}
                 </div>
-              );
-            })()}
-
-            {/* CASE TIMELINE (2C) */}
-            <div className="panel timeline-panel" style={{ marginTop: "1rem", border: "1px solid #374151", borderRadius: 8, marginBottom: 8 }}>
-              <div className="panel-header" onClick={loadTimeline} style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", padding: "10px 14px", borderBottom: showTimeline ? "1px solid #374151" : "none" }}>
-                <h3 style={{ margin: 0, fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.6 }}>CASE TIMELINE</h3>
-                <span style={{ color: "#64748b", fontSize: "0.85em" }}>{showTimeline ? "▲" : "▼"}</span>
               </div>
-              {showTimeline && (
-                <div style={{ padding: "1rem" }}>
-                  {timeline.length === 0 ? (
-                    <p style={{ color: "#64748b", fontSize: "0.85rem", margin: 0 }}>No timeline events recorded.</p>
-                  ) : timeline.map((ev: any, i: number) => (
-                    <div key={i} style={{ display: "flex", gap: "1rem", padding: "0.5rem 0", borderBottom: "1px solid #1f2937" }}>
-                      <span style={{ fontSize: "0.75rem", color: "#64748b", minWidth: "120px" }}>{ev.ts ? new Date(ev.ts).toLocaleDateString() : "—"}</span>
-                      <span style={{ fontSize: "0.8rem", fontWeight: 600, minWidth: "120px", color: "#22c55e" }}>{ev.event_type}</span>
-                      <span style={{ fontSize: "0.8rem", color: "#9ca3af" }}>{ev.notes}</span>
-                    </div>
-                  ))}
+
+              {/* Data gaps */}
+              {lead.grade_reasons && lead.grade_reasons.length > 0 && (
+                <div style={{ background: "#1c0a0022", border: "1px solid #78350f44", borderRadius: 8, padding: "12px 16px" }}>
+                  <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#f59e0b", marginBottom: 10 }}>DATA GAPS — ACTION REQUIRED</div>
+                  <ul style={{ margin: 0, padding: "0 0 0 14px", listStyle: "disc" }}>
+                    {lead.grade_reasons.map((r, i) => (
+                      <li key={i} style={{ fontSize: "0.78em", color: "#fbbf24", marginBottom: 4, lineHeight: 1.4 }}>{r}</li>
+                    ))}
+                  </ul>
                 </div>
               )}
-            </div>
 
-            {/* TITLE STACK (4C) */}
-            <div className="panel" style={{ marginTop: "0.5rem", border: "1px solid #374151", borderRadius: 8, marginBottom: 8 }}>
-              <div className="panel-header" onClick={loadTitleStack} style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", padding: "10px 14px", borderBottom: showTitleStack ? "1px solid #374151" : "none" }}>
-                <h3 style={{ margin: 0, fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.6 }}>TITLE STACK</h3>
-                <span style={{ color: "#64748b", fontSize: "0.85em" }}>{showTitleStack ? "▲" : "▼"}</span>
-              </div>
-              {showTitleStack && titleStack && (
-                <div style={{ padding: "1rem" }}>
-                  <div style={{ display: "flex", gap: "1rem", marginBottom: "0.75rem", flexWrap: "wrap" }}>
-                    <span style={{ fontSize: "0.85rem" }}>Risk: <strong style={{ color: titleStack.risk_score === "LOW" ? "#16a34a" : titleStack.risk_score === "HIGH" ? "#dc2626" : "#d97706" }}>{titleStack.risk_score}</strong></span>
-                    <span style={{ fontSize: "0.85rem" }}>Open liens: <strong>{titleStack.liens?.filter((l: any) => l.is_open).length || 0}</strong></span>
-                    <span style={{ fontSize: "0.85rem" }}>Total open: <strong>${((titleStack.total_open_cents || 0) / 100).toLocaleString()}</strong></span>
-                  </div>
-                  {(titleStack.liens || []).map((lien: any, i: number) => (
-                    <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr 80px", gap: "0.5rem", padding: "0.5rem 0", borderBottom: "1px solid #1f2937", fontSize: "0.8rem" }}>
-                      <span style={{ color: "#9ca3af" }}>#{lien.priority}</span>
-                      <span>{lien.lienholder_name || lien.lien_type}</span>
-                      <span>${((lien.amount_cents || 0) / 100).toLocaleString()}</span>
-                      <span style={{ color: lien.is_open ? "#dc2626" : "#16a34a" }}>{lien.is_open ? "OPEN" : "SATISFIED"}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {showTitleStack && !titleStack && (
-                <div style={{ padding: "1rem" }}>
-                  <p style={{ color: "#64748b", fontSize: "0.85rem", margin: 0 }}>No title stack data available for this asset.</p>
-                </div>
-              )}
-            </div>
+            </div>{/* end left column */}
 
-            {/* Territory warning placeholder (4E) */}
-            {/* In production, check /api/territories for county overlap */}
+            {/* ── RIGHT COLUMN — Action Panel ── */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
 
-            <div className="detail-grid">
-              <div className="detail-field">
-                <label>Location</label>
-                <span>{lead.address_hint || lead.county + ", CO"}</span>
-              </div>
-              <div className="detail-field">
-                <label>Sale Date</label>
-                <span>{lead.sale_date || "\u2014"}</span>
-              </div>
-              <div className="detail-field">
-                <label>FILING WINDOW STATUS</label>
-                <span style={{
-                  color: isRestricted ? "#ef4444" : isExpired ? "#6b7280" : "#22c55e",
-                  fontWeight: 600,
-                }}>
-                  {isRestricted ? "WINDOW NOT YET OPEN" : isExpired ? "WINDOW CLOSED" : "ESCROW ENDED"}
-                </span>
-              </div>
-              {lead.sale_status && (
-                <div className="detail-field">
-                  <label>Sale Status</label>
-                  <span style={{ fontSize: "0.85em", opacity: 0.8 }}>{lead.sale_status}</span>
-                </div>
-              )}
-              {lead.data_age_days != null && lead.data_age_days > 30 && (
-                <div className="detail-field">
-                  <label>Data Age</label>
-                  <span style={{ color: "#f59e0b", fontSize: "0.85em" }}>Data {lead.data_age_days}d old</span>
-                </div>
-              )}
-            </div>
+              {/* Unlock / Already Unlocked */}
+              <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px" }}>
+                <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>INTELLIGENCE ACCESS</div>
 
-            {/* Obfuscated Owner */}
-            {!unlocked && (
-              <div className="detail-locked">
                 {lead.unlocked_by_me ? (
-                  <div style={{
-                    padding: "12px 16px",
-                    background: "rgba(16,185,129,0.08)",
-                    border: "1px solid rgba(16,185,129,0.3)",
-                    borderRadius: 6,
-                    color: "var(--green)",
-                    fontSize: "0.85rem",
-                    fontWeight: 600,
-                    letterSpacing: "0.04em",
-                    marginBottom: 16,
-                  }}>
-                    ✓ ALREADY UNLOCKED — INTEL BELOW ↓
+                  <div style={{ background: "#14532d22", border: "1px solid #22c55e44", borderRadius: 6, padding: "10px 14px", marginBottom: 12, fontSize: "0.78em", color: "#4ade80", fontWeight: 700, letterSpacing: "0.06em" }}>
+                    ✓ ALREADY UNLOCKED
                   </div>
                 ) : (
-                  <h3>OWNER INTELLIGENCE — LOCKED</h3>
-                )}
-                {lead.owner_img ? (
-                  <div className="owner-img-wrap lg">
-                    <img src={lead.owner_img} alt="Owner (obfuscated)" />
-                    <div className="blur-overlay"></div>
-                  </div>
-                ) : (
-                  <div className="redacted-field">
-                    CONFIDENTIAL OWNER DATA RESTRICTED
-                  </div>
-                )}
-
-                <div className="unlock-actions">
-                  {lead.preview_key ? (
-                    <button
-                      className="btn-outline"
-                      onClick={() => downloadSample(lead.preview_key!)}
-                    >
-                      SAMPLE DOSSIER
-                    </button>
-                  ) : (
-                    <button
-                      className="btn-outline"
-                      onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.pdf`)}
-                    >
-                      DOWNLOAD DOSSIER
-                    </button>
-                  )}
-                  {isRestricted ? (
-                    <button
-                      className="decrypt-btn-sota"
-                      style={{ background: "#f59e0b" }}
-                      onClick={async () => {
-                        if (!assetId || !user) {
-                          navigate("/login");
-                          return;
-                        }
-                        if (!user.is_admin && !user.bar_number) {
-                          setError("Attorney verification required. Please update your bar number in your profile.");
-                          return;
-                        }
-                        const confirmed = window.confirm(
-                          "ATTORNEY ACCESS ONLY\n\n" +
-                          "ATTORNEY ACCESS ONLY\n\n" +
-                          "C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Consult counsel before proceeding.\n\n" +
-                          "Do you confirm you are a licensed Colorado attorney and accept these terms?"
-                        );
-                        if (!confirmed) return;
-                        setUnlocking(true);
-                        setError("");
-                        try {
-                          const res = await unlockRestrictedLead(assetId, true);
-                          setUnlocked(res);
-                        } catch (err) {
-                          handleUnlockError(err);
-                        } finally {
-                          setUnlocking(false);
-                        }
-                      }}
-                      disabled={unlocking || (user ? !user.email_verified : false)}
-                    >
-                      {unlocking ? "VERIFYING..." : "ATTORNEY ACCESS ONLY (1 CREDIT)"}
-                    </button>
-                  ) : (
-                    <div className="unlock-cta-expanded">
+                  <>
+                    {isRestricted ? (
                       <button
-                        className="decrypt-btn-sota decrypt-btn-lg"
-                        onClick={handleUnlock}
+                        style={{ width: "100%", background: "#78350f22", border: "1px solid #f59e0b88", color: "#f59e0b", borderRadius: 6, padding: "12px 16px", fontSize: "0.8em", fontWeight: 700, letterSpacing: "0.06em", cursor: unlocking || (user ? !user.email_verified : false) ? "not-allowed" : "pointer", fontFamily: "inherit", marginBottom: 8, opacity: unlocking || (user ? !user.email_verified : false) ? 0.5 : 1 }}
                         disabled={unlocking || (user ? !user.email_verified : false)}
+                        onClick={async () => {
+                          if (!assetId || !user) { navigate("/login"); return; }
+                          if (!user.is_admin && !user.bar_number) { setError("Attorney bar number required for restricted access."); return; }
+                          const confirmed = window.confirm("ATTORNEY ACCESS ONLY\n\nC.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Consult counsel before proceeding.\n\nDo you confirm you are a licensed Colorado attorney and accept these terms?");
+                          if (!confirmed) return;
+                          setUnlocking(true); setError("");
+                          try { const res = await unlockRestrictedLead(assetId, true); setUnlocked(res); }
+                          catch (err) { handleUnlockError(err); }
+                          finally { setUnlocking(false); }
+                        }}
+                      >
+                        {unlocking ? "VERIFYING..." : "ATTORNEY ACCESS (1 CREDIT)"}
+                      </button>
+                    ) : (
+                      <button
+                        style={{ width: "100%", background: "#14532d", border: "1px solid #22c55e", color: "#4ade80", borderRadius: 6, padding: "12px 16px", fontSize: "0.8em", fontWeight: 700, letterSpacing: "0.06em", cursor: unlocking || (user ? !user.email_verified : false) ? "not-allowed" : "pointer", fontFamily: "inherit", marginBottom: 8, opacity: unlocking || (user ? !user.email_verified : false) ? 0.5 : 1 }}
+                        disabled={unlocking || (user ? !user.email_verified : false)}
+                        onClick={handleUnlock}
                       >
                         {unlocking ? "DECRYPTING..." : "UNLOCK FULL INTEL (1 CREDIT)"}
                       </button>
-                      <p className="unlock-cta-details">
-                        You'll get: Owner name, full address, recorder link, court-ready dossier
-                      </p>
+                    )}
+                    <div style={{ fontSize: "0.68em", color: "#4b5563", lineHeight: 1.4 }}>
+                      Owner name · full address · recorder link · court-ready dossier
                     </div>
-                  )}
-                </div>
+                  </>
+                )}
 
-                {error && <p className="auth-error" style={{ marginTop: 12 }}>{error}</p>}
+                {error && (
+                  <div style={{ marginTop: 10, fontSize: "0.75em", color: "#ef4444", background: "#7f1d1d22", border: "1px solid #ef444444", borderRadius: 4, padding: "6px 10px" }}>{error}</div>
+                )}
 
-                {/* Email Verification Prompt */}
+                {/* Email verification prompt */}
                 {(showVerifyPrompt || (user && !user.email_verified)) && (
-                  <div className="verify-banner" style={{ marginTop: 16 }}>
-                    <strong>Verify your email to unlock leads</strong>
-                    <div className="verify-row">
+                  <div style={{ marginTop: 12, background: "#0c4a6e22", border: "1px solid #0284c744", borderRadius: 6, padding: "10px 12px" }}>
+                    <div style={{ fontSize: "0.72em", color: "#38bdf8", fontWeight: 700, marginBottom: 8 }}>VERIFY EMAIL TO UNLOCK</div>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
                       <input
                         type="text"
-                        placeholder="Enter verification code"
+                        placeholder="Verification code"
                         value={verifyCode}
                         onChange={(e) => setVerifyCode(e.target.value)}
-                        className="verify-input"
+                        style={{ flex: 1, background: "#0d1117", border: "1px solid #374151", borderRadius: 4, color: "#e5e7eb", padding: "4px 8px", fontFamily: "inherit", fontSize: "0.85em" }}
                       />
                       <button
-                        className="btn-outline-sm"
                         disabled={!verifyCode || verifySending}
                         onClick={async () => {
-                          setVerifySending(true);
-                          setVerifyMsg("");
-                          try {
-                            await verifyEmail(verifyCode);
-                            setVerifyMsg("Email verified!");
-                            window.location.reload();
-                          } catch {
-                            setVerifyMsg("Invalid code. Try again.");
-                          } finally {
-                            setVerifySending(false);
-                          }
+                          setVerifySending(true); setVerifyMsg("");
+                          try { await verifyEmail(verifyCode); setVerifyMsg("Verified!"); window.location.reload(); }
+                          catch { setVerifyMsg("Invalid code."); }
+                          finally { setVerifySending(false); }
                         }}
-                      >
-                        VERIFY
-                      </button>
-                      <button
-                        className="btn-outline-sm"
-                        disabled={verifySending}
-                        onClick={async () => {
-                          setVerifySending(true);
-                          setVerifyMsg("");
-                          try {
-                            const res = await sendVerification();
-                            if (res.dev_code) {
-                              setVerifyCode(res.dev_code);
-                              setVerifyMsg(`Code: ${res.dev_code} (email not configured — pre-filled)`);
-                            } else {
-                              setVerifyMsg("Verification email sent!");
-                            }
-                          } catch {
-                            setVerifyMsg("Failed to send. Try again.");
-                          } finally {
-                            setVerifySending(false);
-                          }
-                        }}
-                      >
-                        RESEND CODE
-                      </button>
+                        style={{ background: "#1e3a5f", border: "1px solid #3b82f6", color: "#93c5fd", borderRadius: 4, padding: "4px 10px", fontFamily: "inherit", fontSize: "0.78em", cursor: "pointer", fontWeight: 700 }}
+                      >VERIFY</button>
                     </div>
-                    {verifyMsg && <p className="verify-msg">{verifyMsg}</p>}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ADD TO MY PIPELINE (4A) */}
-            {user && (
-              <div style={{ marginTop: 12 }}>
-                <button onClick={() => setShowPipelineModal(true)} className="btn btn-secondary" style={{ fontSize: "0.82em", padding: "8px 16px", background: "none", border: "1px solid #374151", color: "#9ca3af", borderRadius: 6, cursor: "pointer", fontFamily: "monospace" }}>
-                  + ADD TO MY PIPELINE
-                </button>
-                {showPipelineModal && (
-                  <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200 }}>
-                    <div style={{ background: "#1e293b", padding: "2rem", borderRadius: "0.75rem", minWidth: "300px", border: "1px solid #374151" }}>
-                      <h3 style={{ marginBottom: "1rem", fontSize: "0.95em" }}>Add to Pipeline</h3>
-                      {["LEADS", "CONTACTED", "RETAINER_SIGNED", "FILED", "FUNDS_RELEASED"].map((stage) => (
-                        <button key={stage} onClick={() => addToPipeline(stage)} style={{ display: "block", width: "100%", marginBottom: "0.5rem", padding: "8px 16px", background: "#0f172a", border: "1px solid #374151", color: "#e5e7eb", borderRadius: 6, cursor: "pointer", fontFamily: "monospace", fontSize: "0.82em", textAlign: "left" }}>
-                          {stage.replace(/_/g, " ")}
-                        </button>
-                      ))}
-                      <button onClick={() => setShowPipelineModal(false)} style={{ display: "block", width: "100%", marginTop: "0.5rem", padding: "8px 16px", background: "none", border: "1px solid #374151", color: "#64748b", borderRadius: 6, cursor: "pointer", fontFamily: "monospace", fontSize: "0.82em" }}>Cancel</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Gate 7: Evidence Documents (attorney/admin only) */}
-            {lead.registry_asset_id && (() => {
-              const isAttorney = user?.is_admin || user?.role === "approved_attorney" || user?.role === "admin";
-              if (!isAttorney) {
-                return (
-                  <div style={{ margin: "16px 0", padding: "10px 16px", border: "1px solid #374151", borderRadius: 6, opacity: 0.6, fontSize: "0.85em" }}>
-                    Attorney verification required to access evidence documents.
-                  </div>
-                );
-              }
-              return (
-                <div style={{ margin: "16px 0" }}>
-                  <h4 style={{ margin: "0 0 8px", fontSize: "0.8em", letterSpacing: "0.08em", opacity: 0.7 }}>
-                    EVIDENCE DOCUMENTS
-                  </h4>
-                  {evidenceLoading && <p style={{ opacity: 0.6, fontSize: "0.85em" }}>Loading evidence…</p>}
-                  {evidenceError && <p className="auth-error" style={{ fontSize: "0.85em" }}>{evidenceError}</p>}
-                  {!evidenceLoading && evidenceDocs.length === 0 && !evidenceError && (
-                    <p style={{ opacity: 0.5, fontSize: "0.82em" }}>No evidence documents on file for this asset.</p>
-                  )}
-                  {evidenceDocs.length > 0 && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {evidenceDocs.map((doc) => (
-                        <div key={doc.id} style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 10,
-                          padding: "6px 10px",
-                          border: "1px solid #374151",
-                          borderRadius: 4,
-                          fontSize: "0.82em",
-                        }}>
-                          <span style={{ opacity: 0.75, minWidth: 120, fontSize: "0.85em" }} title={doc.filename}>
-                            {doc.doc_family_label || doc.doc_family} {doc.doc_family && doc.doc_family_label ? `(${doc.doc_family})` : ""}
-                          </span>
-                          <span style={{ flex: 1, opacity: 0.6, fontSize: "0.85em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{doc.filename}</span>
-                          <span style={{ opacity: 0.45, fontSize: "0.85em" }}>
-                            {doc.bytes > 0 ? `${Math.round(doc.bytes / 1024)} KB` : ""}
-                          </span>
-                          <button
-                            className="btn-outline-sm"
-                            style={{ fontSize: "0.78em" }}
-                            onClick={async () => {
-                              try {
-                                const blob = await downloadEvidenceDoc(doc.id);
-                                const url = URL.createObjectURL(blob);
-                                const a = document.createElement("a");
-                                a.href = url;
-                                a.download = doc.filename;
-                                a.click();
-                                URL.revokeObjectURL(url);
-                              } catch (err) {
-                                setError(err instanceof ApiError ? err.message : "Download failed");
-                              }
-                            }}
-                          >
-                            DOWNLOAD
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* Unlocked Data */}
-            {unlocked && (
-              <div className="detail-unlocked">
-                <span className="success-badge">INTELLIGENCE DECRYPTED</span>
-                <div className="detail-grid">
-                  <div className="detail-field">
-                    <label>Owner Name</label>
-                    <span className="revealed">{unlocked.owner_name || "\u2014"}</span>
-                  </div>
-                  <div className="detail-field">
-                    <label>Property Address</label>
-                    <span className="revealed">{unlocked.property_address || "\u2014"}</span>
-                  </div>
-                  <div className="detail-field">
-                    <label>Estimated Surplus</label>
-                    <span className="revealed">{fmt(unlocked.estimated_surplus)}</span>
-                  </div>
-                  <div className="detail-field">
-                    <label>Total Indebtedness</label>
-                    <span>{unlocked.total_indebtedness ? fmt(unlocked.total_indebtedness) : "PRELIMINARY"}</span>
-                  </div>
-                  <div className="detail-field">
-                    <label>Overbid Amount</label>
-                    <span>{fmt(unlocked.overbid_amount)}</span>
-                  </div>
-                  <div className="detail-field">
-                    <label>Recorder Link</label>
-                    <span>
-                      {unlocked.recorder_link ? (
-                        <a href={unlocked.recorder_link} target="_blank" rel="noopener noreferrer">
-                          View Record
-                        </a>
-                      ) : "\u2014"}
-                    </span>
-                  </div>
-                </div>
-                {/* Attorney Tool Downloads */}
-                <div style={{ marginTop: 20, display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  <button
-                    className="btn-outline"
-                    style={{ fontSize: "0.85em" }}
-                    onClick={() => downloadSecure(`/api/dossier/${lead!.asset_id}/docx`, `dossier_${lead!.asset_id}.docx`)}
-                  >
-                    DOSSIER (.DOCX)
-                  </button>
-                  <button
-                    className="btn-outline"
-                    style={{ fontSize: "0.85em" }}
-                    onClick={() => downloadSecure(`/api/dossier/${lead!.asset_id}/pdf`, `dossier_${lead!.asset_id}.pdf`)}
-                  >
-                    DOSSIER (.PDF)
-                  </button>
-                  {(() => {
-                    const hasEvidence = evidenceDocs.length > 0 || (unlocked?.source_doc_count ?? 0) > 0;
-                    return hasEvidence ? (
-                      <button className="btn-outline" style={{ fontSize: "0.85em" }}
-                        onClick={() => downloadSecure(`/api/case-packet/${lead!.asset_id}`, `case_packet_${lead!.asset_id}.html`)}>
-                        CASE PACKET (HTML)
-                      </button>
-                    ) : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        <span style={{ color: "#ef4444", fontWeight: 600, fontSize: "0.78em", letterSpacing: "0.06em" }}>
-                          &#9888; INSUFFICIENT EVIDENCE: No source documents on file.
-                        </span>
-                        <button className="btn-outline" style={{ fontSize: "0.85em", opacity: 0.4, cursor: "not-allowed" }} disabled>
-                          CASE PACKET (HTML)
-                        </button>
-                      </div>
-                    );
-                  })()}
-                  {(user?.bar_number || user?.is_admin) && (
                     <button
-                      className="btn-outline"
-                      style={{ fontSize: "0.85em", opacity: lead!.ready_to_file === false ? 0.4 : 1, cursor: lead!.ready_to_file === false ? "not-allowed" : "pointer" }}
-                      disabled={lead!.ready_to_file === false}
-                      title={
-                        lead!.ready_to_file === false
-                          ? (lead!.grade_reasons?.join("; ") || "Complete all required fields first")
-                          : `Generate Rule 7.3 attorney solicitation letter${lead!.verification_state ? ` (state: ${lead!.verification_state})` : ""}`
-                      }
+                      disabled={verifySending}
                       onClick={async () => {
-                        if (lead!.ready_to_file === false) return;
+                        setVerifySending(true); setVerifyMsg("");
                         try {
-                          const blob = await generateLetter(lead!.asset_id);
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement("a");
-                          a.href = url;
-                          a.download = `letter_${lead!.asset_id}.docx`;
-                          a.click();
-                          URL.revokeObjectURL(url);
-                        } catch (err) {
-                          setError(err instanceof ApiError ? err.message : "Letter generation failed");
-                        }
+                          const res = await sendVerification();
+                          if (res.dev_code) { setVerifyCode(res.dev_code); setVerifyMsg(`Code: ${res.dev_code} (pre-filled)`); }
+                          else setVerifyMsg("Verification email sent!");
+                        } catch { setVerifyMsg("Failed to send."); }
+                        finally { setVerifySending(false); }
                       }}
-                    >
-                      GENERATE RULE 7.3 LETTER
-                    </button>
-                  )}
-                </div>
+                      style={{ background: "none", border: "1px solid #374151", color: "#64748b", borderRadius: 4, padding: "3px 8px", fontFamily: "inherit", fontSize: "0.72em", cursor: "pointer" }}
+                    >RESEND CODE</button>
+                    {verifyMsg && <div style={{ marginTop: 6, fontSize: "0.72em", color: "#94a3b8" }}>{verifyMsg}</div>}
+                  </div>
+                )}
+              </div>
 
-                {/* Phase 4: Surplus Math Audit Panel
-                    Rule: render if data_grade === 'GOLD' OR audit record explicitly exists.
-                    Only visible to authenticated users viewing an unlocked lead. */}
-                {(lead!.data_grade === "GOLD" || lead!.surplus_math_audit) && (
-                  <div style={{ marginTop: 20, padding: "12px 16px", border: "1px solid #374151", borderRadius: 6, background: "rgba(17,24,39,0.6)" }}>
-                    <h4 style={{ margin: "0 0 10px", fontSize: "0.78em", letterSpacing: "0.08em", opacity: 0.7 }}>
-                      SURPLUS MATH AUDIT
-                    </h4>
-                    {lead!.surplus_math_audit ? (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 20, alignItems: "flex-start" }}>
-                        {lead!.surplus_math_audit.html_overbid != null && (
-                          <div>
-                            <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>HTML OVERBID</div>
-                            <div style={{ fontWeight: 600, fontSize: "0.92em" }}>{fmt(lead!.surplus_math_audit.html_overbid / 100)}</div>
-                          </div>
-                        )}
-                        {lead!.surplus_math_audit.computed_surplus != null && (
-                          <div>
-                            <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>COMPUTED SURPLUS (BID – DEBT)</div>
-                            <div style={{ fontWeight: 600, fontSize: "0.92em" }}>{fmt(lead!.surplus_math_audit.computed_surplus / 100)}</div>
-                          </div>
-                        )}
-                        {lead!.surplus_math_audit.voucher_overbid != null && (
-                          <div>
-                            <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>VOUCHER AMOUNT</div>
-                            <div style={{ fontWeight: 600, fontSize: "0.92em" }}>{fmt(lead!.surplus_math_audit.voucher_overbid / 100)}</div>
-                          </div>
-                        )}
-                        <div>
-                          <div style={{ fontSize: "0.68em", opacity: 0.6, letterSpacing: "0.05em", marginBottom: 2 }}>MATH MATCH STATUS</div>
-                          <div style={{ fontWeight: 700, fontSize: "0.88em", color: lead!.surplus_math_audit.match_html_math === 1 ? "#22c55e" : lead!.surplus_math_audit.match_html_math === 0 ? "#ef4444" : "#94a3b8" }}>
-                            {lead!.surplus_math_audit.match_html_math === 1 ? "CONFIRMED" : lead!.surplus_math_audit.match_html_math === 0 ? "MISMATCH" : "PENDING"}
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <p style={{ margin: 0, opacity: 0.5, fontSize: "0.82em" }}>Math audit pending for this GOLD asset.</p>
+              {/* Case dossier + court filing — visible after unlock */}
+              {unlocked && (
+                <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px" }}>
+                  <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>CASE DOCUMENTS</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <button
+                      style={{ background: "#0d1117", border: "1px solid #374151", color: "#e5e7eb", borderRadius: 6, padding: "9px 14px", fontSize: "0.78em", fontWeight: 700, letterSpacing: "0.06em", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
+                      onClick={() => downloadSecure(`/api/dossier/${lead.asset_id}`, `dossier_${lead.asset_id}.txt`)}
+                    >
+                      CASE DOSSIER ↓
+                    </button>
+                    {(() => {
+                      const hasEvidence = evidenceDocs.length > 0 || (unlocked?.source_doc_count ?? 0) > 0;
+                      return hasEvidence ? (
+                        <button
+                          style={{ background: "#0d1117", border: "1px solid #374151", color: "#e5e7eb", borderRadius: 6, padding: "9px 14px", fontSize: "0.78em", fontWeight: 700, letterSpacing: "0.06em", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
+                          onClick={() => downloadSecure(`/api/case-packet/${lead.asset_id}`, `case_packet_${lead.asset_id}.html`)}
+                        >
+                          CASE PACKET (HTML) ↓
+                        </button>
+                      ) : (
+                        <button disabled style={{ background: "#0d1117", border: "1px solid #1f2937", color: "#4b5563", borderRadius: 6, padding: "9px 14px", fontSize: "0.78em", letterSpacing: "0.06em", cursor: "not-allowed", fontFamily: "inherit", textAlign: "left", opacity: 0.4 }}>
+                          CASE PACKET — NO DOCS ON FILE
+                        </button>
+                      );
+                    })()}
+                    <button
+                      style={{ background: "#1c0a0022", border: "1px solid #f59e0b66", color: "#f59e0b", borderRadius: 6, padding: "9px 14px", fontSize: "0.78em", fontWeight: 700, letterSpacing: "0.06em", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
+                      title="Court Filing Packet — Motion for Surplus Release + Notice to Lienholders + Affidavit + Proof of Claim (3 credits)"
+                      onClick={() => downloadSecure(`/api/lead/${lead.asset_id}/court-filing`, `court_filing_${lead.asset_id}.zip`)}
+                    >
+                      COURT FILING PACKET (3 CR) ↓
+                    </button>
+                    {(user?.bar_number || user?.is_admin) && (
+                      <button
+                        disabled={lead.ready_to_file === false}
+                        title={lead.ready_to_file === false ? (lead.grade_reasons?.join("; ") || "Complete required fields first") : "Generate Rule 7.3 attorney solicitation letter"}
+                        style={{ background: "#0d1117", border: "1px solid #374151", color: lead.ready_to_file === false ? "#4b5563" : "#e5e7eb", borderRadius: 6, padding: "9px 14px", fontSize: "0.78em", fontWeight: 700, letterSpacing: "0.06em", cursor: lead.ready_to_file === false ? "not-allowed" : "pointer", fontFamily: "inherit", textAlign: "left", opacity: lead.ready_to_file === false ? 0.4 : 1 }}
+                        onClick={async () => {
+                          if (lead.ready_to_file === false) return;
+                          try {
+                            const blob = await generateLetter(lead.asset_id);
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url; a.download = `letter_${lead.asset_id}.docx`; a.click();
+                            URL.revokeObjectURL(url);
+                          } catch (err) { setError(err instanceof ApiError ? err.message : "Letter generation failed"); }
+                        }}
+                      >
+                        RULE 7.3 LETTER ↓
+                      </button>
                     )}
                   </div>
-                )}
+                </div>
+              )}
 
-                {/* Phase 4: Provenance Citation
-                    Displays equity_resolution.notes (snapshot_id / doc_id reference).
-                    Only visible to authenticated users viewing an unlocked lead. */}
-                {lead!.equity_resolution_notes && (
-                  <div style={{ marginTop: 12, padding: "10px 16px", border: "1px solid #1f2937", borderRadius: 6, background: "rgba(17,24,39,0.4)" }}>
-                    <h4 style={{ margin: "0 0 6px", fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.6 }}>
-                      PROVENANCE CITATION
-                    </h4>
-                    <p style={{ margin: 0, fontSize: "0.82em", opacity: 0.8, whiteSpace: "pre-wrap" }}>
-                      {lead!.equity_resolution_notes}
-                    </p>
+              {/* Add to pipeline */}
+              {user && (
+                <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px" }}>
+                  <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>PIPELINE</div>
+                  <button
+                    onClick={() => setShowPipelineModal(true)}
+                    style={{ width: "100%", background: "#0d1117", border: "1px solid #374151", color: "#9ca3af", borderRadius: 6, padding: "10px 14px", fontSize: "0.78em", fontWeight: 700, letterSpacing: "0.06em", cursor: "pointer", fontFamily: "inherit" }}
+                  >
+                    + ADD TO MY PIPELINE
+                  </button>
+                </div>
+              )}
+
+              {/* Restriction warning (compact) */}
+              {isRestricted && (
+                <div style={{ background: "#7f1d1d22", border: "1px solid #ef444455", borderRadius: 8, padding: "12px 16px" }}>
+                  <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#ef4444", marginBottom: 8, fontWeight: 700 }}>C.R.S. § 38-38-111 ACTIVE</div>
+                  <div style={{ fontSize: "0.75em", color: "#fca5a5", lineHeight: 1.5 }}>
+                    Restriction lifts: <strong>{lead.restriction_end_date || "—"}</strong>
+                    {lead.days_until_actionable != null && (
+                      <span style={{ display: "block", marginTop: 2, color: "#f87171" }}>{lead.days_until_actionable} days remaining</span>
+                    )}
                   </div>
-                )}
+                </div>
+              )}
 
-                {/* Junior Liens & Encumbrances — critical for net equity calculation */}
-                {lead!.junior_liens && lead!.junior_liens.length > 0 && (
-                  <div style={{ marginTop: 16, padding: "12px 16px", border: "1px solid #374151", borderRadius: 6, background: "rgba(17,24,39,0.6)" }}>
-                    <h4 style={{ margin: "0 0 10px", fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.7 }}>
-                      JUNIOR LIENS &amp; ENCUMBRANCES
-                    </h4>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {lead!.junior_liens.map((lien, i) => {
-                        const amt = lien.amount_cents > 0 ? "$" + (lien.amount_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "Amount unknown";
-                        const isOpen = lien.is_open === 1;
-                        return (
-                          <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, fontSize: "0.82em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
-                            <span style={{ minWidth: 80, fontWeight: 700, color: isOpen ? "#ef4444" : "#6b7280" }}>
-                              {lien.lien_type}
-                            </span>
-                            <span style={{ flex: 1, opacity: 0.75 }}>
-                              {lien.lienholder_name || "Lienholder unknown"}
-                            </span>
-                            <span style={{ fontWeight: 600, color: isOpen ? "#f59e0b" : "#6b7280" }}>
-                              {amt}
-                            </span>
-                            <span style={{ fontSize: "0.78em", padding: "2px 6px", borderRadius: 3, background: isOpen ? "rgba(239,68,68,0.15)" : "rgba(107,114,128,0.2)", color: isOpen ? "#fca5a5" : "#9ca3af" }}>
-                              {isOpen ? "OPEN" : "RELEASED"}
-                            </span>
-                            {lien.priority != null && (
-                              <span style={{ fontSize: "0.75em", opacity: 0.45 }}>P{lien.priority}</span>
-                            )}
-                          </div>
-                        );
-                      })}
+              {/* Compact claim window */}
+              {!isRestricted && lead.claim_deadline && (() => {
+                const days = lead.days_to_claim;
+                const passed = lead.deadline_passed;
+                const urgencyColor = passed ? "#ef4444" : days != null && days <= 180 ? "#ef4444" : days != null && days <= 365 ? "#f59e0b" : "#22c55e";
+                return (
+                  <div style={{ background: "#111827", border: `1px solid ${urgencyColor}44`, borderRadius: 8, padding: "12px 16px" }}>
+                    <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: urgencyColor, marginBottom: 6, fontWeight: 700 }}>
+                      {passed ? "CLAIM WINDOW EXPIRED" : "CLAIM WINDOW"}
                     </div>
-                    <p style={{ margin: "8px 0 0", fontSize: "0.74em", opacity: 0.45 }}>
-                      Open liens reduce net owner equity and may affect claimable amount. Verify with county records before filing.
-                    </p>
+                    {!passed && days != null && (
+                      <div style={{ fontSize: "1.8em", fontWeight: 700, color: urgencyColor, lineHeight: 1 }}>{days}<span style={{ fontSize: "0.45em", marginLeft: 4, color: "#4b5563" }}>DAYS</span></div>
+                    )}
+                    <div style={{ fontSize: "0.72em", color: "#4b5563", marginTop: 4 }}>Deadline: {lead.claim_deadline}</div>
+                  </div>
+                );
+              })()}
+
+            </div>{/* end right column */}
+
+          </div>{/* end two-column grid */}
+
+          {/* ══════════════════════════════════════════════════════════
+              FULL-WIDTH SECTIONS BELOW THE GRID
+              ══════════════════════════════════════════════════════════ */}
+
+          {/* Restriction Banner */}
+          {isRestricted && (
+            <div style={{ background: "#7f1d1d22", border: "1px solid #ef444455", borderRadius: 8, padding: "14px 20px", marginBottom: 12 }}>
+              <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#ef4444", fontWeight: 700, marginBottom: 8 }}>C.R.S. § 38-38-111 RESTRICTION ACTIVE</div>
+              <div style={{ fontSize: "0.82em", color: "#fca5a5", lineHeight: 1.6 }}>
+                Statutory restrictions under C.R.S. § 38-38-111 and § 38-13-1304 apply. Filing window has not yet opened.
+                Restriction lifts: <strong>{lead.restriction_end_date || "—"}</strong>
+                {lead.days_until_actionable != null && <span> ({lead.days_until_actionable} days remaining)</span>}
+              </div>
+            </div>
+          )}
+
+          {/* Full Claim Window Bar */}
+          {!isRestricted && lead.claim_deadline && (() => {
+            const days = lead.days_to_claim;
+            const passed = lead.deadline_passed;
+            const urgencyColor = passed ? "#ef4444" : days != null && days <= 180 ? "#ef4444" : days != null && days <= 365 ? "#f59e0b" : "#22c55e";
+            const urgencyLabel = passed ? "EXPIRED — FILE IMMEDIATELY" : days != null && days <= 180 ? "URGENT — ACT NOW" : days != null && days <= 365 ? "PLAN AHEAD" : "AMPLE TIME";
+            const totalDays = 912;
+            const elapsed = passed ? totalDays : Math.max(0, totalDays - (days ?? totalDays));
+            const pct = Math.min(100, Math.round(elapsed / totalDays * 100));
+            return (
+              <div style={{ background: "#111827", border: `1px solid ${urgencyColor}44`, borderRadius: 8, padding: "14px 20px", marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                  <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151" }}>C.R.S. § 38-38-111 CLAIM WINDOW</div>
+                  <div style={{ fontSize: "0.72em", fontWeight: 700, color: urgencyColor, letterSpacing: "0.06em" }}>{urgencyLabel}</div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                  <div style={{ fontSize: "0.82em", color: "#e5e7eb" }}>Deadline: <strong>{lead.claim_deadline}</strong></div>
+                  {!passed && days != null && <div style={{ fontSize: "1.1em", fontWeight: 700, color: urgencyColor }}>{days} days remaining</div>}
+                </div>
+                <div style={{ background: "#1f2937", borderRadius: 4, height: 6, overflow: "hidden" }}>
+                  <div style={{ width: `${pct}%`, height: "100%", borderRadius: 4, background: urgencyColor, transition: "width 0.3s" }} />
+                </div>
+                <div style={{ fontSize: "0.68em", color: "#4b5563", marginTop: 4 }}>
+                  {pct}% of 30-month window elapsed{passed && " — Funds may have escheated to the state."}
+                </div>
+                {passed && lead.owner_name && (
+                  <div style={{ marginTop: 8 }}>
+                    <a
+                      href={`https://unclaimedproperty.colorado.gov/app/claim-search?lastName=${encodeURIComponent(lead.owner_name.split(" ")[0] || lead.owner_name)}`}
+                      target="_blank" rel="noopener noreferrer"
+                      style={{ display: "inline-block", background: "#1e3a5f", color: "#60a5fa", border: "1px solid #3b82f6", padding: "4px 12px", borderRadius: 4, fontWeight: 700, fontSize: "0.78em", textDecoration: "none", letterSpacing: "0.05em" }}
+                    >
+                      CHECK CO TREASURER FOR UNCLAIMED FUNDS →
+                    </a>
                   </div>
                 )}
               </div>
-            )}
-          </div>
-        )}
+            );
+          })()}
 
-        {/* Admin: Case Audit Trail */}
-        {user?.is_admin && assetId && (
-          <div style={{ margin: "20px 0", padding: "14px 18px", border: "1px solid #1e3a2e", borderRadius: 8, background: "rgba(17,24,39,0.8)" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: showAudit ? 16 : 0 }}>
-              <h4 style={{ margin: 0, fontSize: "0.78em", letterSpacing: "0.1em", color: "#22c55e" }}>
-                ⚑ ADMIN — CASE AUDIT TRAIL
-              </h4>
-              <button
-                className="btn-outline-sm"
-                style={{ fontSize: "0.75em" }}
-                onClick={async () => {
-                  if (!showAudit && !auditTrail) {
-                    setAuditLoading(true);
-                    try {
-                      const data = await getLeadAudit(assetId!);
-                      setAuditTrail(data);
-                    } catch (e) {
-                      console.error("Audit load failed", e);
-                    } finally {
-                      setAuditLoading(false);
-                    }
-                  }
-                  setShowAudit((v) => !v);
-                }}
-              >
-                {showAudit ? "HIDE" : "SHOW AUDIT"}
-              </button>
-              {auditLoading && <span style={{ fontSize: "0.75em", opacity: 0.5 }}>Loading...</span>}
-            </div>
-
-            {showAudit && auditTrail && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-
-                {/* Raw Lead Fields */}
-                <div>
-                  <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>RAW DB RECORD</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.8em" }}>
-                    {Object.entries(auditTrail.lead).filter(([k]) => !k.startsWith("_")).map(([k, v]) => (
-                      <div key={k} style={{ display: "flex", gap: 6 }}>
-                        <span style={{ opacity: 0.45, minWidth: 160, flexShrink: 0 }}>{k}:</span>
-                        <span style={{ color: v == null ? "#6b7280" : "#e5e7eb", wordBreak: "break-all" }}>
-                          {v == null ? "null" : String(v)}
-                        </span>
+          {/* Surplus Stream Context */}
+          {lead.surplus_stream && lead.surplus_stream !== "FORECLOSURE_OVERBID" && (
+            <div style={{
+              background: lead.surplus_stream === "UNCLAIMED_PROPERTY" ? "#0369a122" : lead.surplus_stream === "TAX_DEED_SURPLUS" ? "#78350f22" : "#0f2f1a",
+              border: `1px solid ${lead.surplus_stream === "UNCLAIMED_PROPERTY" ? "#0369a144" : lead.surplus_stream === "TAX_DEED_SURPLUS" ? "#f59e0b44" : "#22c55e44"}`,
+              borderRadius: 8, padding: "14px 20px", marginBottom: 12,
+            }}>
+              <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", fontWeight: 700, marginBottom: 8, color: lead.surplus_stream === "UNCLAIMED_PROPERTY" ? "#38bdf8" : lead.surplus_stream === "TAX_DEED_SURPLUS" ? "#f59e0b" : "#22c55e" }}>
+                {lead.surplus_stream === "UNCLAIMED_PROPERTY" && "UNCLAIMED PROPERTY — C.R.S. § 38-13-1304"}
+                {lead.surplus_stream === "TAX_DEED_SURPLUS" && "TAX DEED SURPLUS — C.R.S. § 39-12-111"}
+                {lead.surplus_stream === "TAX_LIEN" && "TAX LIEN SURPLUS — C.R.S. § 39-11-151"}
+              </div>
+              <div style={{ color: "#9ca3af", lineHeight: 1.6, fontSize: "0.82em" }}>
+                {lead.surplus_stream === "UNCLAIMED_PROPERTY" && (
+                  <>
+                    Surplus transferred to the Colorado State Treasurer. 10% attorney fee cap under HB25-1224. 30-month claim window from transfer date.
+                    {lead.owner_name && (
+                      <div style={{ marginTop: 8 }}>
+                        <a href={`https://unclaimedproperty.colorado.gov/app/claim-search?lastName=${encodeURIComponent(lead.owner_name.split(" ")[0] || lead.owner_name)}`} target="_blank" rel="noopener noreferrer" style={{ display: "inline-block", background: "#0369a1", color: "#fff", padding: "4px 12px", borderRadius: 4, fontWeight: 700, fontSize: "0.85em", textDecoration: "none", letterSpacing: "0.05em" }}>
+                          VERIFY ON CO TREASURER →
+                        </a>
                       </div>
-                    ))}
+                    )}
+                  </>
+                )}
+                {lead.surplus_stream === "TAX_DEED_SURPLUS" && "Tax deed sale overbid — no 6-month restriction applies. Immediately actionable. File promptly to secure prior owner's claim."}
+                {lead.surplus_stream === "TAX_LIEN" && "Tax lien certificate sale surplus. County-specific filing requirements. Verify redemption period before filing."}
+              </div>
+            </div>
+          )}
+
+          {/* Owner Section — locked / unlocked */}
+          {!unlocked ? (
+            <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px", marginBottom: 12 }}>
+              <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 12, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>OWNER INTELLIGENCE</div>
+              {lead.unlocked_by_me ? (
+                <div style={{ fontSize: "0.82em", color: "#4ade80", fontWeight: 700 }}>✓ ALREADY UNLOCKED — Use unlock button to reload intel</div>
+              ) : (
+                <>
+                  <div style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 6, padding: "14px 16px", marginBottom: 8, textAlign: "center", fontSize: "0.82em", color: "#374151", letterSpacing: "0.1em" }}>
+                    CONFIDENTIAL OWNER DATA RESTRICTED
                   </div>
-                  <div style={{ marginTop: 8, fontSize: "0.78em" }}>
-                    <span style={{ opacity: 0.5 }}>Computed status: </span>
-                    <span style={{ color: "#f59e0b", fontWeight: 700 }}>{String(auditTrail.lead._computed_status || "—")}</span>
-                    <span style={{ opacity: 0.5, marginLeft: 16 }}>Canonical ID: </span>
-                    <span style={{ fontFamily: "monospace", color: "#94a3b8" }}>{String(auditTrail.lead._asset_id_canonical || "—")}</span>
+                  {lead.preview_key && (
+                    <button style={{ background: "none", border: "1px solid #374151", color: "#64748b", borderRadius: 4, padding: "6px 12px", fontSize: "0.75em", cursor: "pointer", fontFamily: "inherit" }} onClick={() => downloadSample(lead.preview_key!)}>
+                      DOWNLOAD SAMPLE DOSSIER
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
+            <div style={{ background: "#111827", border: "1px solid #22c55e44", borderRadius: 8, padding: "16px 20px", marginBottom: 12 }}>
+              <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#22c55e", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>INTELLIGENCE DECRYPTED</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 24px", marginBottom: 16 }}>
+                <div>
+                  <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>OWNER NAME</div>
+                  <div style={{ fontSize: "0.9em", color: "#4ade80", fontWeight: 700 }}>{unlocked.owner_name || "—"}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>PROPERTY ADDRESS</div>
+                  <div style={{ fontSize: "0.9em", color: "#e5e7eb", fontWeight: 600 }}>{unlocked.property_address || "—"}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>ESTIMATED SURPLUS</div>
+                  <div style={{ fontSize: "0.9em", color: "#f59e0b", fontWeight: 700 }}>{fmt(unlocked.estimated_surplus)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>OVERBID AMOUNT</div>
+                  <div style={{ fontSize: "0.9em", color: "#e5e7eb", fontWeight: 600 }}>{fmt(unlocked.overbid_amount)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>TOTAL INDEBTEDNESS</div>
+                  <div style={{ fontSize: "0.9em", color: "#e5e7eb", fontWeight: 600 }}>{unlocked.total_indebtedness ? fmt(unlocked.total_indebtedness) : "PRELIMINARY"}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>RECORDER LINK</div>
+                  <div style={{ fontSize: "0.9em" }}>
+                    {unlocked.recorder_link ? <a href={unlocked.recorder_link} target="_blank" rel="noopener noreferrer" style={{ color: "#3b82f6", textDecoration: "none" }}>VIEW RECORD →</a> : "—"}
                   </div>
                 </div>
+              </div>
 
-                {/* Math Audit */}
-                {auditTrail.math_audit && (
-                  <div>
-                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>SURPLUS MATH AUDIT</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.8em" }}>
-                      {Object.entries(auditTrail.math_audit).map(([k, v]) => (
-                        <div key={k} style={{ display: "flex", gap: 6 }}>
-                          <span style={{ opacity: 0.45, minWidth: 160, flexShrink: 0 }}>{k}:</span>
-                          <span style={{ color: v == null ? "#6b7280" : "#e5e7eb" }}>{v == null ? "null" : String(v)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+              {/* Owner Contact Intel */}
+              <div style={{ borderTop: "1px solid #1f2937", paddingTop: 14, marginTop: 4 }}>
+                <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 10 }}>OWNER CONTACT INTEL</div>
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await fetch(`${_apiBase()}/api/lead/${assetId}/owner-contact`, { headers: { Authorization: `Bearer ${_token()}` } });
+                      if (res.ok) {
+                        const data = await res.json();
+                        toast(`Mailing address: ${data.mailing_address || "Not available"} (${data.address_source || "unknown source"})`, "success");
+                      } else if (res.status === 403) {
+                        toast("Owner contact intel requires Partner or Sovereign tier", "error");
+                      } else {
+                        toast("Contact data not yet available for this lead", "error");
+                      }
+                    } catch { toast("Failed to fetch contact intel", "error"); }
+                  }}
+                  style={{ background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 4, color: "#93c5fd", cursor: "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "6px 14px" }}
+                >
+                  FETCH OWNER MAILING ADDRESS →
+                </button>
+                <div style={{ marginTop: 6, fontSize: "0.68em", color: "#4b5563" }}>Aggregated from assessor records + property transfers. Partner/Sovereign tier.</div>
+              </div>
+            </div>
+          )}
 
-                {/* Equity Resolution */}
-                {auditTrail.equity_resolution && (
-                  <div>
-                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>EQUITY RESOLUTION</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.8em" }}>
-                      {Object.entries(auditTrail.equity_resolution).map(([k, v]) => (
-                        <div key={k} style={{ display: "flex", gap: 6 }}>
-                          <span style={{ opacity: 0.45, minWidth: 160, flexShrink: 0 }}>{k}:</span>
-                          <span style={{ color: v == null ? "#6b7280" : "#e5e7eb" }}>{v == null ? "null" : String(v)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Evidence Documents */}
-                {auditTrail.evidence_docs.length > 0 && (
-                  <div>
-                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>
-                      EVIDENCE DOCUMENTS ({auditTrail.evidence_docs.length})
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      {auditTrail.evidence_docs.map((d) => (
-                        <div key={d.id} style={{ display: "flex", gap: 12, fontSize: "0.8em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
-                          <span style={{ opacity: 0.45, minWidth: 80 }}>{d.doc_family || "—"}</span>
-                          <span style={{ flex: 1, fontFamily: "monospace" }}>{d.filename}</span>
-                          <span style={{ opacity: 0.4 }}>{d.bytes ? `${Math.round(d.bytes / 1024)} KB` : ""}</span>
-                          <span style={{ opacity: 0.4 }}>{d.retrieved_ts ? new Date(d.retrieved_ts * 1000).toLocaleDateString() : ""}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Field Evidence */}
-                {auditTrail.field_evidence.length > 0 && (
-                  <div>
-                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>
-                      FIELD EVIDENCE ({auditTrail.field_evidence.length} extractions)
-                    </div>
-                    {auditTrail.field_evidence.map((fe, i) => (
-                      <div key={i} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 4, fontSize: "0.78em", padding: "6px 0", borderBottom: "1px solid #1f2937", marginBottom: 4 }}>
-                        {Object.entries(fe).map(([k, v]) => (
-                          <div key={k} style={{ display: "flex", gap: 4 }}>
-                            <span style={{ opacity: 0.4, minWidth: 120, flexShrink: 0 }}>{k}:</span>
-                            <span style={{ color: v == null ? "#6b7280" : "#e5e7eb", wordBreak: "break-all" }}>{v == null ? "null" : String(v)}</span>
+          {/* Evidence Documents */}
+          {lead.registry_asset_id && (() => {
+            const isAttorney = user?.is_admin || user?.role === "approved_attorney" || user?.role === "admin" || (user as any)?.attorney_status === "VERIFIED";
+            return (
+              <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px", marginBottom: 12 }}>
+                <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>EVIDENCE DOCUMENTS</div>
+                {!isAttorney ? (
+                  <div style={{ fontSize: "0.78em", color: "#4b5563" }}>Attorney verification required to access evidence documents.</div>
+                ) : (
+                  <>
+                    {evidenceLoading && <div style={{ fontSize: "0.78em", color: "#4b5563" }}>Loading evidence...</div>}
+                    {evidenceError && <div style={{ fontSize: "0.78em", color: "#ef4444" }}>{evidenceError}</div>}
+                    {!evidenceLoading && evidenceDocs.length === 0 && !evidenceError && (
+                      <div style={{ fontSize: "0.78em", color: "#4b5563" }}>No evidence documents on file for this asset.</div>
+                    )}
+                    {evidenceDocs.length > 0 && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {evidenceDocs.map((doc) => (
+                          <div key={doc.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", border: "1px solid #1f2937", borderRadius: 4 }}>
+                            <span style={{ opacity: 0.75, minWidth: 120, fontSize: "0.75em" }} title={doc.filename}>{doc.doc_family_label || doc.doc_family}</span>
+                            <span style={{ flex: 1, opacity: 0.6, fontSize: "0.75em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{doc.filename}</span>
+                            <span style={{ opacity: 0.45, fontSize: "0.72em" }}>{doc.bytes > 0 ? `${Math.round(doc.bytes / 1024)} KB` : ""}</span>
+                            <button
+                              style={{ background: "#0d1117", border: "1px solid #374151", color: "#9ca3af", borderRadius: 4, padding: "3px 8px", fontSize: "0.72em", cursor: "pointer", fontFamily: "inherit" }}
+                              onClick={async () => {
+                                try {
+                                  const blob = await downloadEvidenceDoc(doc.id);
+                                  const url = URL.createObjectURL(blob);
+                                  const a = document.createElement("a");
+                                  a.href = url; a.download = doc.filename; a.click();
+                                  URL.revokeObjectURL(url);
+                                } catch (err) { setError(err instanceof ApiError ? err.message : "Download failed"); }
+                              }}
+                            >DOWNLOAD</button>
                           </div>
                         ))}
                       </div>
-                    ))}
-                  </div>
+                    )}
+                  </>
                 )}
+              </div>
+            );
+          })()}
 
-                {/* Audit Log */}
-                {auditTrail.audit_entries.length > 0 && (
-                  <div>
-                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>
-                      AUDIT LOG ({auditTrail.audit_entries.length} entries)
-                    </div>
-                    {auditTrail.audit_entries.map((e) => (
-                      <div key={e.id} style={{ display: "flex", gap: 12, fontSize: "0.78em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
-                        <span style={{ opacity: 0.4, whiteSpace: "nowrap" }}>{e.created_at?.slice(0, 16).replace("T", " ")}</span>
-                        <span style={{ opacity: 0.6, minWidth: 140 }}>{e.user_email || "system"}</span>
-                        <span style={{ color: "#22c55e", fontFamily: "monospace" }}>{e.action}</span>
-                        {e.ip && <span style={{ opacity: 0.3 }}>{e.ip}</span>}
-                      </div>
-                    ))}
+          {/* Case Timeline */}
+          <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, marginBottom: 12, overflow: "hidden" }}>
+            <div onClick={loadTimeline} style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px", borderBottom: showTimeline ? "1px solid #1f2937" : "none" }}>
+              <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151" }}>CASE TIMELINE</div>
+              <span style={{ color: "#374151", fontSize: "0.85em" }}>{showTimeline ? "▲" : "▼"}</span>
+            </div>
+            {showTimeline && (
+              <div style={{ padding: "14px 20px" }}>
+                {timeline.length === 0 ? (
+                  <div style={{ fontSize: "0.78em", color: "#4b5563" }}>No timeline events recorded.</div>
+                ) : timeline.map((ev: any, i: number) => (
+                  <div key={i} style={{ display: "flex", gap: 16, padding: "8px 0", borderBottom: "1px solid #1f2937" }}>
+                    <span style={{ fontSize: "0.72em", color: "#4b5563", minWidth: 100 }}>{ev.ts ? new Date(ev.ts).toLocaleDateString() : "—"}</span>
+                    <span style={{ fontSize: "0.78em", fontWeight: 700, minWidth: 140, color: "#22c55e" }}>{ev.event_type}</span>
+                    <span style={{ fontSize: "0.78em", color: "#9ca3af" }}>{ev.notes}</span>
                   </div>
-                )}
-
-                {/* Unlock History */}
-                {auditTrail.unlock_history.length > 0 && (
-                  <div>
-                    <div style={{ fontSize: "0.72em", letterSpacing: "0.08em", opacity: 0.5, marginBottom: 8 }}>
-                      UNLOCK HISTORY ({auditTrail.unlock_history.length} unlocks)
-                    </div>
-                    {auditTrail.unlock_history.map((u, i) => (
-                      <div key={i} style={{ display: "flex", gap: 12, fontSize: "0.78em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
-                        <span style={{ opacity: 0.4 }}>{String(u["unlocked_at"] || "—")}</span>
-                        <span style={{ opacity: 0.7 }}>{String(u["user_email"] || u["user_id"] || "—")}</span>
-                        <span style={{ opacity: 0.5 }}>{String(u["tier_at_unlock"] || "—")}</span>
-                        <span style={{ color: "#22c55e" }}>{String(u["credits_spent"] || 0)} credits</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
+                ))}
               </div>
             )}
           </div>
+
+          {/* Title Stack */}
+          <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, marginBottom: 12, overflow: "hidden" }}>
+            <div onClick={loadTitleStack} style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px", borderBottom: showTitleStack ? "1px solid #1f2937" : "none" }}>
+              <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151" }}>TITLE STACK</div>
+              <span style={{ color: "#374151", fontSize: "0.85em" }}>{showTitleStack ? "▲" : "▼"}</span>
+            </div>
+            {showTitleStack && (
+              <div style={{ padding: "14px 20px" }}>
+                {!titleStack ? (
+                  <div style={{ fontSize: "0.78em", color: "#4b5563" }}>No title stack data available for this asset.</div>
+                ) : (
+                  <>
+                    <div style={{ display: "flex", gap: 20, marginBottom: 12, flexWrap: "wrap" }}>
+                      <div style={{ fontSize: "0.78em" }}>Risk: <strong style={{ color: titleStack.risk_score === "LOW" ? "#22c55e" : titleStack.risk_score === "HIGH" ? "#ef4444" : "#f59e0b" }}>{titleStack.risk_score}</strong></div>
+                      <div style={{ fontSize: "0.78em" }}>
+                        Open liens:{" "}
+                        {(lead as any).lien_search_performed === false ? (
+                          <strong style={{ color: "#f59e0b" }}>UNKNOWN</strong>
+                        ) : (titleStack.liens?.filter((l: any) => l.is_open).length || 0) === 0 ? (
+                          <strong style={{ color: "#22c55e" }}>NONE FOUND ✓</strong>
+                        ) : (
+                          <strong style={{ color: "#ef4444" }}>{titleStack.liens?.filter((l: any) => l.is_open).length}</strong>
+                        )}
+                      </div>
+                      <div style={{ fontSize: "0.78em" }}>Total open: <strong>${((titleStack.total_open_cents || 0) / 100).toLocaleString()}</strong></div>
+                    </div>
+                    {(titleStack.liens || []).map((lien: any, i: number) => (
+                      <div key={i} style={{ display: "grid", gridTemplateColumns: "40px 1fr 1fr 80px", gap: 8, padding: "6px 0", borderBottom: "1px solid #1f2937", fontSize: "0.78em" }}>
+                        <span style={{ color: "#4b5563" }}>#{lien.priority}</span>
+                        <span style={{ color: "#e5e7eb" }}>{lien.lienholder_name || lien.lien_type}</span>
+                        <span style={{ color: "#9ca3af" }}>${((lien.amount_cents || 0) / 100).toLocaleString()}</span>
+                        <span style={{ color: lien.is_open ? "#ef4444" : "#22c55e", fontWeight: 700 }}>{lien.is_open ? "OPEN" : "SATISFIED"}</span>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Surplus Math Audit */}
+          {unlocked && (lead.data_grade === "GOLD" || lead.surplus_math_audit) && (
+            <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px", marginBottom: 12 }}>
+              <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>SURPLUS MATH AUDIT</div>
+              {lead.surplus_math_audit ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
+                  {lead.surplus_math_audit.html_overbid != null && (
+                    <div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>HTML OVERBID</div>
+                      <div style={{ fontSize: "0.9em", fontWeight: 700, color: "#e5e7eb" }}>{fmt(lead.surplus_math_audit.html_overbid / 100)}</div>
+                    </div>
+                  )}
+                  {lead.surplus_math_audit.computed_surplus != null && (
+                    <div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>COMPUTED SURPLUS</div>
+                      <div style={{ fontSize: "0.9em", fontWeight: 700, color: "#e5e7eb" }}>{fmt(lead.surplus_math_audit.computed_surplus / 100)}</div>
+                    </div>
+                  )}
+                  {lead.surplus_math_audit.voucher_overbid != null && (
+                    <div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>VOUCHER AMOUNT</div>
+                      <div style={{ fontSize: "0.9em", fontWeight: 700, color: "#e5e7eb" }}>{fmt(lead.surplus_math_audit.voucher_overbid / 100)}</div>
+                    </div>
+                  )}
+                  <div>
+                    <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>MATH MATCH</div>
+                    <div style={{ fontSize: "0.9em", fontWeight: 700, color: lead.surplus_math_audit.match_html_math === 1 ? "#22c55e" : lead.surplus_math_audit.match_html_math === 0 ? "#ef4444" : "#94a3b8" }}>
+                      {lead.surplus_math_audit.match_html_math === 1 ? "CONFIRMED" : lead.surplus_math_audit.match_html_math === 0 ? "MISMATCH" : "PENDING"}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: "0.78em", color: "#4b5563" }}>Math audit pending for this GOLD asset.</div>
+              )}
+              {lead.equity_resolution_notes && (
+                <div style={{ marginTop: 14, borderTop: "1px solid #1f2937", paddingTop: 12 }}>
+                  <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 4 }}>PROVENANCE CITATION</div>
+                  <div style={{ fontSize: "0.78em", color: "#9ca3af", whiteSpace: "pre-wrap" }}>{lead.equity_resolution_notes}</div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Junior Liens */}
+          {unlocked && lead.junior_liens && lead.junior_liens.length > 0 && (
+            <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px", marginBottom: 12 }}>
+              <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>JUNIOR LIENS & ENCUMBRANCES</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {lead.junior_liens.map((lien, i) => {
+                  const amt = lien.amount_cents > 0 ? "$" + (lien.amount_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "Amount unknown";
+                  const isOpen = lien.is_open === 1;
+                  return (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, fontSize: "0.8em", padding: "6px 0", borderBottom: "1px solid #1f2937" }}>
+                      <span style={{ minWidth: 80, fontWeight: 700, color: isOpen ? "#ef4444" : "#6b7280" }}>{lien.lien_type}</span>
+                      <span style={{ flex: 1, color: "#9ca3af" }}>{lien.lienholder_name || "Lienholder unknown"}</span>
+                      <span style={{ fontWeight: 600, color: isOpen ? "#f59e0b" : "#6b7280" }}>{amt}</span>
+                      <span style={{ fontSize: "0.78em", padding: "2px 6px", borderRadius: 3, background: isOpen ? "rgba(239,68,68,0.15)" : "rgba(107,114,128,0.2)", color: isOpen ? "#fca5a5" : "#9ca3af" }}>
+                        {isOpen ? "OPEN" : "RELEASED"}
+                      </span>
+                      {lien.priority != null && <span style={{ fontSize: "0.72em", color: "#4b5563" }}>P{lien.priority}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 8, fontSize: "0.68em", color: "#4b5563" }}>Open liens reduce net owner equity. Verify with county records before filing.</div>
+            </div>
+          )}
+
+          {/* Admin Audit Trail */}
+          {user?.is_admin && assetId && (
+            <div style={{ background: "#111827", border: "1px solid #1e3a2e", borderRadius: 8, padding: "16px 20px", marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: showAudit ? 16 : 0 }}>
+                <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#22c55e", fontWeight: 700 }}>ADMIN — CASE AUDIT TRAIL</div>
+                <button
+                  style={{ background: "none", border: "1px solid #374151", color: "#64748b", borderRadius: 4, padding: "3px 10px", fontSize: "0.72em", cursor: "pointer", fontFamily: "inherit" }}
+                  onClick={async () => {
+                    if (!showAudit && !auditTrail) {
+                      setAuditLoading(true);
+                      try { const data = await getLeadAudit(assetId!); setAuditTrail(data); }
+                      catch (e) { console.error("Audit load failed", e); }
+                      finally { setAuditLoading(false); }
+                    }
+                    setShowAudit((v) => !v);
+                  }}
+                >{showAudit ? "HIDE" : "SHOW AUDIT"}</button>
+                {auditLoading && <span style={{ fontSize: "0.72em", color: "#4b5563" }}>Loading...</span>}
+              </div>
+
+              {showAudit && auditTrail && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+                  <div>
+                    <div style={{ fontSize: "0.62em", letterSpacing: "0.1em", color: "#374151", marginBottom: 8 }}>RAW DB RECORD</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.78em" }}>
+                      {Object.entries(auditTrail.lead).filter(([k]) => !k.startsWith("_")).map(([k, v]) => (
+                        <div key={k} style={{ display: "flex", gap: 6 }}>
+                          <span style={{ color: "#374151", minWidth: 160, flexShrink: 0 }}>{k}:</span>
+                          <span style={{ color: v == null ? "#4b5563" : "#e5e7eb", wordBreak: "break-all" }}>{v == null ? "null" : String(v)}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: "0.75em" }}>
+                      <span style={{ color: "#374151" }}>Computed status: </span>
+                      <span style={{ color: "#f59e0b", fontWeight: 700 }}>{String(auditTrail.lead._computed_status || "—")}</span>
+                      <span style={{ color: "#374151", marginLeft: 16 }}>Canonical ID: </span>
+                      <span style={{ color: "#94a3b8" }}>{String(auditTrail.lead._asset_id_canonical || "—")}</span>
+                    </div>
+                  </div>
+
+                  {auditTrail.math_audit && (
+                    <div>
+                      <div style={{ fontSize: "0.62em", letterSpacing: "0.1em", color: "#374151", marginBottom: 8 }}>SURPLUS MATH AUDIT</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.78em" }}>
+                        {Object.entries(auditTrail.math_audit).map(([k, v]) => (
+                          <div key={k} style={{ display: "flex", gap: 6 }}>
+                            <span style={{ color: "#374151", minWidth: 160, flexShrink: 0 }}>{k}:</span>
+                            <span style={{ color: v == null ? "#4b5563" : "#e5e7eb" }}>{v == null ? "null" : String(v)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {auditTrail.equity_resolution && (
+                    <div>
+                      <div style={{ fontSize: "0.62em", letterSpacing: "0.1em", color: "#374151", marginBottom: 8 }}>EQUITY RESOLUTION</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 6, fontSize: "0.78em" }}>
+                        {Object.entries(auditTrail.equity_resolution).map(([k, v]) => (
+                          <div key={k} style={{ display: "flex", gap: 6 }}>
+                            <span style={{ color: "#374151", minWidth: 160, flexShrink: 0 }}>{k}:</span>
+                            <span style={{ color: v == null ? "#4b5563" : "#e5e7eb" }}>{v == null ? "null" : String(v)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {auditTrail.evidence_docs.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: "0.62em", letterSpacing: "0.1em", color: "#374151", marginBottom: 8 }}>EVIDENCE DOCUMENTS ({auditTrail.evidence_docs.length})</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {auditTrail.evidence_docs.map((d) => (
+                          <div key={d.id} style={{ display: "flex", gap: 12, fontSize: "0.78em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
+                            <span style={{ color: "#374151", minWidth: 80 }}>{d.doc_family || "—"}</span>
+                            <span style={{ flex: 1, color: "#9ca3af" }}>{d.filename}</span>
+                            <span style={{ color: "#4b5563" }}>{d.bytes ? `${Math.round(d.bytes / 1024)} KB` : ""}</span>
+                            <span style={{ color: "#4b5563" }}>{d.retrieved_ts ? new Date(d.retrieved_ts * 1000).toLocaleDateString() : ""}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {auditTrail.field_evidence.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: "0.62em", letterSpacing: "0.1em", color: "#374151", marginBottom: 8 }}>FIELD EVIDENCE ({auditTrail.field_evidence.length} extractions)</div>
+                      {auditTrail.field_evidence.map((fe, i) => (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 4, fontSize: "0.75em", padding: "6px 0", borderBottom: "1px solid #1f2937", marginBottom: 4 }}>
+                          {Object.entries(fe).map(([k, v]) => (
+                            <div key={k} style={{ display: "flex", gap: 4 }}>
+                              <span style={{ color: "#374151", minWidth: 120, flexShrink: 0 }}>{k}:</span>
+                              <span style={{ color: v == null ? "#4b5563" : "#e5e7eb", wordBreak: "break-all" }}>{v == null ? "null" : String(v)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {auditTrail.audit_entries.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: "0.62em", letterSpacing: "0.1em", color: "#374151", marginBottom: 8 }}>AUDIT LOG ({auditTrail.audit_entries.length} entries)</div>
+                      {auditTrail.audit_entries.map((e) => (
+                        <div key={e.id} style={{ display: "flex", gap: 12, fontSize: "0.75em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
+                          <span style={{ color: "#374151", whiteSpace: "nowrap" }}>{e.created_at?.slice(0, 16).replace("T", " ")}</span>
+                          <span style={{ color: "#9ca3af", minWidth: 140 }}>{e.user_email || "system"}</span>
+                          <span style={{ color: "#22c55e" }}>{e.action}</span>
+                          {e.ip && <span style={{ color: "#374151" }}>{e.ip}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {auditTrail.unlock_history.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: "0.62em", letterSpacing: "0.1em", color: "#374151", marginBottom: 8 }}>UNLOCK HISTORY ({auditTrail.unlock_history.length} unlocks)</div>
+                      {auditTrail.unlock_history.map((u, i) => (
+                        <div key={i} style={{ display: "flex", gap: 12, fontSize: "0.75em", padding: "4px 0", borderBottom: "1px solid #1f2937" }}>
+                          <span style={{ color: "#374151" }}>{String(u["unlocked_at"] || "—")}</span>
+                          <span style={{ color: "#9ca3af" }}>{String(u["user_email"] || u["user_id"] || "—")}</span>
+                          <span style={{ color: "#4b5563" }}>{String(u["tier_at_unlock"] || "—")}</span>
+                          <span style={{ color: "#22c55e" }}>{String(u["credits_spent"] || 0)} credits</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Footer Legal Notice */}
+          <div style={{ marginTop: 32, padding: "16px 20px", borderTop: "1px solid #1f2937", fontSize: "0.68em", color: "#374151", lineHeight: 1.7 }}>
+            <div style={{ fontWeight: 700, color: "#4b5563", marginBottom: 6, letterSpacing: "0.08em" }}>LEGAL NOTICE</div>
+            <p style={{ margin: "0 0 6px" }}>This platform provides access to publicly available foreclosure sale data. It does not provide finder services, does not contact homeowners, and does not assist in recovery of surplus funds. No phone numbers, email addresses, or skip-tracing data are provided.</p>
+            <p style={{ margin: 0 }}>C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Statutory restrictions may apply depending on sale date and fund status. Consult counsel.</p>
+          </div>
+
+          </>
         )}
 
-        <div className="dash-disclaimer legal-shield">
-          <strong>LEGAL NOTICE</strong>
-          <p>
-            This platform provides access to publicly available foreclosure sale data.
-            It does not provide finder services, does not contact homeowners, and does not
-            assist in recovery of surplus funds. No phone numbers, email addresses, or
-            skip-tracing data are provided.
-          </p>
-          <p>
-            C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Consult counsel.
-          </p>
-          <p>
-            Statutory restrictions under C.R.S. § 38-38-111 and § 38-13-1304 may apply
-            depending on sale date and fund status. Consult counsel.
-          </p>
-        </div>
       </div>
+
+      {/* Pipeline Modal */}
+      {showPipelineModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200 }}>
+          <div style={{ background: "#111827", padding: "28px 32px", borderRadius: 10, minWidth: 300, border: "1px solid #1f2937" }}>
+            <div style={{ fontSize: "0.75em", letterSpacing: "0.12em", color: "#374151", marginBottom: 16 }}>ADD TO PIPELINE</div>
+            {["LEADS", "CONTACTED", "RETAINER_SIGNED", "FILED", "FUNDS_RELEASED"].map((stage) => (
+              <button key={stage} onClick={() => addToPipeline(stage)} style={{ display: "block", width: "100%", marginBottom: 8, padding: "10px 16px", background: "#0d1117", border: "1px solid #1f2937", color: "#e5e7eb", borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: "0.8em", textAlign: "left", letterSpacing: "0.06em" }}>
+                {stage.replace(/_/g, " ")}
+              </button>
+            ))}
+            <button onClick={() => setShowPipelineModal(false)} style={{ display: "block", width: "100%", marginTop: 4, padding: "10px 16px", background: "none", border: "1px solid #1f2937", color: "#4b5563", borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: "0.78em" }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

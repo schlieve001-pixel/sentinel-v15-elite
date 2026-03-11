@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import random
+import re
 import sqlite3
 import string
 import time as _time
@@ -268,11 +269,16 @@ def _audit_log(conn: sqlite3.Connection, user_id: str, action: str, meta: dict =
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract client IP from X-Forwarded-For or direct connection."""
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    """Extract client IP — uses direct connection to prevent X-Forwarded-For spoofing.
+
+    Caddy/nginx sets X-Real-IP reliably; X-Forwarded-For is client-controllable.
+    For rate limiting, we trust the real connection IP (Caddy terminates TLS).
+    """
+    # Prefer X-Real-IP set by Caddy (not client-forgeable behind reverse proxy)
+    ip = request.headers.get("X-Real-IP", "").strip()
     if not ip and request.client:
         ip = request.client.host
-    return ip
+    return ip or "unknown"
 
 
 def _purge_stale_rate_limits() -> None:
@@ -547,13 +553,17 @@ class SafeAsset(BaseModel):
     grade_reasons: Optional[list] = None   # Human-readable explanations of current grade
     # Phase 4: verification pipeline state (6-stage)
     verification_state: Optional[str] = None  # RAW|EXTRACTED|EVIDENCE_ATTACHED|MATH_VERIFIED|ATTORNEY_READY|PUBLISHED
-    pool_source: Optional[str] = None     # VOUCHER|LEDGER|HTML_MATH|UNVERIFIED
+    pool_source: Optional[str] = None     # VOUCHER|LEDGER|HTML_MATH|AI_VERIFIED|TRIPLE_VERIFIED|UNVERIFIED
+    verification_tier: Optional[str] = None  # TRIPLE_VERIFIED|AI_VERIFIED|HTML_MATH|UNVERIFIED
+    verification_confidence: Optional[float] = None  # 0.0–1.0 from SOTA engine
     # Phase 5: two-tier net-to-owner display
     display_tier: Optional[str] = None        # POTENTIAL | VERIFIED
     net_to_owner_label: Optional[str] = None  # "VERIFIED NET TO OWNER" | "OVERBID POOL (Potential)"
     # EPIC 3: explainable confidence
     confidence_reasons: Optional[list] = None
     missing_inputs: Optional[list] = None
+    # A3: lien search state
+    lien_search_performed: Optional[bool] = None  # True when lien_records searched or LIENOR_TAB snapshot exists
 
 
 class FullAsset(SafeAsset):
@@ -832,6 +842,23 @@ def _ts_to_iso(ts) -> Optional[str]:
         return None
 
 
+def _safe_age_days(ts_str) -> Optional[int]:
+    """Safely compute days since timestamp. Returns None for NULL, pre-2020, or unparseable."""
+    if not ts_str:
+        return None
+    try:
+        s = str(ts_str)[:10]
+        dt = date.fromisoformat(s)
+        # Pre-2020 dates are clearly DB defaults or errors
+        if dt.year < 2020:
+            return None
+        today = datetime.now(timezone.utc).date()
+        days = (today - dt).days
+        return days if 0 <= days <= 3650 else None  # Cap at 10 years for sanity
+    except (ValueError, TypeError):
+        return None
+
+
 def _compute_verification_state(row: dict) -> str:
     """6-stage verification pipeline state. Supplements data_grade — does not replace it.
 
@@ -864,6 +891,12 @@ def _compute_verification_state(row: dict) -> str:
         _safe_float(row.get("overbid_amount")) or _safe_float(row.get("surplus_amount")),
     ])
 
+    # READY_TO_FILE: all ATTORNEY_READY requirements + lien search performed + surplus_verified
+    _lien_ok = bool(row.get("lien_search_performed"))
+    _surplus_ver = row.get("pool_source") in ("VOUCHER", "LEDGER")
+
+    if all_required and math_ok and has_evidence and _lien_ok and _surplus_ver:
+        return "READY_TO_FILE"
     if all_required and math_ok and has_evidence:
         return "ATTORNEY_READY"
     if math_ok:
@@ -910,7 +943,9 @@ def _extract_city(address: Optional[str], county: Optional[str]) -> str:
 
 
 def _round_surplus(amount: Optional[float]) -> Optional[float]:
-    if amount is None or amount <= 0:
+    if amount is None:
+        return None
+    if amount <= 0:
         return 0.0
     return round(amount / 100) * 100
 
@@ -949,7 +984,10 @@ def _compute_preview_key(row: dict) -> str:
 
 def _row_to_safe(row: dict) -> dict:
     """Convert a leads row to SafeAsset dict. NULL-safe."""
-    surplus = _safe_float(row.get("surplus_amount")) or _safe_float(row.get("estimated_surplus")) or _safe_float(row.get("overbid_amount")) or 0.0
+    _surp_a = _safe_float(row.get("surplus_amount"))
+    _surp_e = _safe_float(row.get("estimated_surplus"))
+    _surp_o = _safe_float(row.get("overbid_amount"))
+    surplus = _surp_a or _surp_e or _surp_o or 0.0
     debt = _safe_float(row.get("total_debt")) or 0.0
     conf, conf_reasons, conf_missing = _compute_confidence(row)
     status = _compute_status(row)
@@ -983,21 +1021,20 @@ def _row_to_safe(row: dict) -> dict:
             except Exception:
                 pass
 
-    # Data age
-    data_age_days = None
-    updated = row.get("updated_at")
-    if updated:
-        try:
-            updated_dt = date.fromisoformat(str(updated)[:10])
-            data_age_days = (today - updated_dt).days
-        except (ValueError, TypeError):
-            pass
+    # Data age — use safe helper to avoid garbage values for epoch defaults / pre-2020 dates
+    data_age_days = _safe_age_days(row.get("updated_at"))
 
     data_grade = (row.get("data_grade") or "").upper()
     # REJECT leads: zero out surplus so they never appear claimable
     if data_grade == "REJECT":
         surplus = 0.0
-    verified = data_grade in ("GOLD", "SILVER") and conf >= 0.7
+    # surplus_verified: True only when pool_source is authoritative
+    pool_src = row.get("pool_source", "UNVERIFIED")
+    verified = data_grade in ("GOLD", "SILVER") and conf >= 0.7 and pool_src in ("VOUCHER", "LEDGER")
+    # If all surplus fields are NULL/zero and pool source is not verified, surplus is truly unknown
+    _surplus_unknown = (not _surp_a and not _surp_e and not _surp_o and pool_src == "UNVERIFIED")
+    if _surplus_unknown and data_grade not in ("REJECT",):
+        surplus = None  # Genuine unknown — do not show $0.00
 
     pk = _compute_preview_key(row) if is_preview_eligible(row) else None
     ready = _compute_ready_to_file(row)
@@ -1007,7 +1044,7 @@ def _row_to_safe(row: dict) -> dict:
     vstate = _compute_verification_state(row)
 
     # Phase 5: two-tier net-to-owner display label
-    pool_source = row.get("pool_source", "UNVERIFIED")
+    pool_source = pool_src  # already computed above
     _has_verified_net = (
         data_grade == "GOLD"
         and _safe_float(row.get("trustee_fees"))
@@ -1022,7 +1059,7 @@ def _row_to_safe(row: dict) -> dict:
         state="CO",
         case_number=row.get("case_number"),
         asset_type="FORECLOSURE_SURPLUS",
-        estimated_surplus=_round_surplus(surplus),
+        estimated_surplus=_round_surplus(surplus) if surplus is not None else None,
         surplus_verified=verified,
         data_grade=row.get("data_grade"),
         record_class=row.get("record_class"),
@@ -1050,6 +1087,13 @@ def _row_to_safe(row: dict) -> dict:
         grade_reasons=grade_reasons,
         verification_state=vstate,
         pool_source=pool_source,
+        verification_tier=row.get("verification_tier") or (
+            "TRIPLE_VERIFIED" if pool_source == "TRIPLE_VERIFIED"
+            else "AI_VERIFIED" if pool_source == "AI_VERIFIED"
+            else "HTML_MATH" if pool_source == "HTML_MATH"
+            else "UNVERIFIED"
+        ),
+        verification_confidence=_safe_float(row.get("verification_confidence")),
         display_tier=display_tier,
         net_to_owner_label=net_to_owner_label,
         confidence_reasons=conf_reasons,
@@ -1132,7 +1176,6 @@ def _row_to_full(row: dict, conn=None, unlocked_by_me: bool = True, is_admin: bo
         _safe_float(row.get("surplus_amount"))
         or _safe_float(row.get("estimated_surplus"))
         or _safe_float(row.get("overbid_amount"))
-        or 0.0
     )
 
     owner_name = row.get("owner_name")
@@ -1145,7 +1188,7 @@ def _row_to_full(row: dict, conn=None, unlocked_by_me: bool = True, is_admin: bo
             owner_name = owner_name[0] + "." if owner_name else owner_name
 
     safe.update({
-        "estimated_surplus": round(exact_surplus, 2),
+        "estimated_surplus": round(exact_surplus, 2) if exact_surplus is not None else None,
         "owner_name": owner_name,
         "property_address": row.get("property_address"),
         "winning_bid": _safe_float(row.get("winning_bid")),
@@ -1155,6 +1198,7 @@ def _row_to_full(row: dict, conn=None, unlocked_by_me: bool = True, is_admin: bo
         "overbid_amount": _safe_float(row.get("overbid_amount")),
         "recorder_link": row.get("recorder_link"),
         "verification_state": row.get("verification_state", "RAW"),
+        "surplus_verified": row.get("pool_source", "UNVERIFIED") in ("VOUCHER", "LEDGER"),
     })
 
     # EPIC 2D: quality badge and opportunity score (require conn)
@@ -1190,9 +1234,37 @@ def _row_to_full(row: dict, conn=None, unlocked_by_me: bool = True, is_admin: bo
 
         safe["quality_badge"] = quality_badge
         safe["opportunity_score"] = _compute_opportunity_score(row, conn)
+
+        # A2: GOLD display downgrade if no evidence or low confidence
+        _display_grade = row.get("data_grade")
+        _conf_score = _safe_float(row.get("confidence_score")) or 0.0
+        if _display_grade == "GOLD" and ev_count == 0 and snap_count == 0:
+            _display_grade = "SILVER"
+            log.warning("[A2] Lead %s: GOLD with zero evidence — downgrading display to SILVER", row.get("id"))
+        elif _display_grade == "GOLD" and _conf_score < 0.65:
+            _display_grade = "SILVER"
+            log.warning("[A2] Lead %s: GOLD with confidence_score %.2f < 0.65 — downgrading display to SILVER", row.get("id"), _conf_score)
+        safe["display_grade"] = _display_grade
+
+        # A3: lien_search_performed — True if any lien_records exist OR LIENOR_TAB snapshot exists
+        _lien_search_performed = False
+        try:
+            _lien_ct = conn.execute(
+                "SELECT COUNT(*) FROM lien_records WHERE asset_id = ?", [row.get("id", "")]
+            ).fetchone()[0]
+            _lienor_snap = conn.execute(
+                "SELECT COUNT(*) FROM html_snapshots WHERE asset_id = ? AND snapshot_type = 'LIENOR_TAB'",
+                [asset_id_canonical]
+            ).fetchone()[0]
+            _lien_search_performed = (_lien_ct > 0 or _lienor_snap > 0)
+        except Exception:
+            pass
+        safe["lien_search_performed"] = _lien_search_performed
     else:
         safe["quality_badge"] = "ESTIMATED"
         safe["opportunity_score"] = 0
+        safe["display_grade"] = row.get("data_grade")
+        safe["lien_search_performed"] = None
 
     return safe
 
@@ -1292,19 +1364,23 @@ def _effective_admin(user: dict, request: Request = None) -> bool:
 
 
 def _require_api_key(request: Request) -> None:
-    """Check x-verifuse-api-key header for admin/scraper endpoints."""
+    """Check x-verifuse-api-key header for admin/scraper endpoints.
+    SECURITY: Fail-closed — if key is not configured, deny all access.
+    """
     if not VERIFUSE_API_KEY:
-        return  # No key configured (dev mode)
+        raise HTTPException(status_code=500, detail="API key not configured on server.")
     key = request.headers.get("x-verifuse-api-key", "")
-    if key != VERIFUSE_API_KEY:
+    # Constant-time compare to prevent timing attacks
+    import hmac as _hmac
+    if not _hmac.compare_digest(key, VERIFUSE_API_KEY):
         raise HTTPException(status_code=403, detail="Invalid or missing API key.")
 
 
 def _require_admin_or_api_key(request: Request) -> None:
     """Check API key OR JWT admin flag. For admin endpoints that accept either."""
-    # Try API key first
+    # Try API key first — constant-time compare prevents timing attacks
     key = request.headers.get("x-verifuse-api-key", "")
-    if VERIFUSE_API_KEY and key == VERIFUSE_API_KEY:
+    if VERIFUSE_API_KEY and hmac.compare_digest(key, VERIFUSE_API_KEY):
         return
     # Try JWT admin
     user = _get_user_from_request(request)
@@ -1332,7 +1408,11 @@ def _check_email_verified(user: dict, request: Request = None) -> None:
 
 # ── Rate Limiter ────────────────────────────────────────────────────
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+def _rate_limit_key(request: Request) -> str:
+    """Rate limit key uses X-Real-IP (set by Caddy) to prevent X-Forwarded-For spoofing."""
+    return request.headers.get("X-Real-IP", "").strip() or (request.client.host if request.client else "unknown")
+
+limiter = Limiter(key_func=_rate_limit_key, default_limits=["100/minute"])
 
 # ── App ──────────────────────────────────────────────────────────────
 
@@ -1371,14 +1451,18 @@ async def _http_exc_handler(request: Request, exc: HTTPException):
         "error": {"code": str(exc.status_code), "message": exc.detail, "request_id": req_id}
     })
 
+_CORS_ORIGINS = [
+    "https://verifuse.tech",
+    "https://www.verifuse.tech",
+]
+if _IS_DEV:
+    _CORS_ORIGINS += ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://verifuse.tech",
-        "https://www.verifuse.tech",
-    ],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "x-verifuse-api-key", "X-Verifuse-Simulate"],
     expose_headers=["Content-Disposition"],
 )
@@ -1441,13 +1525,62 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
     "X-API-Version": "4.2.0",
+    "X-Robots-Tag": "noindex, nofollow, nosnippet, noarchive",
+    "Content-Security-Policy": (
+        "default-src 'none'; "
+        "script-src 'self'; "
+        "connect-src 'self'; "
+        "img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'"
+    ),
 }
+
+# ── Anti-scraping: blocked User-Agent patterns ─────────────────────
+_SCRAPER_UA_PATTERNS = re.compile(
+    r"(?i)("
+    r"python-requests|python-urllib|aiohttp|httpx|pycurl|"
+    r"scrapy|playwright|puppeteer|selenium|webdriver|headless|"
+    r"curl/|wget/|go-http-client|java/|okhttp|"
+    r"libwww-perl|perl/|ruby|php/|"
+    r"ahrefsbot|semrushbot|mj12bot|dotbot|blexbot|petalbot|"
+    r"baiduspider|yandexbot|rogerbot|exabot|seznambot|"
+    r"nikto|sqlmap|masscan|zgrab|nuclei|nmap|"
+    r"scraperapi|scrapinghub|luminati|brightdata|"
+    r"dataforseo|spiderbro|webcopier|httrack|"
+    r"postman|insomnia"
+    r")"
+)
+
+# Paths that legitimate API clients use — skip UA check for these when
+# the request carries a valid API key header (checked by other middleware)
+_API_KEY_HEADER = "x-verifuse-api-key"
+
+# IPs to shadow-block (populated at runtime by _flag_scraper_ip)
+_SHADOW_BLOCKED: dict[str, float] = {}
+_SHADOW_BLOCK_TTL = 3600  # 1 hour
+
+# IPs that are never shadow-blocked (localhost, internal health checks)
+_SHADOW_BLOCK_EXEMPT = {"127.0.0.1", "::1", "localhost"}
+
+
+def _flag_scraper_ip(ip: str) -> None:
+    """Add IP to shadow-block list for 1 hour."""
+    if ip in _SHADOW_BLOCK_EXEMPT:
+        return
+    _SHADOW_BLOCKED[ip] = _time.time() + _SHADOW_BLOCK_TTL
+    log.warning("anti_scrape.shadow_block", extra={"ip": ip})
 
 
 @app.middleware("http")
 async def request_lifecycle_middleware(request: Request, call_next):
     """Attach request ID, timing, and security headers to every response."""
-    req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())[:8]
+    # Sanitize user-supplied X-Request-ID to prevent log injection
+    _raw_rid = request.headers.get("X-Request-ID", "")
+    req_id = re.sub(r"[^a-zA-Z0-9\-]", "", _raw_rid)[:32] or str(uuid.uuid4())[:8]
     request_id_var.set(req_id)
     t0 = _time.perf_counter()
     log.debug("req.start", extra={"method": request.method, "path": request.url.path})
@@ -1462,6 +1595,100 @@ async def request_lifecycle_middleware(request: Request, call_next):
         "status": response.status_code, "ms": elapsed_ms,
     })
     return response
+
+
+@app.middleware("http")
+async def anti_scrape_middleware(request: Request, call_next):
+    """Block known scraper/bot user agents and shadow-blocked IPs.
+
+    Policy:
+    - Public API endpoints (no auth) are fully protected.
+    - Requests bearing x-verifuse-api-key bypass UA check (legitimate integrations).
+    - Shadow-blocked IPs receive 404 (stealth block, no signal to attacker).
+    - Known scraper UAs on /api/* receive 403.
+    - OPTIONS (preflight) requests are always passed through.
+    """
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    path = request.url.path
+    ip = request.headers.get("X-Real-IP", "").strip() or (
+        request.client.host if request.client else "unknown"
+    )
+
+    # ── Purge expired shadow blocks ─────────────────────────────────
+    now = _time.time()
+    expired = [k for k, exp in _SHADOW_BLOCKED.items() if exp < now]
+    for k in expired:
+        _SHADOW_BLOCKED.pop(k, None)
+
+    # ── Shadow-block check ──────────────────────────────────────────
+    if ip in _SHADOW_BLOCKED and ip not in _SHADOW_BLOCK_EXEMPT:
+        log.warning("anti_scrape.shadow_blocked_hit", extra={"ip": ip, "path": path})
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+    # ── UA check — only for /api/* and only when no API key present ──
+    # Localhost is trusted (internal health checks, gauntlet, dev)
+    has_api_key = bool(request.headers.get(_API_KEY_HEADER, "").strip())
+    if path.startswith("/api/") and not has_api_key and ip not in _SHADOW_BLOCK_EXEMPT:
+        ua = request.headers.get("User-Agent", "")
+        if _SCRAPER_UA_PATTERNS.search(ua):
+            log.warning(
+                "anti_scrape.blocked",
+                extra={"ip": ip, "ua": ua[:120], "path": path},
+            )
+            _flag_scraper_ip(ip)
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"code": "FORBIDDEN", "message": "Access denied"}},
+            )
+
+    return await call_next(request)
+
+
+# ── Anti-scraping: public endpoints ──────────────────────────────────
+
+from fastapi.responses import PlainTextResponse  # noqa: E402 (local import for clarity)
+
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt():
+    """Instruct all crawlers to stay out."""
+    body = (
+        "User-agent: *\n"
+        "Disallow: /\n"
+        "\n"
+        "# VeriFuse is a private legal intelligence platform.\n"
+        "# Automated access is prohibited without written authorization.\n"
+    )
+    return PlainTextResponse(body, headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/.well-known/security.txt", include_in_schema=False)
+async def security_txt():
+    """Security contact information."""
+    body = (
+        "Contact: mailto:security@verifuse.tech\n"
+        "Preferred-Languages: en\n"
+        "Policy: https://verifuse.tech/privacy\n"
+    )
+    return PlainTextResponse(body)
+
+
+# Honeypot endpoint — logs and shadow-blocks any client that hits it
+@app.get("/api/internal/data-export", include_in_schema=False)
+async def honeypot(request: Request):
+    ip = request.headers.get("X-Real-IP", "").strip() or (
+        request.client.host if request.client else "unknown"
+    )
+    ua = request.headers.get("User-Agent", "")
+    log.warning(
+        "anti_scrape.honeypot_hit",
+        extra={"ip": ip, "ua": ua[:120], "path": request.url.path},
+    )
+    _flag_scraper_ip(ip)
+    # Return realistic-looking 404 to not reveal it's a honeypot
+    return JSONResponse(status_code=404, content={"detail": "Not found"})
 
 
 # ── Legal constants ────────────────────────────────────────────────
@@ -1597,6 +1824,7 @@ async def startup():
                 "locked_until": "TEXT",
                 "password_reset_token": "TEXT",
                 "password_reset_sent_at": "TEXT",
+                "token_version": "INTEGER DEFAULT 0",  # Incremented on password change/logout → revokes old JWTs
             }
             for _col, _typedef in _016.items():
                 if _col not in _mc_cols:
@@ -1607,6 +1835,37 @@ async def startup():
             _mc.close()
     except Exception as _me:
         log.warning("Migration 016 partial: %s", _me)
+
+    # Bar number uniqueness index (idempotent — CREATE INDEX IF NOT EXISTS)
+    try:
+        _bn = _get_conn()
+        try:
+            # Partial unique index: only non-empty bar_numbers must be unique
+            _bn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_bar_number_unique "
+                "ON users(bar_number) WHERE bar_number IS NOT NULL AND TRIM(bar_number) != ''"
+            )
+            _bn.commit()
+            log.info("Bar number uniqueness index: OK")
+        finally:
+            _bn.close()
+    except Exception as _bne:
+        log.warning("Bar number uniqueness index: %s", _bne)
+
+    # Orphaned html_snapshots cleanup (snapshots with no matching lead)
+    try:
+        _oc = _get_conn()
+        try:
+            _deleted = _oc.execute(
+                "DELETE FROM html_snapshots WHERE asset_id NOT IN (SELECT id FROM leads)"
+            ).rowcount
+            _oc.commit()
+            if _deleted:
+                log.info("Orphaned html_snapshots cleaned: %d rows deleted", _deleted)
+        finally:
+            _oc.close()
+    except Exception as _oce:
+        log.warning("Orphaned snapshot cleanup: %s", _oce)
 
     # Email mode
     email_mode = os.environ.get("VERIFUSE_EMAIL_MODE", "log").lower()
@@ -1649,6 +1908,53 @@ async def startup():
             _oj.close()
     except Exception as _oe:
         log.warning("Migration 018 (ops_jobs): %s", _oe)
+
+    # ── Background tasks ────────────────────────────────────────────
+    async def _wal_checkpoint_loop():
+        """Hourly WAL checkpoint to keep WAL file from growing unbounded."""
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                _wc = _get_conn()
+                try:
+                    _wc.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    _wc.commit()
+                    log.info("WAL checkpoint completed")
+                finally:
+                    _wc.close()
+            except Exception as _we:
+                log.warning("WAL checkpoint failed: %s", _we)
+
+    async def _preview_lookup_refresh_loop():
+        """Refresh preview lookup every 5 minutes so new GOLD leads appear without restart."""
+        while True:
+            await asyncio.sleep(300)
+            try:
+                global _PREVIEW_LOOKUP
+                _new_lookup: dict[str, str] = {}
+                _rc = _get_conn()
+                try:
+                    _rq = (
+                        "SELECT id, "
+                        "ROUND(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0), 2) as estimated_surplus, "
+                        f"data_grade, {_claim_deadline_expr} "
+                        "FROM leads WHERE COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 100 "
+                        f"AND data_grade != 'REJECT' {_EXPIRED_FILTER}"
+                    )
+                    for _rrow in _rc.execute(_rq).fetchall():
+                        _rd = dict(_rrow)
+                        if is_preview_eligible(_rd):
+                            _pk = _compute_preview_key(_rd)
+                            _new_lookup[_pk] = _rd["id"]
+                finally:
+                    _rc.close()
+                _PREVIEW_LOOKUP = _new_lookup
+                log.debug("Preview lookup refreshed: %d entries", len(_PREVIEW_LOOKUP))
+            except Exception as _re:
+                log.warning("Preview lookup refresh failed: %s", _re)
+
+    asyncio.ensure_future(_wal_checkpoint_loop())
+    asyncio.ensure_future(_preview_lookup_refresh_loop())
 
     log.info(
         "Omega v4.8 BOOT — DB: %s | inode: %s | sha256: %s | leads: %s | columns: %d | build: %s",
@@ -1835,6 +2141,127 @@ async def preview_leads(
     return await _run_in_db(_run)
 
 
+# ── B2: RTF Endpoints ────────────────────────────────────────────────
+
+@app.get("/api/leads/ready-to-file")
+async def get_rtf_leads(request: Request):
+    """Returns all READY_TO_FILE leads for the requesting user's subscribed counties."""
+    user = _require_user(request)
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM leads WHERE verification_state = 'READY_TO_FILE' "
+            "AND data_grade IN ('GOLD', 'SILVER') "
+            "ORDER BY updated_at DESC LIMIT 100"
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            safe = _row_to_safe(d)
+            results.append(safe)
+        return {"leads": results, "count": len(results)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/admin/leads/{lead_id}/promote-rtf")
+async def promote_rtf(lead_id: str, request: Request):
+    """Admin/staff: promote a lead to READY_TO_FILE state after manual RTF gate validation."""
+    user = _require_user(request)
+    if not _effective_admin(user):
+        raise HTTPException(403, detail="Admin required.")
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+        if not row:
+            raise HTTPException(404, detail="Lead not found.")
+        row = dict(row)
+        # Validate RTF gates
+        gate_fails = []
+        if not row.get("sale_date"):
+            gate_fails.append("sale_date missing")
+        if not ((_safe_float(row.get("overbid_amount")) or 0) > 0):
+            gate_fails.append("surplus_amount = 0 or missing")
+        if not row.get("owner_name"):
+            gate_fails.append("owner_name missing")
+        if not row.get("property_address"):
+            gate_fails.append("property_address missing")
+        pool_src = row.get("pool_source", "UNVERIFIED")
+        if pool_src not in ("VOUCHER", "LEDGER"):
+            gate_fails.append(f"pool_source={pool_src} (requires VOUCHER or LEDGER)")
+        if gate_fails:
+            raise HTTPException(422, detail=f"RTF gate failed: {'; '.join(gate_fails)}")
+        # Promote
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE leads SET verification_state = 'READY_TO_FILE', updated_at = ? WHERE id = ?",
+            [now_iso, lead_id]
+        )
+        conn.commit()
+        _audit_log(conn, user.get("user_id"), "promote_rtf", {"lead_id": lead_id})
+        return {"ok": True, "verification_state": "READY_TO_FILE", "lead_id": lead_id}
+    finally:
+        conn.close()
+
+
+@app.post("/api/admin/leads/{lead_id}/verify-sota")
+async def admin_verify_sota(lead_id: str, request: Request):
+    """Run SOTA triple-verification (Document AI + Gemini) on a GOLD lead.
+
+    Non-blocking: upgrades pool_source to TRIPLE_VERIFIED/AI_VERIFIED if AI confirms.
+    Requires admin auth. Uses Vertex AI credits.
+    """
+    user = get_current_user(request)
+    if not _is_admin(user):
+        raise HTTPException(status_code=403, detail="Admin required.")
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, overbid_amount, data_grade, county, case_number FROM leads WHERE id = ?",
+            [lead_id],
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Lead not found.")
+        if row["data_grade"] != "GOLD":
+            raise HTTPException(status_code=400, detail="SOTA verification only available for GOLD leads.")
+
+        from decimal import Decimal as _Decimal
+        overbid = _Decimal(str(row["overbid_amount"] or 0))
+        asset_id = f"FORECLOSURE:CO:{row['county'].upper()}:{row['case_number']}"
+
+        def _run():
+            from verifuse_v2.core.ai_verification_engine import VerificationEngine
+            engine = VerificationEngine(use_docai=True, use_gemini=True, use_claude=False)
+            return engine.verify_from_vault(asset_id, overbid, conn)
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_executor, _run)
+
+        _audit_log(conn, user.get("user_id"), "sota_verify", {
+            "lead_id": lead_id,
+            "tier": result.tier,
+            "confidence": result.confidence,
+            "engines_agreed": result.engines_agreed,
+        })
+
+        return {
+            "ok": True,
+            "asset_id": asset_id,
+            "tier": result.tier,
+            "confidence": result.confidence,
+            "engines_agreed": result.engines_agreed,
+            "engines_run": result.engines_run,
+            "docai_amount": str(result.docai_amount) if result.docai_amount else None,
+            "gemini_amount": str(result.gemini_amount) if result.gemini_amount else None,
+            "errors": result.errors,
+            "duration_ms": result.duration_ms,
+            "notes": result.verification_notes,
+        }
+    finally:
+        conn.close()
+
+
 # ── GET /api/leads — Paginated, NULL-safe ───────────────────────────
 
 @app.get("/api/leads")
@@ -1850,6 +2277,7 @@ async def get_leads(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     verification_state: Optional[str] = Query(None),
+    surplus_stream: Optional[str] = Query(None),
 ):
     """Return paginated leads as SafeAsset. Handles NULLs gracefully.
 
@@ -1867,7 +2295,13 @@ async def get_leads(
             where = " WHERE 1=1"
             params: list = []
 
-            if not include_zombies:
+            # Zombie filter: skip when explicitly requesting BRONZE/REJECT leads or
+            # PRE_SALE pipeline leads — all three categories have $0 surplus by definition.
+            _skip_zombie = (
+                include_zombies
+                or grade in ("BRONZE", "REJECT")
+            )
+            if not _skip_zombie:
                 where += " AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 100"
             if not include_reject or not is_admin_user:
                 where += " AND data_grade != 'REJECT'"
@@ -1883,6 +2317,9 @@ async def get_leads(
             if verification_state:
                 where += " AND verification_state = ?"
                 params.append(verification_state)
+            if surplus_stream:
+                where += " AND surplus_stream = ?"
+                params.append(surplus_stream.upper())
 
             # Count for pagination
             total = conn.execute(f"SELECT COUNT(*) FROM leads{where}", params).fetchone()[0]
@@ -2015,12 +2452,38 @@ async def unlock_lead(lead_id: str, request: Request):
                     )
                 except sqlite3.IntegrityError:
                     pass
-            _audit_log(conn2, user_id, "admin_unlock_bypass", {
-                "reason_code": _unlock_body.get("reason_code", "ADMIN_ACCESS"),
-                "ticket_id": _unlock_body.get("ticket_id"),
+            _audit_action = "admin_preview"  # default: read-only admin view
+            _reason_code = _unlock_body.get("reason_code", "ADMIN_ACCESS")
+            _ticket_id = _unlock_body.get("ticket_id")
+            _supervisor = _unlock_body.get("supervisor_approval", False)
+            _is_restricted_lead = dict(row).get("restriction_status") == "RESTRICTED"
+
+            if _is_restricted_lead and _supervisor:
+                _audit_action = "admin_force_unlock"
+            elif _reason_code and _reason_code != "ADMIN_ACCESS":
+                _audit_action = "admin_override_unlock"
+            else:
+                _audit_action = "admin_preview"
+
+            _audit_log(conn2, user_id, _audit_action, {
+                "reason_code": _reason_code,
+                "ticket_id": _ticket_id,
+                "supervisor_approval": _supervisor,
                 "case_id": lead_id,
                 "ip": ip,
             }, ip)
+
+            # Also log to admin_override_log for override/force actions
+            if _audit_action in ("admin_override_unlock", "admin_force_unlock"):
+                try:
+                    _admin_override_log(
+                        conn2, user_id, _audit_action,
+                        reason_code=_reason_code or "ADMIN_ACCESS",
+                        target_lead_id=lead_id,
+                    )
+                except Exception:
+                    pass  # Non-fatal — audit_log entry already captured above
+
             conn2.execute("COMMIT")
         except Exception as e:
             try:
@@ -2215,10 +2678,19 @@ async def unlock_lead(lead_id: str, request: Request):
 # ── POST /api/billing/upgrade — Tier upgrade + credit refill ────────
 
 @app.post("/api/billing/upgrade")
+@limiter.limit("10/minute")
 async def billing_upgrade(request: Request):
-    """Update tier and refill credits."""
+    """Admin-only: manually adjust a user's tier and credit balance.
+
+    SECURITY: This endpoint is ADMIN ONLY. User-facing tier upgrades flow
+    exclusively through the Stripe webhook (/api/webhook).
+    """
     user = _require_user(request)
+    if not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Admin only. Tier upgrades happen via Stripe.")
+
     body = await request.json()
+    target_user_id = body.get("user_id", user["user_id"])
     new_tier = body.get("tier", "").lower()
 
     from verifuse_v2.server.pricing import TIERS
@@ -2238,14 +2710,15 @@ async def billing_upgrade(request: Request):
         conn.execute("""
             UPDATE users SET tier = ?, credits_remaining = ?, credits_reset_at = ?
             WHERE user_id = ?
-        """, [new_tier, credits, now, user["user_id"]])
+        """, [new_tier, credits, now, target_user_id])
         conn.commit()
     finally:
         conn.close()
 
+    _log_action(user["user_id"], "admin_tier_upgrade", {"target": target_user_id, "tier": new_tier})
     return {
         "status": "ok",
-        "user_id": user["user_id"],
+        "user_id": target_user_id,
         "tier": new_tier,
         "credits_remaining": credits,
     }
@@ -2397,7 +2870,8 @@ async def get_stats():
 
 def _trigger_verification_email(user_id: str, email: str, conn=None) -> None:
     """Send a 6-digit verification code. Reusable from register + send-verification endpoints."""
-    code = "".join(random.choices(string.digits, k=6))
+    import secrets as _sec
+    code = "".join(_sec.choice(string.digits) for _ in range(6))
     now_ts = datetime.now(timezone.utc).isoformat()
     _conn = conn or _get_conn()
     _close_after = conn is None
@@ -2449,12 +2923,14 @@ async def api_register(request: Request):
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password required.")
     bar_number = body.get("bar_number", "").strip()
+    # Tier is ALWAYS set to the free base tier at registration.
+    # Upgrades happen only via Stripe webhook — never via user-supplied tier field.
     user, token = register_user(
         email=email, password=password,
         full_name=body.get("full_name", ""),
         firm_name=body.get("firm_name", ""),
         bar_number=bar_number,
-        tier=body.get("tier", "scout"),
+        tier="recon",
     )
     # Founders cap check
     _try_founders_redemption(user["user_id"])
@@ -2574,7 +3050,8 @@ async def send_verification(request: Request):
         except Exception:
             pass
 
-    code = "".join(random.choices(string.digits, k=6))
+    import secrets as _sec2
+    code = "".join(_sec2.choice(string.digits) for _ in range(6))
     now = datetime.now(timezone.utc).isoformat()
 
     # DEV-ONLY: log the code when SMTP is not configured (email mode = log).
@@ -2761,9 +3238,12 @@ async def reset_password(request: Request):
                 pass
 
         new_hash = hash_password(password)
+        # NOTE: Do NOT clear locked_until here — resetting password must not bypass lockout.
+        # Increment token_version to revoke all previously issued JWTs.
         conn.execute(
-            "UPDATE users SET password_hash = ?, password_reset_token = NULL, password_reset_sent_at = NULL, "
-            "failed_login_count = 0, locked_until = NULL WHERE user_id = ?",
+            "UPDATE users SET password_hash = ?, password_reset_token = NULL, "
+            "password_reset_sent_at = NULL, failed_login_count = 0, "
+            "token_version = COALESCE(token_version, 0) + 1 WHERE user_id = ?",
             [new_hash, row["user_id"]],
         )
         conn.commit()
@@ -2797,8 +3277,9 @@ async def change_password(request: Request):
         if not row or not verify_password(current_pw, row["password_hash"]):
             raise HTTPException(status_code=401, detail="Current password is incorrect.")
         new_hash = hash_password(new_pw)
+        # Increment token_version to revoke all previously issued JWTs (including attacker's stolen token)
         conn.execute(
-            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            "UPDATE users SET password_hash = ?, token_version = COALESCE(token_version, 0) + 1 WHERE user_id = ?",
             [new_hash, user["user_id"]],
         )
         conn.commit()
@@ -3048,38 +3529,37 @@ async def get_dossier(lead_id: str, request: Request):
     surplus = _safe_float(lead.get("surplus_amount")) or 0.0
     bid = _safe_float(lead.get("winning_bid")) or 0.0
 
-    dossier_dir = Path(__file__).resolve().parent.parent / "data" / "dossiers"
-    dossier_dir.mkdir(parents=True, exist_ok=True)
+    # Generate dossier in-memory — never write PII to disk
     filename = f"dossier_{lead_id[:12]}.txt"
-    filepath = dossier_dir / filename
+    lines = [
+        "=" * 60,
+        "  VERIFUSE — INTELLIGENCE DOSSIER",
+        "=" * 60, "",
+        f"Case Number:      {lead.get('case_number', 'N/A')}",
+        f"County:           {lead.get('county', 'N/A')}",
+        f"Owner:            {lead.get('owner_name', 'N/A')}",
+        f"Property Address: {lead.get('property_address', 'N/A')}",
+        f"Sale Date:        {lead.get('sale_date', 'N/A')}",
+        f"Claim Deadline:   {lead.get('claim_deadline', 'N/A')}", "",
+        f"Winning Bid:      ${bid:,.2f}",
+        f"Total Debt:       ${_safe_float(lead.get('total_debt')) or 0:,.2f}",
+        f"Surplus Amount:   ${surplus:,.2f}",
+        f"Data Grade:       {lead.get('data_grade', 'N/A')}",
+        f"Confidence:       {_safe_float(lead.get('confidence_score')) or 0:.0%}", "",
+        "=" * 60,
+        "  DISCLAIMER: For informational purposes only.",
+        "  Verify all figures with the County Public Trustee.",
+        "=" * 60,
+    ]
+    content = "\n".join(lines)
 
-    with open(filepath, "w") as f:
-        f.write("=" * 60 + "\n")
-        f.write("  VERIFUSE — INTELLIGENCE DOSSIER\n")
-        f.write("=" * 60 + "\n\n")
-        f.write(f"Case Number:      {lead.get('case_number', 'N/A')}\n")
-        f.write(f"County:           {lead.get('county', 'N/A')}\n")
-        f.write(f"Owner:            {lead.get('owner_name', 'N/A')}\n")
-        f.write(f"Property Address: {lead.get('property_address', 'N/A')}\n")
-        f.write(f"Sale Date:        {lead.get('sale_date', 'N/A')}\n")
-        f.write(f"Claim Deadline:   {lead.get('claim_deadline', 'N/A')}\n\n")
-        f.write(f"Winning Bid:      ${bid:,.2f}\n")
-        f.write(f"Total Debt:       ${_safe_float(lead.get('total_debt')) or 0:,.2f}\n")
-        f.write(f"Surplus Amount:   ${surplus:,.2f}\n")
-        f.write(f"Data Grade:       {lead.get('data_grade', 'N/A')}\n")
-        f.write(f"Confidence:       {_safe_float(lead.get('confidence_score')) or 0:.0%}\n\n")
-        f.write("=" * 60 + "\n")
-        f.write("  DISCLAIMER: For informational purposes only.\n")
-        f.write("  Verify all figures with the County Public Trustee.\n")
-        f.write("=" * 60 + "\n")
-
-    return FileResponse(
-        str(filepath),
+    from fastapi.responses import Response as _Resp
+    return _Resp(
+        content=content,
         media_type="text/plain",
-        filename=filename,
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
+            "Cache-Control": "no-store, no-cache",
             "X-Content-Type-Options": "nosniff",
             "Access-Control-Expose-Headers": "Content-Disposition",
         },
@@ -3209,6 +3689,197 @@ async def billing_starter(request: Request):
     except Exception as e:
         log.error("Starter checkout failed: %s", e)
         raise HTTPException(status_code=503, detail="Billing service unavailable.")
+
+
+# ── GET /api/billing/status — Current subscription info ─────────────
+
+@app.get("/api/billing/status")
+async def billing_status(request: Request):
+    """Return current user's subscription status, credits, and tier."""
+    user = _require_user(request)
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            """SELECT tier, credits_remaining, stripe_customer_id, stripe_subscription_id,
+                      subscription_status, current_period_end, founders_pricing
+               FROM users WHERE user_id = ?""",
+            [user["user_id"]],
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        from verifuse_v2.server.pricing import MONTHLY_CREDITS
+        monthly_grant = MONTHLY_CREDITS.get(row["tier"], 0)
+        return {
+            "tier": row["tier"],
+            "credits_remaining": row["credits_remaining"],
+            "monthly_grant": monthly_grant,
+            "stripe_customer_id": row["stripe_customer_id"],
+            "subscription_status": row["subscription_status"],
+            "current_period_end": row["current_period_end"],
+            "founders_pricing": bool(row["founders_pricing"]),
+            "stripe_configured": bool(STRIPE_SECRET_KEY),
+        }
+    finally:
+        conn.close()
+
+
+# ── POST /api/billing/portal — Stripe Customer Portal ───────────────
+
+@app.post("/api/billing/portal")
+async def billing_portal(request: Request):
+    """Create a Stripe Customer Portal session for self-service billing management."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Billing not configured.")
+    user = _require_user(request)
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT stripe_customer_id FROM users WHERE user_id = ?",
+            [user["user_id"]],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["stripe_customer_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="No active subscription found. Purchase a plan to manage billing.",
+        )
+    try:
+        import stripe as _stripe
+        _stripe.api_key = STRIPE_SECRET_KEY
+        base_url = os.environ.get("VERIFUSE_BASE_URL", "https://verifuse.tech")
+        session = _stripe.billing_portal.Session.create(
+            customer=row["stripe_customer_id"],
+            return_url=f"{base_url}/account",
+        )
+        return {"portal_url": session.url}
+    except Exception as e:
+        log.error("Billing portal failed: %s", e)
+        raise HTTPException(status_code=503, detail="Billing portal unavailable.")
+
+
+# ── GET /api/billing/invoices — Stripe invoice history ──────────────
+
+@app.get("/api/billing/invoices")
+async def billing_invoices(request: Request):
+    """Return the last 10 Stripe invoices for the current user."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Billing not configured.")
+    user = _require_user(request)
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT stripe_customer_id FROM users WHERE user_id = ?",
+            [user["user_id"]],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["stripe_customer_id"]:
+        return {"invoices": []}
+    try:
+        import stripe as _stripe
+        _stripe.api_key = STRIPE_SECRET_KEY
+        invoices = _stripe.Invoice.list(customer=row["stripe_customer_id"], limit=10)
+        result = []
+        for inv in invoices.data:
+            result.append({
+                "id": inv.id,
+                "number": inv.number,
+                "amount_paid": inv.amount_paid / 100,
+                "currency": inv.currency.upper(),
+                "status": inv.status,
+                "created": inv.created,
+                "invoice_pdf": inv.invoice_pdf,
+                "period_start": inv.period_start,
+                "period_end": inv.period_end,
+                "description": inv.lines.data[0].description if inv.lines.data else "",
+            })
+        return {"invoices": result}
+    except Exception as e:
+        log.error("Invoices fetch failed: %s", e)
+        return {"invoices": []}
+
+
+# ── PATCH /api/account — Update user profile ────────────────────────
+
+@app.patch("/api/account")
+async def update_account(request: Request):
+    """Update user profile: full_name, firm_name, bar_number."""
+    user = _require_user(request)
+    body = await request.json()
+    allowed = {"full_name", "firm_name", "bar_number", "bar_state", "firm_address"}
+    updates = {k: v for k, v in body.items() if k in allowed and isinstance(v, str)}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update.")
+    conn = _get_conn()
+    try:
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        params = list(updates.values()) + [user["user_id"]]
+        conn.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", params)
+        conn.commit()
+        _audit_log(conn, user["user_id"], "profile_update", {"fields": list(updates.keys())})
+        row = conn.execute(
+            "SELECT full_name, firm_name, bar_number, bar_state, firm_address, email FROM users WHERE user_id = ?",
+            [user["user_id"]],
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+# ── Self-service API Key (user manages own key) ─────────────────────
+
+@app.post("/api/account/api-key")
+async def account_generate_api_key(request: Request):
+    """Generate or rotate API key for the authenticated user (self-service)."""
+    user = _require_user(request)
+    import secrets as _secrets
+    raw_key = "vf_" + _secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    now_str = datetime.now(timezone.utc).isoformat()
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET api_key_hash = ?, api_key_created_at = ? WHERE user_id = ?",
+            [key_hash, now_str, user["user_id"]],
+        )
+        conn.commit()
+        _audit_log(conn, user["user_id"], "api_key_generated", {"self_service": True})
+        return {"api_key": raw_key, "created_at": now_str, "note": "Store this key securely — it will not be shown again."}
+    finally:
+        conn.close()
+
+
+@app.get("/api/account/api-key-status")
+async def account_api_key_status(request: Request):
+    """Return whether the authenticated user has an API key configured."""
+    user = _require_user(request)
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT api_key_hash, api_key_created_at FROM users WHERE user_id = ?",
+            [user["user_id"]],
+        ).fetchone()
+        return {"has_key": bool(row and row["api_key_hash"]), "created_at": row["api_key_created_at"] if row else None}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/account/api-key")
+async def account_revoke_api_key(request: Request):
+    """Revoke the authenticated user's API key."""
+    user = _require_user(request)
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET api_key_hash = NULL, api_key_created_at = NULL WHERE user_id = ?",
+            [user["user_id"]],
+        )
+        conn.commit()
+        _audit_log(conn, user["user_id"], "api_key_revoked", {"self_service": True})
+        return {"status": "revoked"}
+    finally:
+        conn.close()
 
 
 # ── POST /api/webhook — Stripe webhook (belt + suspenders) ──────────
@@ -3833,7 +4504,7 @@ async def admin_system_stats(request: Request):
     stripe_publishable_configured = bool(STRIPE_PUBLISHABLE_KEY)
 
     return {
-        "db_path": VERIFUSE_DB_PATH,
+        "db_path": Path(VERIFUSE_DB_PATH).name,  # filename only, never full path
         "db_size_mb": round(db_size_bytes / 1024 / 1024, 2),
         "wal_pages": wal_pages,
         "total_leads": total_leads,
@@ -4061,6 +4732,7 @@ async def admin_county_health(request: Request):
         healthy = warning = critical = 0
         for r in quality_rows:
             county = r["county"] or ""
+            platform = r["platform_type"] or "unknown"
             total = r["total"] or 0
             gold = r["gold"] or 0
             silver = r["silver"] or 0
@@ -4088,34 +4760,47 @@ async def admin_county_health(request: Request):
             cir_delta = drift_info.get("delta") or 0
             parser_drift = cir_browser > 0 and abs(cir_delta) > max(2, cir_browser * 0.05)
 
+            # Counties with platform_type='unknown' are paper-only or unresearched —
+            # they have no automated scraper and should NOT count as CRITICAL.
+            is_unsupported = platform == "unknown"
+
             # Health score (0-100)
-            s = 0
-            if gold_pct >= 30:   s += 25
-            elif gold_pct >= 10: s += 15
-            elif gold_pct >= 1:  s += 5
-            s += min(25, int(sale_date_coverage_pct * 0.25))
-            s += min(20, int(extraction_rate_pct * 0.20))
-            s += min(20, int(evidence_pct * 0.20))
-            if last_run_age_days is not None and last_run_age_days <= 7:   s += 10
-            elif last_run_age_days is None or last_run_age_days > 30:       s -= 10
-            if total == 0: s = 0
-            health_score = max(0, min(100, s))
+            if is_unsupported:
+                # Unsupported counties get a neutral mid-range score so they
+                # don't drag down the CRITICAL count.
+                health_score = 50
+                alert = "NO_PLATFORM"
+            else:
+                s = 0
+                if gold_pct >= 30:   s += 25
+                elif gold_pct >= 10: s += 15
+                elif gold_pct >= 1:  s += 5
+                s += min(25, int(sale_date_coverage_pct * 0.25))
+                s += min(20, int(extraction_rate_pct * 0.20))
+                s += min(20, int(evidence_pct * 0.20))
+                if last_run_age_days is not None and last_run_age_days <= 7:   s += 10
+                elif last_run_age_days is None or last_run_age_days > 30:       s -= 10
+                if total == 0: s = 0
+                health_score = max(0, min(100, s))
 
-            # Alert (worst-first priority)
-            alert = None
-            if total == 0:                                      alert = "NO_DATA"
-            elif last_run_age_days and last_run_age_days > 30: alert = "STALE_30D"
-            elif last_run_age_days and last_run_age_days > 7:  alert = "STALE_7D"
-            elif parser_drift:                                  alert = "PARSER_DRIFT"
-            elif gold == 0 and silver == 0 and bronze > 0:    alert = "ALL_BRONZE"
+                # Alert (worst-first priority)
+                alert = None
+                if total == 0:                                      alert = "NO_DATA"
+                elif last_run_age_days and last_run_age_days > 30: alert = "STALE_30D"
+                elif last_run_age_days and last_run_age_days > 7:  alert = "STALE_7D"
+                elif parser_drift:                                  alert = "PARSER_DRIFT"
+                elif gold == 0 and silver == 0 and bronze > 0:    alert = "ALL_BRONZE"
 
-            if health_score >= 70:   healthy += 1
+            if is_unsupported:
+                # Count unsupported counties as warning, not critical
+                warning += 1
+            elif health_score >= 70:   healthy += 1
             elif health_score >= 40: warning += 1
             else:                    critical += 1
 
             counties_out.append({
                 "county": county,
-                "platform_type": r["platform_type"] or "unknown",
+                "platform_type": platform,
                 "total": total,
                 "gold": gold, "silver": silver, "bronze": bronze,
                 "gold_pct": gold_pct,
@@ -4279,6 +4964,39 @@ async def admin_audit_log(
         entries.append(entry)
 
     return {"total": total, "entries": entries, "limit": limit, "offset": offset}
+
+
+@app.get("/api/admin/override-log")
+async def admin_override_log_endpoint(
+    request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Paginated list of admin override actions only (separate from general audit log)."""
+    user = _require_user(request)
+    if not _effective_admin(user):
+        raise HTTPException(403, detail="Admin required.")
+    conn = _get_conn()
+    try:
+        offset = (page - 1) * limit
+        rows = conn.execute(
+            "SELECT * FROM admin_override_log "
+            "WHERE action IN ('admin_override_unlock', 'admin_force_unlock', 'admin_preview') "
+            "ORDER BY created_ts DESC LIMIT ? OFFSET ?",
+            [limit, offset]
+        ).fetchall()
+        total = conn.execute(
+            "SELECT COUNT(*) FROM admin_override_log "
+            "WHERE action IN ('admin_override_unlock', 'admin_force_unlock', 'admin_preview')"
+        ).fetchone()[0]
+        return {
+            "entries": [dict(r) for r in rows],
+            "total": total,
+            "page": page,
+            "pages": (total + limit - 1) // limit,
+        }
+    finally:
+        conn.close()
 
 
 @app.get("/api/admin/lead-audit/{lead_id}")
@@ -4617,12 +5335,13 @@ async def admin_adjust_credits(user_id: str, request: Request):
             raise HTTPException(status_code=404, detail="User not found.")
         now_iso = datetime.now(timezone.utc).isoformat()
         # Insert a non-expiring ledger entry for positive, or consume from balance for negative
+        import time as _t
         if delta > 0:
             conn.execute(
                 "INSERT INTO unlock_ledger_entries "
-                "(user_id, qty_total, qty_remaining, source, expires_at, created_at) "
-                "VALUES (?, ?, ?, 'admin_adjustment', NULL, ?)",
-                [user_id, delta, delta, now_iso],
+                "(id, user_id, qty_total, qty_remaining, source, expires_ts) "
+                "VALUES (?, ?, ?, ?, 'admin_adjustment', NULL)",
+                [str(uuid.uuid4()), user_id, delta, delta],
             )
         else:
             # Burn credits: reduce qty_remaining across entries
@@ -4630,7 +5349,7 @@ async def admin_adjust_credits(user_id: str, request: Request):
             entries = conn.execute(
                 "SELECT id, qty_remaining FROM unlock_ledger_entries "
                 "WHERE user_id = ? AND qty_remaining > 0 "
-                "ORDER BY CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END, expires_at, created_at",
+                "ORDER BY CASE WHEN expires_ts IS NULL THEN 1 ELSE 0 END, expires_ts, created_at",
                 [user_id],
             ).fetchall()
             for e in entries:
@@ -5277,8 +5996,14 @@ async def download_evidence_doc(doc_id: str, request: Request):
     user = _get_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required.")
-    if user.get("role") not in ("approved_attorney", "admin") and not _effective_admin(user, request):
-        raise HTTPException(status_code=403, detail="Attorney or admin role required.")
+    _is_verified_atty = (
+        user.get("role") in ("approved_attorney", "admin")
+        or user.get("attorney_status") in ("VERIFIED", "APPROVED")
+        or user.get("verified_attorney") == 1
+        or _effective_admin(user, request)
+    )
+    if not _is_verified_atty:
+        raise HTTPException(status_code=403, detail="Attorney verification required to access evidence documents.")
 
     conn = _get_conn()
     try:
@@ -5708,7 +6433,7 @@ async def get_coverage_map():
 # ── EPIC 2I: API Key Endpoints ───────────────────────────────────────
 
 @app.post("/api/admin/users/{user_id}/api-key")
-async def generate_api_key(user_id: int, request: Request):
+async def generate_api_key(user_id: str, request: Request):
     """Generate a new API key for a user. Admin only."""
     _require_admin_or_api_key(request)
     import secrets as _secrets
@@ -5736,7 +6461,7 @@ async def generate_api_key(user_id: int, request: Request):
 
 
 @app.get("/api/admin/users/{user_id}/api-key-status")
-async def get_api_key_status(user_id: int, request: Request):
+async def get_api_key_status(user_id: str, request: Request):
     """Return whether a user has an API key configured. Admin only."""
     _require_admin_or_api_key(request)
 
@@ -5757,7 +6482,7 @@ async def get_api_key_status(user_id: int, request: Request):
 
 
 @app.delete("/api/admin/users/{user_id}/api-key")
-async def revoke_api_key(user_id: int, request: Request):
+async def revoke_api_key(user_id: str, request: Request):
     """Revoke a user's API key. Admin only."""
     _require_admin_or_api_key(request)
 
@@ -5833,6 +6558,10 @@ async def create_my_case(body: AttorneyCaseCreate, request: Request):
     return await _run_in_db(_create)
 
 
+_VALID_CASE_STAGES = {"LEADS", "CONTACTED", "RETAINER_SIGNED", "FILED", "FUNDS_RELEASED"}
+_VALID_OUTCOME_TYPES = {"WON", "LOST", "SETTLED", "WITHDRAWN", "PENDING"}
+
+
 class AttorneyCasePatch(BaseModel):
     stage: Optional[str] = None
     notes: Optional[str] = None
@@ -5840,12 +6569,22 @@ class AttorneyCasePatch(BaseModel):
     outcome_notes: Optional[str] = None
     outcome_funds_cents: Optional[int] = None
 
+    def validate_stage(self) -> None:
+        if self.stage and self.stage.upper() not in _VALID_CASE_STAGES:
+            raise ValueError(f"Invalid stage. Must be one of: {sorted(_VALID_CASE_STAGES)}")
+        if self.outcome_type and self.outcome_type.upper() not in _VALID_OUTCOME_TYPES:
+            raise ValueError(f"Invalid outcome_type. Must be one of: {sorted(_VALID_OUTCOME_TYPES)}")
+
 
 @app.patch("/api/my-cases/{case_id}")
 async def update_my_case(case_id: str, body: AttorneyCasePatch, request: Request):
     """Update stage, notes, or outcome for an attorney case."""
     user = _require_user(request)
     user_id = user["user_id"]
+    try:
+        body.validate_stage()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     def _update(user_id=user_id, case_id=case_id):
         conn = _thread_conn()
@@ -6208,6 +6947,22 @@ _OPS_WHITELIST: dict[str, list[str]] = {
     "tax-lien-run":         ["tax-lien-run"],
     # Assessor
     "assessor-lookup":      ["assessor-lookup"],
+    # Owner enrichment
+    "enrich-owners":        ["enrich-owners"],
+    # Unclaimed property
+    "unclaimed-seed":           ["unclaimed-seed"],
+    "unclaimed-property-run":   ["unclaimed-property-run"],
+    "tax-deed-seed":            ["tax-deed-seed"],
+    # Promote pre-sale
+    "promote-presale":      ["promote-presale"],
+    # SOTA verification
+    "verify-sota":          ["verify-sota", "--all-gold"],
+    # Evidence audit
+    "evidence-audit":       ["evidence-audit"],
+    # Unclaimed crossref
+    "unclaimed-crossref":   ["unclaimed-crossref"],
+    # Coverage report
+    "coverage-report":      ["coverage-report"],
 }
 
 # ── Background job executor (separate from DB executor) ───────────────────────
@@ -6346,7 +7101,7 @@ async def ops_run(body: OpsRunRequest, request: Request):
     # Validate extra_args: only allow safe flag patterns
     safe_extras: list[str] = []
     for arg in body.extra_args[:8]:
-        if _re.match(r'^(--[a-z][a-z0-9-]{1,30}(=[a-zA-Z0-9._/-]{1,60})?)$|^([0-9]{1,6})$', arg):
+        if _re.match(r'^(--[a-z][a-z0-9-]{1,30}(=[a-zA-Z0-9._-]{1,60})?)$|^([0-9]{1,6})$', arg):
             safe_extras.append(arg)
         else:
             raise HTTPException(status_code=400, detail=f"Unsafe extra arg: {arg!r}")
@@ -6577,3 +7332,287 @@ async def ops_pipeline_summary(request: Request):
         }
 
     return await _run_in_db(_run)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ALTERNATIVE SURPLUS STREAMS
+# GET /api/unclaimed-property   — query unclaimed property leads
+# GET /api/tax-deed-surplus     — query tax deed surplus leads
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/unclaimed-property")
+@limiter.limit("60/minute")
+async def get_unclaimed_property(
+    request: Request,
+    county: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Query unclaimed property leads (C.R.S. § 38-13-101).
+
+    No auth required — surplus amounts are public record from CO Treasury.
+    Returns leads with surplus_stream='UNCLAIMED_PROPERTY'.
+    """
+    limit = min(limit, 200)
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            params: list = ["UNCLAIMED_PROPERTY"]
+            where_extra = ""
+            if county:
+                where_extra = " AND lower(county) = lower(?)"
+                params.append(county)
+            params.extend([limit, offset])
+
+            rows = conn.execute(
+                f"""SELECT id, county, case_number, data_grade, processing_status,
+                           overbid_amount, estimated_surplus, owner_name,
+                           ned_source, updated_at, ingestion_source
+                    FROM leads
+                    WHERE surplus_stream = ?{where_extra}
+                    ORDER BY estimated_surplus DESC
+                    LIMIT ? OFFSET ?""",
+                params,
+            ).fetchall()
+
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM leads WHERE surplus_stream = ?{where_extra}",
+                ["UNCLAIMED_PROPERTY"] + ([county] if county else []),
+            ).fetchone()[0]
+
+            by_county = {
+                r["county"]: r["cnt"]
+                for r in conn.execute(
+                    "SELECT county, COUNT(*) as cnt FROM leads WHERE surplus_stream='UNCLAIMED_PROPERTY'"
+                    " GROUP BY county ORDER BY cnt DESC"
+                ).fetchall()
+            }
+
+            total_value = conn.execute(
+                "SELECT COALESCE(SUM(estimated_surplus),0) FROM leads WHERE surplus_stream='UNCLAIMED_PROPERTY'"
+            ).fetchone()[0]
+
+        finally:
+            conn.close()
+
+        return {
+            "statute": "C.R.S. § 38-13-101",
+            "program": "Colorado Great Colorado Payback",
+            "total": total,
+            "total_value": total_value,
+            "by_county": by_county,
+            "leads": [
+                {
+                    "id": r["id"],
+                    "county": r["county"],
+                    "case_number": r["case_number"],
+                    "data_grade": r["data_grade"],
+                    "amount": r["estimated_surplus"],
+                    "owner": r["owner_name"],
+                    "description": r["ned_source"],
+                    "updated_at": r["updated_at"],
+                }
+                for r in rows
+            ],
+        }
+
+    return await _run_in_db(_run)
+
+
+@app.get("/api/tax-deed-surplus")
+@limiter.limit("60/minute")
+async def get_tax_deed_surplus(
+    request: Request,
+    county: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Query tax deed surplus leads (C.R.S. § 39-12-111).
+
+    No auth required — surplus amounts are public record from county treasurers.
+    Returns leads with surplus_stream='TAX_DEED_SURPLUS'.
+    """
+    limit = min(limit, 200)
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            params: list = ["TAX_DEED_SURPLUS"]
+            where_extra = ""
+            if county:
+                where_extra = " AND lower(county) = lower(?)"
+                params.append(county)
+            params.extend([limit, offset])
+
+            rows = conn.execute(
+                f"""SELECT id, county, case_number, data_grade, processing_status,
+                           overbid_amount, estimated_surplus, owner_name,
+                           sale_date, ned_source, updated_at
+                    FROM leads
+                    WHERE surplus_stream = ?{where_extra}
+                    ORDER BY estimated_surplus DESC
+                    LIMIT ? OFFSET ?""",
+                params,
+            ).fetchall()
+
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM leads WHERE surplus_stream = ?{where_extra}",
+                ["TAX_DEED_SURPLUS"] + ([county] if county else []),
+            ).fetchone()[0]
+
+            total_value = conn.execute(
+                "SELECT COALESCE(SUM(estimated_surplus),0) FROM leads WHERE surplus_stream='TAX_DEED_SURPLUS'"
+            ).fetchone()[0]
+
+            by_county = {
+                r["county"]: r["cnt"]
+                for r in conn.execute(
+                    "SELECT county, COUNT(*) as cnt FROM leads WHERE surplus_stream='TAX_DEED_SURPLUS'"
+                    " GROUP BY county ORDER BY cnt DESC"
+                ).fetchall()
+            }
+
+        finally:
+            conn.close()
+
+        return {
+            "statute": "C.R.S. § 39-12-111",
+            "total": total,
+            "total_value": total_value,
+            "by_county": by_county,
+            "leads": [
+                {
+                    "id": r["id"],
+                    "county": r["county"],
+                    "case_number": r["case_number"],
+                    "data_grade": r["data_grade"],
+                    "amount": r["estimated_surplus"],
+                    "owner": r["owner_name"],
+                    "sale_date": r["sale_date"],
+                    "description": r["ned_source"],
+                    "updated_at": r["updated_at"],
+                }
+                for r in rows
+            ],
+        }
+
+    return await _run_in_db(_run)
+
+
+# ── C2: Filing Outcome Intelligence ─────────────────────────────────
+
+@app.get("/api/intelligence/county-outcomes")
+async def county_outcomes(county: str = Query(None), request: Request = None):
+    """County-level filing outcome intelligence from case_outcomes table."""
+    conn = _get_conn()
+    try:
+        # Check if case_outcomes table exists
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='case_outcomes'"
+        ).fetchone()
+        if not has_table:
+            return {"county": county, "total_filed": 0, "win_rate": 0.0, "avg_recovery_days": None,
+                    "avg_amount_recovered": None, "message": "Outcome data collection not yet started"}
+        where = "WHERE county = ?" if county else ""
+        params = [county] if county else []
+        row = conn.execute(
+            f"SELECT COUNT(*) as total, "
+            f"SUM(CASE WHEN result='won' OR result='settled' THEN 1 ELSE 0 END) as wins, "
+            f"AVG(time_to_recovery_days) as avg_days, "
+            f"AVG(amount_recovered_cents) as avg_amount "
+            f"FROM case_outcomes {where}",
+            params
+        ).fetchone()
+        if not row or not row["total"]:
+            return {"county": county, "total_filed": 0, "win_rate": 0.0, "avg_recovery_days": None,
+                    "avg_amount_recovered": None}
+        total = row["total"] or 0
+        wins = row["wins"] or 0
+        return {
+            "county": county,
+            "total_filed": total,
+            "win_rate": round(wins / total, 2) if total > 0 else 0.0,
+            "avg_recovery_days": round(row["avg_days"]) if row["avg_days"] else None,
+            "avg_amount_recovered": round(row["avg_amount"] / 100) if row["avg_amount"] else None,
+            "top_outcome_factors": ["lien_density", "surplus_size", "claim_window"],
+        }
+    finally:
+        conn.close()
+
+
+# ── C3: Owner Contact Intelligence ──────────────────────────────────
+
+@app.get("/api/lead/{lead_id}/owner-contact")
+async def get_owner_contact(lead_id: str, request: Request):
+    """Get aggregated owner contact intel. Gated at partner+ tier."""
+    user = _require_user(request)
+    tier = user.get("tier", "associate")
+    if tier == "associate" and not _effective_admin(user):
+        raise HTTPException(403, detail="Owner contact intel requires Partner or Sovereign tier.")
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
+        if not row:
+            raise HTTPException(404, detail="Lead not found.")
+        row = dict(row)
+        # Try owner_contact_json column first
+        contact_json = row.get("owner_contact_json")
+        if contact_json:
+            try:
+                return json.loads(contact_json)
+            except Exception:
+                pass
+        # Fallback: build from available fields
+        return {
+            "mailing_address": row.get("property_address"),
+            "address_source": "property_record",
+            "address_confidence": "MEDIUM",
+            "forwarding_address": None,
+            "last_verified": row.get("updated_at", "")[:10] if row.get("updated_at") else None,
+            "note": "Full skip-trace requires assessor enrichment — run bin/vf enrich-owners",
+        }
+    finally:
+        conn.close()
+
+
+# ── C4: Market Velocity Intelligence ────────────────────────────────
+
+@app.get("/api/intelligence/market-velocity")
+async def market_velocity(request: Request):
+    """Real-time pipeline velocity metrics."""
+    conn = _get_conn()
+    try:
+        # Average days GOLD leads sit before first unlock
+        velocity_rows = conn.execute(
+            "SELECT l.county, "
+            "COUNT(DISTINCT l.id) as gold_count, "
+            "AVG(JULIANDAY('now') - JULIANDAY(l.updated_at)) as avg_days_gold "
+            "FROM leads l "
+            "WHERE l.data_grade = 'GOLD' "
+            "GROUP BY l.county "
+            "ORDER BY gold_count DESC "
+            "LIMIT 20"
+        ).fetchall()
+        county_metrics = []
+        for r in velocity_rows:
+            county_metrics.append({
+                "county": r["county"],
+                "gold_count": r["gold_count"],
+                "avg_days_as_gold": round(r["avg_days_gold"] or 0, 1),
+            })
+        # Most urgent county (highest urgency = most gold leads + shortest claim window)
+        urgency_row = conn.execute(
+            "SELECT county, COUNT(*) as cnt FROM leads "
+            "WHERE data_grade = 'GOLD' AND claim_deadline IS NOT NULL "
+            "AND claim_deadline > date('now') AND claim_deadline < date('now', '+90 days') "
+            "GROUP BY county ORDER BY cnt DESC LIMIT 1"
+        ).fetchone()
+        return {
+            "county_velocity": county_metrics,
+            "most_urgent_county": urgency_row["county"] if urgency_row else None,
+            "most_urgent_count": urgency_row["cnt"] if urgency_row else 0,
+        }
+    finally:
+        conn.close()

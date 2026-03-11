@@ -6,7 +6,7 @@ function RoiCalculator() {
   const [cases, setCases] = useState(5);
   const [surplus, setSurplus] = useState(50000);
   const monthly = Math.round(cases * surplus * 0.10);
-  const roi = monthly > 0 ? Math.round(monthly / 149) : 0;
+  const roi = monthly > 0 ? Math.round(monthly / 199) : 0;
   return (
     <div style={{
       background: "#0d1117", border: "1px solid #374151", borderRadius: 10,
@@ -45,7 +45,7 @@ function RoiCalculator() {
         </div>
         {roi > 0 && (
           <div style={{ marginTop: 8, fontSize: "0.85em", color: "#f59e0b", fontWeight: 600 }}>
-            VeriFuse Associate ($149/mo) = {roi}× ROI
+            VeriFuse Investigator ($199/mo) = {roi}× ROI
           </div>
         )}
       </div>
@@ -55,64 +55,48 @@ function RoiCalculator() {
 
 const TIERS = [
   {
-    name: "Starter Pack",
-    price: "$49",
-    credits: 10,
-    perCredit: "$4.90",
-    oneTime: true,
-    features: [
-      "10 lead unlocks (one-time)",
-      "All Colorado counties",
-      "Forensic evidence packet (source documents + audit trail)",
-      "C.R.S. § 38-38-111 restriction period tracking",
-      "Fail-closed GOLD certification (4-gate verified)",
-    ],
-  },
-  {
-    name: "Associate",
-    price: "$149",
+    name: "Investigator",
+    price: "$199",
     credits: 30,
-    perCredit: "$4.97",
+    perCredit: "$6.63",
     features: [
       "30 lead unlocks / month",
-      "All Colorado counties",
+      "All 18+ Colorado counties",
       "Dossier PDF downloads",
-      "Forensic evidence packet (source documents + audit trail)",
-      "C.R.S. § 38-38-111 restriction period tracking",
-      "Fail-closed GOLD certification (4-gate verified)",
-      "Single-session access",
+      "Deadline alert emails (30 / 14 / 7 day)",
+      "4-gate GOLD certification",
+      "Foreclosure + Tax Deed streams",
+      "1 seat",
     ],
   },
   {
     name: "Partner",
     price: "$399",
-    credits: 100,
-    perCredit: "$3.99",
+    credits: 75,
+    perCredit: "$5.32",
     popular: true,
     features: [
-      "100 lead unlocks / month",
-      "All Colorado counties",
+      "75 lead unlocks / month",
+      "All surplus streams (4 types)",
       "Priority new-lead alerts",
-      "Forensic evidence packet (source documents + audit trail)",
-      "C.R.S. § 38-38-111 restriction period tracking",
-      "Fail-closed GOLD certification (4-gate verified)",
-      "2 concurrent sessions",
+      "Multi-county coverage dashboard",
+      "Court Filing Packet access",
+      "2 seats",
     ],
   },
   {
-    name: "Sovereign",
+    name: "Enterprise",
     price: "$899",
-    credits: 350,
-    perCredit: "$2.57",
+    credits: 200,
+    perCredit: "$4.50",
     bestValue: true,
     features: [
-      "350 lead unlocks / month",
-      "Unlimited lead views",
-      "API access",
-      "Forensic evidence packet (source documents + audit trail)",
-      "C.R.S. § 38-38-111 restriction period tracking",
-      "Fail-closed GOLD certification (4-gate verified)",
-      "5 concurrent sessions + white-glove data",
+      "200 lead unlocks / month",
+      "Full API access",
+      "White-label dossier exports",
+      "All 4 surplus streams",
+      "Unclaimed Property pipeline",
+      "5 seats + priority support",
     ],
   },
 ];
@@ -151,6 +135,9 @@ export default function Landing() {
           </Link>
           <Link to="/preview" className="btn-outline">
             Preview the Vault
+          </Link>
+          <Link to="/pricing" className="btn-outline">
+            View Pricing
           </Link>
         </div>
 
@@ -240,12 +227,12 @@ export default function Landing() {
 
       {/* Pricing */}
       <section className="landing-section" id="pricing">
-        <h2>Founding Member Pricing</h2>
+        <h2>Transparent, Strategic Pricing</h2>
         <p style={{ textAlign: "center", color: "#94a3b8", marginBottom: "0.5rem" }}>
-          Lock in introductory rates. Cancel anytime. No contract.
+          Scale as you grow. No contracts, cancel anytime.
         </p>
         <p style={{ textAlign: "center", color: "#10b981", fontSize: "0.9rem", marginBottom: "2rem" }}>
-          First 10 Founding Attorneys get these rates locked in permanently.
+          4 surplus streams: Foreclosure Overbid · Tax Deed · Tax Lien · Unclaimed Property
         </p>
         <div className="pricing-grid">
           {TIERS.map((tier) => (
@@ -255,16 +242,19 @@ export default function Landing() {
             >
               {tier.popular && <div className="best-value">MOST POPULAR</div>}
               {tier.bestValue && <div className="best-value" style={{ background: "#0ea5e9" }}>BEST VALUE</div>}
+              {(tier as any).freeForever && <div className="best-value" style={{ background: "#374151" }}>FREE FOREVER</div>}
               <h3>{tier.name}</h3>
               <div className="price">
                 {tier.price}
-                <span>{(tier as any).oneTime ? " one-time" : "/mo"}</span>
+                <span>{(tier as any).freeForever ? "" : "/mo"}</span>
               </div>
-              <div style={{ color: "#10b981", fontSize: "0.85rem", marginBottom: "0.25rem" }}>
-                {tier.perCredit} per credit
-              </div>
+              {tier.perCredit && (
+                <div style={{ color: "#10b981", fontSize: "0.85rem", marginBottom: "0.25rem" }}>
+                  {tier.perCredit} per unlock
+                </div>
+              )}
               <div style={{ color: "#64748b", fontSize: "0.8rem", marginBottom: "1rem" }}>
-                {tier.credits} credits {(tier as any).oneTime ? "(pay-as-you-go)" : "included"}
+                {(tier as any).freeForever ? "No credit card required" : `${tier.credits} credits included`}
               </div>
               <ul>
                 {tier.features.map((f) => (
@@ -272,7 +262,7 @@ export default function Landing() {
                 ))}
               </ul>
               <Link to="/register" className={`plan-btn ${tier.popular ? "glow" : ""}`}>
-                GET STARTED
+                {(tier as any).freeForever ? "START FREE" : "GET STARTED"}
               </Link>
             </div>
           ))}
@@ -302,7 +292,9 @@ export default function Landing() {
           finder agreements after transfer to the State Treasurer under C.R.S. §
           38-13-1304; and the 10% maximum finder fee cap under C.R.S. §
           38-13-1304(1)(b)(IV) as amended by HB25-1224 (eff. June 4, 2025).
-          Use of this platform constitutes acceptance of our Terms of Service.
+          Use of this platform constitutes acceptance of our{" "}
+          <Link to="/terms" style={{ color: "#22c55e" }}>Terms of Service</Link> and{" "}
+          <Link to="/privacy" style={{ color: "#22c55e" }}>Privacy Policy</Link>.
         </p>
       </section>
 
@@ -311,8 +303,10 @@ export default function Landing() {
         <div>VERIFUSE <span className="text-green">// INTELLIGENCE</span></div>
         <div className="footer-links">
           <Link to="/preview">Preview Vault</Link>
-          <a href="#pricing">Pricing</a>
+          <Link to="/pricing">Pricing</Link>
           <Link to="/login">Login</Link>
+          <Link to="/terms">Terms</Link>
+          <Link to="/privacy">Privacy</Link>
         </div>
         <div className="footer-copy">
           © {new Date().getFullYear()} VeriFuse LLC. All rights reserved.

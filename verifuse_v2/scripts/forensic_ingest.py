@@ -78,18 +78,22 @@ def extract_text_from_pdf(filepath: Path) -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Try pdfplumber
+    # Try pdfplumber — pass filepath via env var to avoid injection via code string
     try:
+        script = textwrap.dedent("""\
+            import os, pdfplumber
+            path = os.environ["_VF_PDF_PATH"]
+            with pdfplumber.open(path) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text:
+                        print(text)
+        """)
+        import os as _os
         result = subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(f"""\
-                import pdfplumber
-                with pdfplumber.open("{filepath}") as pdf:
-                    for page in pdf.pages:
-                        text = page.extract_text()
-                        if text:
-                            print(text)
-            """)],
-            capture_output=True, text=True, timeout=60
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=60,
+            env={**_os.environ, "_VF_PDF_PATH": str(filepath)},
         )
         if result.returncode == 0 and len(result.stdout.strip()) > 50:
             return result.stdout

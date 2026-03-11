@@ -76,6 +76,7 @@ CREDIT_COSTS: dict[str, int] = {
     "filing_pack":       3,
     "premium_dossier":   5,
     "tax_lien_report":   2,
+    "rtf_unlock":        3,   # READY_TO_FILE leads cost 3 credits (premium tier)
 }
 
 # ── One-time credit packs ─────────────────────────────────────────────

@@ -499,6 +499,25 @@ def run_extraction(asset_id: str, conn=None) -> dict:
                 result["data_grade"] = written["data_grade"]
                 result["processing_status"] = written["processing_status"]
 
+        # ── 8. SOTA Triple-Verification (Gate 5+6) — runs after GOLD promotion ─
+        # Only run if GOLD and overbid > 0 (skip BRONZE/pre-sale cases to save API credits).
+        # Non-blocking: AI verification failure never downgrades a GOLD lead.
+        if result["data_grade"] == "GOLD" and overbid_at_sale > ZERO:
+            try:
+                from verifuse_v2.core.ai_verification_engine import VerificationEngine
+                sota_engine = VerificationEngine(use_docai=True, use_gemini=True, use_claude=False)
+                sota_result = sota_engine.verify_from_vault(asset_id, overbid_at_sale, conn)
+                result["pool_source"] = sota_result.pool_source
+                result["verification_tier"] = sota_result.tier
+                result["verification_confidence"] = sota_result.confidence
+                log.info(
+                    "[extract] %s — SOTA verification: %s (confidence=%.0f%%)",
+                    asset_id, sota_result.tier, sota_result.confidence * 100,
+                )
+            except Exception as sota_exc:
+                # Non-critical: log and continue — GOLD status preserved
+                log.warning("[extract] %s — SOTA verification skipped: %s", asset_id, sota_exc)
+
     except Exception as exc:
         log.exception("[extract] Extraction failed for %s: %s", asset_id, exc)
         result["error"] = str(exc)
@@ -613,6 +632,27 @@ def _write_results(
         county      = lead_meta["county"]
         case_number = lead_meta["case_number"]
 
+    # ── Stale-downgrade protection: never strip GOLD from a lead that was previously
+    #    validated (blocked=0 in surplus_math_audit) unless this run CONFIRMS overbid=0.
+    #    This prevents OCR cache misses from erasing prior confirmed promotions.
+    _existing_grade = None
+    _has_prior_gold_audit = False
+    try:
+        _eg = conn.execute(
+            "SELECT data_grade FROM leads WHERE county=? AND case_number=?",
+            [county, case_number]
+        ).fetchone()
+        _existing_grade = (_eg[0] if _eg else None)
+        # Check for a prior validated GOLD in audit trail
+        _prior_gold = conn.execute(
+            "SELECT COUNT(*) FROM surplus_math_audit "
+            "WHERE asset_id=? AND data_grade='GOLD' AND (promotion_blocked=0 OR promotion_blocked IS NULL)",
+            [asset_id]
+        ).fetchone()[0]
+        _has_prior_gold_audit = _prior_gold > 0
+    except Exception:
+        pass
+
     # ── Absolute GOLD gate (4 conditions, all required) ───────────────────────
     if data_grade == "GOLD":
         gate_fails = []
@@ -637,10 +677,28 @@ def _write_results(
         if snap_ct + pdf_ct == 0:
             gate_fails.append("no evidence")
         if gate_fails:
-            log.warning("[extract] %s — GOLD gate blocked: %s", asset_id, " | ".join(gate_fails))
-            data_grade = "BRONZE"
-            processing_status = "NEEDS_REVIEW"
-            notes = (notes + " | GOLD_GATE: " + "; ".join(gate_fails)).strip(" |")
+            # Stale-downgrade guard: if the ONLY failures are OCR/voucher misses (not a real $0
+            # confirmation) AND the lead was previously GOLD with a validated audit record,
+            # do NOT downgrade — preserve prior GOLD status.
+            _real_fails = [f for f in gate_fails if f != "total_debt not extracted" or amount_cents > 0]
+            _ocr_only_fail = (
+                set(gate_fails) <= {"total_debt not extracted"}
+                and amount_cents > 0
+                and _has_prior_gold_audit
+                and _existing_grade == "GOLD"
+            )
+            if _ocr_only_fail:
+                log.info(
+                    "[extract] %s — stale-downgrade BLOCKED: prior GOLD audit exists, "
+                    "OCR re-run missed voucher (gate_fails=%s). Preserving GOLD.",
+                    asset_id, gate_fails
+                )
+                data_grade = "GOLD"  # preserve
+            else:
+                log.warning("[extract] %s — GOLD gate blocked: %s", asset_id, " | ".join(gate_fails))
+                data_grade = "BRONZE"
+                processing_status = "NEEDS_REVIEW"
+                notes = (notes + " | GOLD_GATE: " + "; ".join(gate_fails)).strip(" |")
 
     # Build asset_registry SET clause
     ar_updates: list[str] = []
@@ -698,6 +756,20 @@ def _write_results(
         match_voucher = None
 
     promotion_blocked = 1 if (data_grade == "BRONZE" and processing_status == "NEEDS_REVIEW") else 0
+
+    # Derive and write pool_source to leads table based on validation path
+    if "pool_source" in leads_cols:
+        if data_grade == "GOLD":
+            if match_voucher == 1:
+                derived_pool_source = "VOUCHER"
+            elif match_html_math == 1:
+                derived_pool_source = "HTML_MATH"
+            else:
+                derived_pool_source = "UNVERIFIED"  # GOLD with no confirmed math path
+        else:
+            derived_pool_source = "UNVERIFIED"
+        leads_updates.append("pool_source = ?")
+        leads_params.append(derived_pool_source)
 
     # ── Single atomic transaction — all four tables land together or none do ───
     conn.execute("BEGIN IMMEDIATE")
@@ -769,7 +841,8 @@ def run_extraction_batch(county: str | None = None, limit: int = 500) -> dict:
     conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
     conn.row_factory = sqlite3.Row
     try:
-        filter_county = f"AND l.county = '{county}'" if county else ""
+        filter_county = "AND l.county = ?" if county else ""
+        q_params: list = ([county] if county else []) + [limit]
         rows = conn.execute(f"""
             SELECT DISTINCT l.id, l.county, l.case_number
             FROM leads l
@@ -781,7 +854,7 @@ def run_extraction_batch(county: str | None = None, limit: int = 500) -> dict:
                     WHERE hs.asset_id = 'FORECLOSURE:CO:' || UPPER(l.county) || ':' || l.case_number)
             )
             LIMIT ?
-        """, [limit]).fetchall()
+        """, q_params).fetchall()
     finally:
         conn.close()
 

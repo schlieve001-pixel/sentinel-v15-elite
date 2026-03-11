@@ -161,6 +161,59 @@ class OpportunityEngine:
         """0-100. STUB: returns 50 until turnover data is available."""
         return 50
 
+    def _lien_density_penalty(self, lead: dict) -> int:
+        """0 or -10. Penalty if multiple open senior liens detected."""
+        # Uses lien data from lead row if available (populated by title-stack lookup)
+        # Without real lien data, returns 0 (no penalty)
+        return 0  # Stub: real data requires DB access
+
+    def _time_pressure_bonus(self, lead: dict) -> int:
+        """0 or +15. Bonus if claim window < 90 days (urgency factor)."""
+        deadline = lead.get("claim_deadline")
+        if not deadline:
+            return 0
+        try:
+            dl = date.fromisoformat(str(deadline)[:10])
+            days_left = (dl - datetime.now(timezone.utc).date()).days
+            if 0 < days_left <= 90:
+                return 15
+        except (ValueError, TypeError):
+            pass
+        return 0
+
+    def _surplus_to_bid_ratio_bonus(self, lead: dict) -> int:
+        """0 or +20. Bonus if surplus > 20% of winning bid."""
+        surplus = _safe_float(lead.get("estimated_surplus")) or _safe_float(lead.get("surplus_amount")) or 0.0
+        bid = _safe_float(lead.get("winning_bid")) or 0.0
+        if bid > 0 and surplus / bid > 0.20:
+            return 20
+        return 0
+
+    def _evidence_completeness_bonus(self, lead: dict) -> int:
+        """0 or +10. Bonus if evidence_doc_count >= 3 (from lead row if available)."""
+        # evidence_doc_count may be injected into lead row by API layer
+        ev_count = lead.get("evidence_doc_count") or 0
+        try:
+            if int(ev_count) >= 3:
+                return 10
+        except (ValueError, TypeError):
+            pass
+        return 0
+
+    def _days_on_market_penalty(self, lead: dict) -> int:
+        """0 to -15. Penalty for leads that have been GOLD a long time (competition indicator)."""
+        # Uses data_age_days if available in lead row
+        age = lead.get("data_age_days")
+        if age is None:
+            return 0
+        try:
+            age_days = int(age)
+            # -5 for each 30 days as GOLD (max -15)
+            months = age_days // 30
+            return -min(15, months * 5)
+        except (ValueError, TypeError):
+            return 0
+
     # ── Confidence Score ────────────────────────────────────────────
 
     def _confidence(self, lead: dict) -> int:
@@ -252,17 +305,48 @@ class OpportunityEngine:
             + mv * self.OPP_WEIGHTS["market_velocity"]
         )))
 
+        # Apply bonus/penalty factors (these extend the base 0-100 score)
+        opportunity_raw = opportunity  # save base score before adjustments
+        opportunity += self._time_pressure_bonus(lead)
+        opportunity += self._surplus_to_bid_ratio_bonus(lead)
+        opportunity += self._evidence_completeness_bonus(lead)
+        opportunity += self._lien_density_penalty(lead)
+        opportunity += self._days_on_market_penalty(lead)
+        opportunity = min(100, max(0, opportunity))
+
+        # Letter grade
+        if opportunity >= 90:
+            grade = "A+"
+        elif opportunity >= 80:
+            grade = "A"
+        elif opportunity >= 70:
+            grade = "B"
+        elif opportunity >= 60:
+            grade = "C"
+        else:
+            grade = "D"
+
         confidence = self._confidence(lead)
         velocity = self._velocity(lead)
         cost = self.get_credit_cost(opportunity)
 
         return {
             "opportunity": opportunity,
+            "opportunity_base": opportunity_raw,
+            "grade": grade,
             "confidence": confidence,
             "velocity": velocity,
             "pricing_tier": cost,
             "credit_cost": cost,
             "algo_version": self.algo_version,
+            "factors": [
+                {"name": "surplus_strength", "impact": ss, "direction": "positive"},
+                {"name": "recency", "impact": rc, "direction": "positive"},
+                {"name": "time_pressure", "impact": self._time_pressure_bonus(lead), "direction": "positive"},
+                {"name": "surplus_to_bid_ratio", "impact": self._surplus_to_bid_ratio_bonus(lead), "direction": "positive"},
+                {"name": "evidence_completeness", "impact": self._evidence_completeness_bonus(lead), "direction": "positive"},
+                {"name": "days_on_market_penalty", "impact": self._days_on_market_penalty(lead), "direction": "negative"},
+            ],
         }
 
     # ── Dynamic Pricing ─────────────────────────────────────────────

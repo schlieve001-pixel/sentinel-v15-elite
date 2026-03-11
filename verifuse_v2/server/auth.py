@@ -26,9 +26,22 @@ log = logging.getLogger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────
 
-JWT_SECRET = os.getenv("VERIFUSE_JWT_SECRET", "vf2-dev-secret-change-in-production")
+_JWT_DEFAULT = "vf2-dev-secret-change-in-production"
+JWT_SECRET = os.getenv("VERIFUSE_JWT_SECRET", _JWT_DEFAULT)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 72  # 3-day tokens
+
+# Guard: reject weak default in production (non-dev environments)
+_IS_PROD = os.getenv("VERIFUSE_ENV", "").lower() == "production"
+if JWT_SECRET == _JWT_DEFAULT and _IS_PROD:
+    raise RuntimeError(
+        "SECURITY: VERIFUSE_JWT_SECRET not set — refusing to start in production with default secret."
+    )
+if JWT_SECRET == _JWT_DEFAULT:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "SECURITY WARNING: Using default JWT secret. Set VERIFUSE_JWT_SECRET before going to production."
+    )
 
 
 # ── Password hashing ────────────────────────────────────────────────
@@ -43,13 +56,14 @@ def verify_password(password: str, hashed: str) -> bool:
 
 # ── JWT tokens ───────────────────────────────────────────────────────
 
-def create_token(user_id: str, email: str, tier: str, role: str = "viewer", is_admin: bool = False) -> str:
+def create_token(user_id: str, email: str, tier: str, role: str = "viewer", is_admin: bool = False, token_version: int = 0) -> str:
     payload = {
         "sub": user_id,
         "email": email,
         "tier": tier,
         "role": role,
         "is_admin": is_admin,
+        "tv": token_version,  # token_version — increment to revoke all prior tokens
         "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
@@ -84,6 +98,12 @@ def get_current_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="User not found.")
     if not user["is_active"]:
         raise HTTPException(status_code=403, detail="Account deactivated.")
+
+    # Token version check — revokes tokens issued before a password change or explicit logout
+    token_tv = payload.get("tv", 0)
+    db_tv = user.get("token_version") or 0
+    if token_tv < db_tv:
+        raise HTTPException(status_code=401, detail="Token revoked. Please log in again.")
 
     return user
 
@@ -261,6 +281,7 @@ def login_user(email: str, password: str) -> tuple[dict, str]:
         user["user_id"], email, user["tier"],
         role=user.get("role", "admin" if user.get("is_admin") else "viewer"),
         is_admin=bool(user.get("is_admin", 0)),
+        token_version=user.get("token_version") or 0,
     )
     log.info("User logged in: %s", email)
     return user, token

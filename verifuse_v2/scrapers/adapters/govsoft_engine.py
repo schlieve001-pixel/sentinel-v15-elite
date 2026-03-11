@@ -480,6 +480,10 @@ class GovSoftEngine:
                     self._selectors = json.loads(cfg_row["selectors_json"])
                 except (json.JSONDecodeError, TypeError):
                     log.warning("Could not parse selectors_json for county=%s", county)
+            # SSL bypass: set ignore_ssl=true in selectors_json for counties with expired certs
+            self.ignore_ssl: bool = bool(self._selectors.get("ignore_ssl", False))
+            # Referer bypass: set referer_url in selectors_json for counties that 403 without referrer
+            self.referer_url: str | None = self._selectors.get("referer_url")
         else:
             # Fallback: load from county_profiles
             row = self._conn.execute(
@@ -502,6 +506,8 @@ class GovSoftEngine:
                     self._selectors = json.loads(row["selectors_json"])
                 except (json.JSONDecodeError, TypeError):
                     log.warning("Could not parse selectors_json for county=%s", county)
+            self.ignore_ssl: bool = bool(self._selectors.get("ignore_ssl", False))
+            self.referer_url: str | None = self._selectors.get("referer_url")
 
         # PRAGMA-verify leads columns used in upsert
         self._leads_cols = {
@@ -954,13 +960,17 @@ class GovSoftEngine:
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=HEADLESS)
-            context = await browser.new_context(
-                user_agent=(
+            _ctx_kwargs: dict = {
+                "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
-                )
-            )
+                ),
+                "ignore_https_errors": self.ignore_ssl,
+            }
+            if self.referer_url:
+                _ctx_kwargs["extra_http_headers"] = {"Referer": self.referer_url}
+            context = await browser.new_context(**_ctx_kwargs)
             try:
                 page = await context.new_page()
                 search_url = f"{self.base_url.rstrip('/')}{self.search_path}"
@@ -1308,7 +1318,10 @@ class GovSoftEngine:
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=HEADLESS)
-            context = await browser.new_context()
+            _ctx_kw1 = {"ignore_https_errors": self.ignore_ssl}
+            if self.referer_url:
+                _ctx_kw1["extra_http_headers"] = {"Referer": self.referer_url}
+            context = await browser.new_context(**_ctx_kw1)
             try:
                 page = await context.new_page()
                 search_url = f"{self.base_url.rstrip('/')}{self.search_path}"
@@ -1431,13 +1444,9 @@ class GovSoftEngine:
             batch = case_numbers[batch_start : batch_start + batch_size]
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(headless=HEADLESS)
-                context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    )
-                )
+                _ctx_kw = {"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "ignore_https_errors": self.ignore_ssl}
+                if self.referer_url: _ctx_kw["extra_http_headers"] = {"Referer": self.referer_url}
+                context = await browser.new_context(**_ctx_kw)
                 try:
                     page = await context.new_page()
                     search_url = f"{self.base_url.rstrip('/')}{self.search_path}"
@@ -1814,13 +1823,17 @@ class GovSoftEngine:
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=HEADLESS)
-            context = await browser.new_context(
-                user_agent=(
+            _ctx_kw_ps = {
+                "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
-                )
-            )
+                ),
+                "ignore_https_errors": self.ignore_ssl,
+            }
+            if self.referer_url:
+                _ctx_kw_ps["extra_http_headers"] = {"Referer": self.referer_url}
+            context = await browser.new_context(**_ctx_kw_ps)
             try:
                 page = await context.new_page()
                 search_url = f"{self.base_url.rstrip('/')}{self.search_path}"
@@ -1986,13 +1999,9 @@ class GovSoftEngine:
             batch = collected_case_numbers[batch_start: batch_start + BATCH]
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(headless=HEADLESS)
-                context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    )
-                )
+                _ctx_kw = {"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "ignore_https_errors": self.ignore_ssl}
+                if self.referer_url: _ctx_kw["extra_http_headers"] = {"Referer": self.referer_url}
+                context = await browser.new_context(**_ctx_kw)
                 try:
                     page2 = await context.new_page()
 
@@ -2099,7 +2108,10 @@ class GovSoftEngine:
             SELECT l.id, l.case_number
             FROM leads l
             WHERE l.county = ?
-              AND l.data_grade = 'BRONZE'
+              AND (
+                  l.data_grade = 'BRONZE'
+                  OR (l.data_grade = 'GOLD' AND (l.pool_source = 'UNVERIFIED' OR l.pool_source IS NULL))
+              )
               AND NOT EXISTS (
                   SELECT 1 FROM html_snapshots hs
                   WHERE hs.asset_id = 'FORECLOSURE:CO:' || UPPER(l.county) || ':' || l.case_number
@@ -2144,13 +2156,9 @@ class GovSoftEngine:
             batch = case_numbers[batch_start: batch_start + BATCH]
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(headless=HEADLESS)
-                context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    )
-                )
+                _ctx_kw = {"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "ignore_https_errors": self.ignore_ssl}
+                if self.referer_url: _ctx_kw["extra_http_headers"] = {"Referer": self.referer_url}
+                context = await browser.new_context(**_ctx_kw)
                 try:
                     page = await context.new_page()
                     search_url = f"{self.base_url.rstrip('/')}{self.search_path}"

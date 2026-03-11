@@ -78,6 +78,42 @@ ASSESSOR_CONFIGS: dict[str, dict] = {
         "owner_selector":         ".owner-name, td:nth-child(2)",
         "mailing_selector":       ".mailing-address, td:nth-child(4)",
     },
+    "el_paso": {
+        "search_url": "https://assessor.elpasoco.com/Search/Address",
+        "search_by": "address",
+        "address_input_selector": "input[name*='address'], input[id*='Address'], input[placeholder*='ddress']",
+        "search_btn_selector":    "button[type='submit'], input[type='submit'], button:has-text('Search')",
+        "result_row_selector":    "table tr:not(:first-child), .result-row, .search-result",
+        "owner_selector":         "td:nth-child(2), .owner-name, [class*='owner']",
+        "mailing_selector":       "td:nth-child(5), td:nth-child(4), .mailing-address",
+    },
+    "boulder": {
+        "search_url": "https://assessor.bouldercounty.org/residential/search",
+        "search_by": "address",
+        "address_input_selector": "input[name*='address'], input[id*='address'], input[placeholder*='Address']",
+        "search_btn_selector":    "button[type='submit'], input[type='submit']",
+        "result_row_selector":    "table tr:not(:first-child), .property-row, .search-result-item",
+        "owner_selector":         "td:nth-child(2), .owner-name",
+        "mailing_selector":       "td:nth-child(4), td:nth-child(5), .mailing-address",
+    },
+    "douglas": {
+        "search_url": "https://assessor.douglas.co.us/assessor/search",
+        "search_by": "address",
+        "address_input_selector": "input[name*='address'], input[id*='address'], input[placeholder*='ddress']",
+        "search_btn_selector":    "button[type='submit'], input[type='submit']",
+        "result_row_selector":    "table tr:not(:first-child), .search-result-row",
+        "owner_selector":         "td:nth-child(2), .owner, [class*='owner']",
+        "mailing_selector":       "td:nth-child(5), td:nth-child(4), .mailing",
+    },
+    "weld": {
+        "search_url": "https://www.weldgov.com/departments/assessor/search",
+        "search_by": "parcel",
+        "address_input_selector": "input[name*='parcel'], input[id*='parcel'], input[name*='address'], input[placeholder*='arcel']",
+        "search_btn_selector":    "button[type='submit'], input[type='submit']",
+        "result_row_selector":    "table tr:not(:first-child), .result-row",
+        "owner_selector":         "td:nth-child(2), .owner-name",
+        "mailing_selector":       "td:nth-child(4), td:nth-child(5), .mailing-address",
+    },
 }
 
 # ── Address normalizer ─────────────────────────────────────────────────────────
@@ -326,7 +362,8 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="VeriFuse Assessor Owner Lookup")
-    parser.add_argument("--county", help="County slug (jefferson, arapahoe, adams, denver)")
+    parser.add_argument("--county", help="County slug (jefferson, arapahoe, adams, denver, el_paso, boulder, douglas, weld)")
+    parser.add_argument("--all-counties", action="store_true", help="Run all supported counties")
     parser.add_argument("--limit", type=int, default=10, help="Max assets to process")
     parser.add_argument("--asset-id", help="Process a single asset ID")
     args = parser.parse_args()
@@ -348,6 +385,16 @@ if __name__ == "__main__":
                 )
             )
             print(json.dumps(result or {"not_found": True}, indent=2))
+    elif getattr(args, "all_counties", False):
+        # Run all supported counties sequentially
+        totals = {"total_candidates": 0, "addresses_found": 0, "not_found": 0, "skipped_unsupported": 0}
+        for county in sorted(ASSESSOR_CONFIGS.keys()):
+            print(f"[assessor] Running county={county} limit={args.limit} ...")
+            result = asyncio.run(run_assessor_queue(county=county, limit=args.limit))
+            for k in totals:
+                totals[k] += result.get(k, 0)
+            print(json.dumps(result, indent=2))
+        print(f"\n[assessor] All-counties totals: {json.dumps(totals)}")
     else:
         result = asyncio.run(
             run_assessor_queue(county=args.county, limit=args.limit)

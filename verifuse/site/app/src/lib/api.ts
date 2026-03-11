@@ -21,16 +21,19 @@ async function request<T>(path: string, opts: RequestInit = {}, signal?: AbortSi
       ...(opts.headers || {}),
     },
   });
-  if (res.status === 401) {
-    localStorage.removeItem("vf_token");
-    localStorage.removeItem("vf_simulate");
-    localStorage.removeItem("vf_is_admin");
-    window.location.replace("/login");
-    throw new ApiError(401, "Session expired");
-  }
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new ApiError(res.status, body.detail || "Request failed");
+    const body = await res.json().catch(() => ({}));
+    // Support both legacy {"detail":"..."} and current {"error":{"message":"..."}} envelopes
+    const message = body.detail || body.error?.message || res.statusText || "Request failed";
+    if (res.status === 401 && localStorage.getItem("vf_token")) {
+      // Only force-logout on 401 when user was previously authenticated (token expired/revoked)
+      // — NOT during login/register where 401 just means wrong credentials
+      localStorage.removeItem("vf_token");
+      localStorage.removeItem("vf_simulate");
+      localStorage.removeItem("vf_is_admin");
+      window.location.replace("/login");
+    }
+    throw new ApiError(res.status, message);
   }
   return res.json();
 }
@@ -295,6 +298,7 @@ export function getLeads(params?: {
   sort?: string;
   actionable_only?: boolean;
   verification_state?: string;
+  surplus_stream?: string;
 }, signal?: AbortSignal): Promise<LeadsResponse> {
   const qs = new URLSearchParams();
   if (params?.county) qs.set("county", params.county);
@@ -309,8 +313,17 @@ export function getLeads(params?: {
   if (params?.sort) qs.set("sort", params.sort);
   if (params?.actionable_only) qs.set("actionable_only", "1");
   if (params?.verification_state) qs.set("verification_state", params.verification_state);
+  if (params?.surplus_stream) qs.set("surplus_stream", params.surplus_stream);
   const q = qs.toString();
   return request(`/api/leads${q ? `?${q}` : ""}`, {}, signal);
+}
+
+export function getUnclaimedLeads(params?: { county?: string; limit?: number; offset?: number }, signal?: AbortSignal): Promise<LeadsResponse> {
+  return getLeads({ ...params, surplus_stream: "UNCLAIMED_PROPERTY" }, signal);
+}
+
+export function getTaxDeedLeads(params?: { county?: string; limit?: number; offset?: number }, signal?: AbortSignal): Promise<LeadsResponse> {
+  return getLeads({ ...params, surplus_stream: "TAX_DEED_SURPLUS" }, signal);
 }
 
 export function getLeadDetail(assetId: string, signal?: AbortSignal): Promise<Lead> {
@@ -458,11 +471,57 @@ export function getAttorneyReadyLeads(params?: {
 
 // ── Billing ───────────────────────────────────────────────────────
 
-export function createCheckout(tier: string): Promise<{ checkout_url: string }> {
+export function createCheckout(tier: string, billing_period = "monthly"): Promise<{ checkout_url: string }> {
   return request("/api/billing/checkout", {
     method: "POST",
-    body: JSON.stringify({ tier }),
+    body: JSON.stringify({ tier, billing_period }),
   });
+}
+
+export interface BillingStatus {
+  tier: string;
+  credits_remaining: number;
+  monthly_grant: number;
+  stripe_customer_id: string | null;
+  subscription_status: string | null;
+  current_period_end: string | null;
+  founders_pricing: boolean;
+  stripe_configured: boolean;
+}
+
+export function getBillingStatus(): Promise<BillingStatus> {
+  return request("/api/billing/status");
+}
+
+export function getBillingPortalUrl(): Promise<{ portal_url: string }> {
+  return request("/api/billing/portal", { method: "POST" });
+}
+
+export interface Invoice {
+  id: string;
+  number: string | null;
+  amount_paid: number;
+  currency: string;
+  status: string;
+  created: number;
+  invoice_pdf: string | null;
+  period_start: number;
+  period_end: number;
+  description: string;
+}
+
+export function getInvoices(): Promise<{ invoices: Invoice[] }> {
+  return request("/api/billing/invoices");
+}
+
+export function updateAccount(data: {
+  full_name?: string;
+  firm_name?: string;
+  bar_number?: string;
+  bar_state?: string;
+  firm_address?: string;
+}): Promise<{ full_name: string; firm_name: string; email: string; bar_number: string }> {
+  return request("/api/account", { method: "PATCH", body: JSON.stringify(data) });
 }
 
 // ── Gate 7: Evidence documents (attorney-gated) ───────────────────
@@ -653,16 +712,30 @@ export function releaseTerritory(id: number): Promise<{ status: string }> {
   return request(`/api/territories/${id}`, { method: "DELETE" });
 }
 
-// ── Admin API Keys ────────────────────────────────────────────────
+// ── Self-service API Keys (user manages own key) ──────────────────
 
-export function generateApiKey(userId: number): Promise<{ api_key: string; created_at: string; note: string }> {
+export function generateApiKey(_userId?: string): Promise<{ api_key: string; created_at: string; note: string }> {
+  return request("/api/account/api-key", { method: "POST" });
+}
+
+export function getApiKeyStatus(_userId?: string): Promise<{ has_key: boolean; created_at: string | null }> {
+  return request("/api/account/api-key-status");
+}
+
+export function revokeApiKey(_userId?: string): Promise<{ status: string }> {
+  return request("/api/account/api-key", { method: "DELETE" });
+}
+
+// ── Admin API Keys (admin managing other users) ────────────────────
+
+export function adminGenerateApiKey(userId: string): Promise<{ api_key: string; created_at: string; note: string }> {
   return request(`/api/admin/users/${userId}/api-key`, { method: "POST" });
 }
 
-export function getApiKeyStatus(userId: number): Promise<{ has_key: boolean; created_at: string | null }> {
+export function adminGetApiKeyStatus(userId: string): Promise<{ has_key: boolean; created_at: string | null }> {
   return request(`/api/admin/users/${userId}/api-key-status`);
 }
 
-export function revokeApiKey(userId: number): Promise<{ status: string }> {
+export function adminRevokeApiKey(userId: string): Promise<{ status: string }> {
   return request(`/api/admin/users/${userId}/api-key`, { method: "DELETE" });
 }

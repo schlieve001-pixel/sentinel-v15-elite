@@ -8,59 +8,60 @@ import { API_BASE } from "../lib/api";
 const TIERS = [
   {
     key: "associate",
-    name: "Associate",
-    price: 149,
+    name: "Investigator",
+    price: 199,
     credits: 30,
     rollover: "30-day rollover (max 45 banked)",
     sessions: 1,
     features: [
-      "30 credits/month",
+      "30 unlocks/month",
       "Foreclosure surplus (§ 38-38-111)",
-      "All data grades: GOLD, SILVER, BRONZE",
+      "Tax Deed surplus (§ 39-12-111)",
+      "GOLD/SILVER/BRONZE grades",
       "Lead unlock (1 credit each)",
-      "Evidence document access",
-      "1 concurrent session",
-      "30-day credit rollover",
+      "Evidence document + dossier access",
+      "Deadline alert emails",
+      "1 seat · 30-day credit rollover",
     ],
-    cta: "Start Associate",
+    cta: "Start Investigator",
     highlight: false,
   },
   {
     key: "partner",
     name: "Partner",
     price: 399,
-    credits: 100,
-    rollover: "60-day rollover (max 150 banked)",
+    credits: 75,
+    rollover: "60-day rollover (max 113 banked)",
     sessions: 2,
     features: [
-      "100 credits/month",
-      "All 5 surplus streams",
+      "75 unlocks/month",
+      "All 4 surplus streams",
+      "Foreclosure · Tax Deed · Tax Lien · Unclaimed Property",
+      "Court Filing Packet (3 credits/case)",
       "Bulk CSV export",
-      "Filing Pack (3 credits/case)",
-      "2 concurrent sessions",
+      "2 seats · priority data updates",
       "60-day credit rollover",
-      "Priority data updates",
     ],
     cta: "Start Partner",
     highlight: true,
   },
   {
     key: "sovereign",
-    name: "Sovereign",
+    name: "Enterprise",
     price: 899,
-    credits: 250,
-    rollover: "90-day rollover (max 375 banked)",
+    credits: 200,
+    rollover: "90-day rollover (max 300 banked)",
     sessions: 5,
     features: [
-      "250 credits/month",
-      "All streams + estate cases",
-      "Premium Dossier + heir letters",
-      "API access",
-      "County coverage reports",
-      "5 concurrent sessions",
+      "200 unlocks/month",
+      "All 4 surplus streams + estate cases",
+      "Full REST API access",
+      "White-label dossier exports",
+      "Skip Trace included (10/mo)",
+      "5 seats · county coverage reports",
       "90-day credit rollover",
     ],
-    cta: "Start Sovereign",
+    cta: "Start Enterprise",
     highlight: false,
   },
 ];
@@ -68,11 +69,11 @@ const TIERS = [
 const ONE_TIME = [
   {
     key: "starter",
-    name: "Starter Pack",
+    name: "Lead Unlock Bundle",
     price: 49,
     credits: 10,
     expiry: "90 days",
-    description: "10 credits — no subscription required. Ideal for a single investigation.",
+    description: "10 lead unlocks — no subscription required. Ideal for a single investigation or trial run.",
     endpoint: "/api/billing/starter",
   },
   {
@@ -81,16 +82,25 @@ const ONE_TIME = [
     price: 99,
     credits: 25,
     expiry: "90 days",
-    description: "25 credits — deep research without a monthly commitment.",
+    description: "25 unlocks — deep research across multiple cases without a monthly commitment.",
+    endpoint: "/api/billing/one-time",
+  },
+  {
+    key: "skip_trace",
+    name: "Skip Trace",
+    price: 29,
+    credits: 1,
+    expiry: "per record",
+    description: "Current owner address + phone lookup via multi-source cross-reference. One record per purchase.",
     endpoint: "/api/billing/one-time",
   },
   {
     key: "filing_pack",
-    name: "Filing Pack",
-    price: 49,
+    name: "Court Filing Packet",
+    price: 149,
     credits: 3,
     expiry: "per case",
-    description: "Motion template + owner mailing address + lien summary + evidence bundle.",
+    description: "Complete court-ready document set: Motion for Surplus Release + Notice to Lienholders + Affidavit of Ownership + Proof of Claim.",
     endpoint: "/api/billing/one-time",
   },
   {
@@ -99,33 +109,39 @@ const ONE_TIME = [
     price: 79,
     credits: 5,
     expiry: "per case",
-    description: "Filing Pack + heir notification letter template (§ 38-38-111 compliant).",
+    description: "Filing Packet + heir notification letter template + title stack analysis (§ 38-38-111 compliant).",
     endpoint: "/api/billing/one-time",
   },
 ];
 
 const FEATURE_MATRIX = [
-  { feature: "Credits per month",       associate: "30",   partner: "100",   sovereign: "250" },
-  { feature: "GOLD leads access",       associate: "✓",    partner: "✓",     sovereign: "✓" },
-  { feature: "PRE-SALE pipeline",       associate: "✓",    partner: "✓",     sovereign: "✓" },
-  { feature: "Overbid calculations",    associate: "✓",    partner: "✓",     sovereign: "✓" },
-  { feature: "Evidence documents",      associate: "✓",    partner: "✓",     sovereign: "✓" },
-  { feature: "Rule 7.3 letter gen",     associate: "✓",    partner: "✓",     sovereign: "✓" },
-  { feature: "Bulk CSV export",         associate: "—",    partner: "✓",     sovereign: "✓" },
-  { feature: "Case packet download",    associate: "—",    partner: "✓",     sovereign: "✓" },
-  { feature: "Priority data updates",  associate: "—",    partner: "✓",     sovereign: "✓" },
-  { feature: "All 5 surplus streams",  associate: "—",    partner: "✓",     sovereign: "✓" },
-  { feature: "API access",             associate: "—",    partner: "—",     sovereign: "✓" },
-  { feature: "Heir notification letters", associate: "—", partner: "—",     sovereign: "✓" },
-  { feature: "County coverage reports", associate: "—",   partner: "—",     sovereign: "✓" },
-  { feature: "Premium Dossier",        associate: "—",    partner: "—",     sovereign: "✓" },
+  { feature: "Unlocks per month",         associate: "30",    partner: "75",    sovereign: "200" },
+  { feature: "GOLD leads access",         associate: "✓",     partner: "✓",     sovereign: "✓" },
+  { feature: "PRE-SALE pipeline",         associate: "✓",     partner: "✓",     sovereign: "✓" },
+  { feature: "Foreclosure overbid",       associate: "✓",     partner: "✓",     sovereign: "✓" },
+  { feature: "Tax Deed surplus",          associate: "✓",     partner: "✓",     sovereign: "✓" },
+  { feature: "Tax Lien surplus",          associate: "—",     partner: "✓",     sovereign: "✓" },
+  { feature: "Unclaimed Property",        associate: "—",     partner: "✓",     sovereign: "✓" },
+  { feature: "Evidence documents",        associate: "✓",     partner: "✓",     sovereign: "✓" },
+  { feature: "Deadline alert emails",     associate: "✓",     partner: "✓",     sovereign: "✓" },
+  { feature: "Court Filing Packet",       associate: "+$149", partner: "✓",     sovereign: "✓" },
+  { feature: "Bulk CSV export",           associate: "—",     partner: "✓",     sovereign: "✓" },
+  { feature: "Priority data updates",     associate: "—",     partner: "✓",     sovereign: "✓" },
+  { feature: "Skip Trace (per record)",   associate: "+$29",  partner: "+$29",  sovereign: "10/mo" },
+  { feature: "Full REST API access",      associate: "—",     partner: "—",     sovereign: "✓" },
+  { feature: "White-label dossiers",      associate: "—",     partner: "—",     sovereign: "✓" },
+  { feature: "Heir notification letters", associate: "—",     partner: "—",     sovereign: "✓" },
+  { feature: "County coverage reports",   associate: "—",     partner: "—",     sovereign: "✓" },
+  { feature: "Seats",                     associate: "1",     partner: "2",     sovereign: "5" },
 ];
 
 const CREDIT_COSTS = [
-  { action: "Lead Unlock", credits: 1, description: "View full case details, owner name, property address" },
-  { action: "Filing Pack", credits: 3, description: "Motion template + owner address + lien summary + evidence PDF" },
-  { action: "Premium Dossier", credits: 5, description: "Filing Pack + heir notification letter template" },
-  { action: "Tax Lien Report", credits: 2, description: "Tax lien surplus feed for 1 county" },
+  { action: "Lead Unlock", credits: 1, description: "Full case details: owner name, property address, evidence documents, surplus math" },
+  { action: "Tax Deed / Unclaimed", credits: 1, description: "Unlock any surplus stream lead (same rate as foreclosure overbid)" },
+  { action: "Court Filing Packet", credits: 3, description: "Motion for Surplus Release + Notice to Lienholders + Affidavit + Proof of Claim" },
+  { action: "Tax Lien Report", credits: 2, description: "Tax lien surplus feed for 1 county (§ 39-11-151)" },
+  { action: "Skip Trace", credits: 1, description: "Current owner address + phone — multi-source cross-reference ($29 or 1 credit)" },
+  { action: "Premium Dossier", credits: 5, description: "Court Filing Packet + title stack + heir notification letter template" },
 ];
 
 function authHeaders(): Record<string, string> {
@@ -137,9 +153,9 @@ function authHeaders(): Record<string, string> {
 
 // Annual pricing: ~10% discount vs monthly (2 months free)
 const ANNUAL_PRICES: Record<string, { price: number; savings: number }> = {
-  associate: { price: 1609, savings: 179 },
-  partner:   { price: 4309, savings: 479 },
-  sovereign: { price: 9709, savings: 1079 },
+  associate: { price: 2149, savings: 239 },   // Investigator annual ($199×12 - 10%)
+  partner:   { price: 4309, savings: 479 },   // Partner annual ($399×12 - 10%)
+  sovereign: { price: 9709, savings: 1079 },  // Enterprise annual ($899×12 - 10%)
 };
 
 export default function Pricing() {
@@ -227,7 +243,7 @@ export default function Pricing() {
               <Link to="/register" style={{
                 color: "#0a0f1a", background: "#22c55e", textDecoration: "none",
                 fontSize: "0.85em", padding: "7px 16px", borderRadius: 4, fontWeight: 700,
-              }}>START FREE</Link>
+              }}>START TRIAL</Link>
             </>
           )}
         </div>
@@ -389,9 +405,9 @@ export default function Pricing() {
             <thead>
               <tr>
                 <th style={{ textAlign: "left", minWidth: 200 }}>FEATURE</th>
-                <th style={{ textAlign: "center" }}>ASSOCIATE</th>
+                <th style={{ textAlign: "center" }}>INVESTIGATOR</th>
                 <th style={{ textAlign: "center" }}>PARTNER</th>
-                <th className="col-sovereign" style={{ textAlign: "center" }}>SOVEREIGN</th>
+                <th className="col-sovereign" style={{ textAlign: "center" }}>ENTERPRISE</th>
               </tr>
             </thead>
             <tbody>
@@ -451,7 +467,7 @@ export default function Pricing() {
               <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.5, marginBottom: 8 }}>ENTERPRISE / WHITE-LABEL</div>
               <h3 style={{ margin: "0 0 8px", fontSize: "1.1em" }}>Firm License — $1,999/mo</h3>
               <p style={{ margin: "0 0 8px", fontSize: "0.82em", opacity: 0.6 }}>
-                500 credits · API access · Co-branded dossiers · Unlimited seats · Priority support
+                500 credits · Full REST API · Co-branded dossiers · Unlimited seats · All 4 surplus streams · Priority support
               </p>
               <p style={{ margin: 0, fontSize: "0.8em", opacity: 0.5 }}>
                 County Raw Feed add-on: $499/mo/county — raw scraped data via API
@@ -483,7 +499,7 @@ export default function Pricing() {
             </li>
             <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
               <span style={{ color: "#f59e0b" }}>★</span>
-              <span>First 10 sign-ups: 3-month Partner tier free trial</span>
+              <span>First 10 sign-ups: 3-month Partner tier ($399/mo) free trial</span>
             </li>
             <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
               <span style={{ color: "#f59e0b" }}>★</span>

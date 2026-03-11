@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { API_BASE } from "../lib/api";
 
-const STAGES = ["LEADS", "CONTACTED", "RETAINER_SIGNED", "FILED", "FUNDS_RELEASED"] as const;
+const STAGES = ["LEADS", "CONTACTED", "RETAINER_SIGNED", "FILED", "HEARING_SCHEDULED", "PAID", "CLOSED"] as const;
 type Stage = typeof STAGES[number];
 
 interface AttorneyCase {
@@ -112,7 +112,7 @@ export default function MyCases() {
             <h1 style={{ fontSize: "1.5rem", fontWeight: 700, marginBottom: "0.25rem" }}>My Case Pipeline</h1>
             <p style={{ color: "#64748b", fontSize: "0.9rem", maxWidth: 600 }}>
               Your personal attorney case tracker. Leads you've added via "ADD TO MY PIPELINE" on any Lead Detail page appear here.
-              Drag cases through stages: LEADS → CONTACTED → RETAINER SIGNED → FILED → FUNDS RELEASED.
+              Drag cases through stages: LEADS → CONTACTED → RETAINER SIGNED → FILED → HEARING SCHEDULED → PAID → CLOSED.
             </p>
             <p style={{ color: "#64748b", fontSize: "0.8rem", marginTop: 4 }}>
               {cases.length} active case{cases.length !== 1 ? "s" : ""} · Private to your account
@@ -140,7 +140,8 @@ export default function MyCases() {
 
         {/* Kanban Board */}
         {cases.length > 0 && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "1rem", overflowX: "auto" }}>
+          <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "1rem", overflowX: "auto" }}>
             {STAGES.map((stage) => {
               const stageCases = casesByStage(stage);
               return (
@@ -222,6 +223,47 @@ export default function MyCases() {
               );
             })}
           </div>
+
+          {/* D2: Attorney ROI Dashboard */}
+          <div style={{
+            marginTop: "2rem",
+            padding: "1.25rem",
+            background: "#1e293b",
+            borderRadius: "0.5rem",
+            border: "1px solid #334155",
+          }}>
+            <h3 style={{ margin: "0 0 1rem", fontSize: "0.8rem", letterSpacing: "0.1em", opacity: 0.7 }}>
+              ATTORNEY PERFORMANCE SUMMARY
+            </h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem" }}>
+              <div>
+                <div style={{ fontSize: "0.7rem", color: "#64748b", marginBottom: "0.25rem" }}>CASES IN PIPELINE</div>
+                <div style={{ fontWeight: 700, fontSize: "1.3rem" }}>{cases.length}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: "0.7rem", color: "#64748b", marginBottom: "0.25rem" }}>FILED</div>
+                <div style={{ fontWeight: 700, fontSize: "1.3rem" }}>
+                  {cases.filter(c => (["FILED", "HEARING_SCHEDULED", "PAID", "CLOSED"] as string[]).includes(c.stage)).length}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: "0.7rem", color: "#64748b", marginBottom: "0.25rem" }}>PAID/CLOSED</div>
+                <div style={{ fontWeight: 700, fontSize: "1.3rem", color: "#22c55e" }}>
+                  {cases.filter(c => (["PAID", "CLOSED"] as string[]).includes(c.stage)).length}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: "0.7rem", color: "#64748b", marginBottom: "0.25rem" }}>TOTAL TRACKED VALUE</div>
+                <div style={{ fontWeight: 700, fontSize: "1.1rem", color: "#22c55e" }}>
+                  ${cases.reduce((sum, c) => sum + (c.overbid_amount || 0), 0).toLocaleString()}
+                </div>
+              </div>
+            </div>
+            <p style={{ margin: "0.75rem 0 0", color: "#64748b", fontSize: "0.75rem" }}>
+              Track hearing outcomes by updating case stages. Paid/Closed stages confirm recovery.
+            </p>
+          </div>
+          </>
         )}
       </div>
     </div>

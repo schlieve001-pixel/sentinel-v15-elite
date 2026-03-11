@@ -109,14 +109,15 @@ for lead in r['leads']:
 
   # Pre-sale foreclosure pipeline — scrapes Active/Pending cases from GovSoft
   # Returns upcoming auctions with opening bid + scheduled sale date
-  # Covers all 12 GovSoft counties: adams, arapahoe, boulder, broomfield, douglas,
-  #   eagle, el_paso, gilpin, jefferson, larimer, mesa, weld
+  # Covers all 18 active GovSoft counties (adams, arapahoe, archuleta, boulder,
+  #   broomfield, douglas, eagle, el_paso, elbert, garfield, gilpin, jefferson,
+  #   la_plata, larimer, mesa, san_miguel, teller, weld)
   # Usage: bin/vf pending-sales --county jefferson
   #         bin/vf pending-sales --all-counties
   pending-sales)
     shift
     if [[ "${1:-}" == "--all-counties" ]]; then
-      for county in adams arapahoe boulder broomfield douglas eagle el_paso gilpin jefferson larimer mesa weld; do
+      for county in adams arapahoe archuleta boulder broomfield douglas eagle el_paso elbert garfield gilpin jefferson la_plata larimer mesa san_miguel teller weld; do
         echo "[pending-sales] Running county=$county ..."
         flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --pending-sales --county "$county" || true
       done
@@ -130,7 +131,7 @@ for lead in r['leads']:
   pre-sale-scan)
     shift
     if [[ "${1:-}" == "--all-counties" ]]; then
-      for county in adams arapahoe boulder broomfield douglas eagle el_paso gilpin jefferson larimer mesa weld; do
+      for county in adams arapahoe archuleta boulder broomfield douglas eagle el_paso elbert garfield gilpin jefferson la_plata larimer mesa san_miguel teller weld; do
         echo "[pre-sale-scan] Running county=$county ..."
         flock -n "$LOCKFILE" python3 -m verifuse_v2.ingest.ingest_runner --pending-sales --county "$county" || true
       done
@@ -170,6 +171,121 @@ for lead in r['leads']:
     python3 -m verifuse_v2.scrapers.assessor_lookup "$@"
     ;;
 
+  # enrich-owners: Run assessor lookup for all active counties (limit 20 per county)
+  # Usage: bin/vf enrich-owners [--county jefferson] [--limit 20]
+  enrich-owners)
+    shift
+    LIMIT=20
+    COUNTY=""
+    for arg in "$@"; do
+      [[ "$arg" == --limit=* ]] && LIMIT="${arg#--limit=}"
+      [[ "$arg" == --county=* ]] && COUNTY="${arg#--county=}"
+    done
+    if [[ -n "$COUNTY" ]]; then
+      echo "[enrich-owners] Running assessor lookup for county=$COUNTY limit=$LIMIT ..."
+      python3 -m verifuse_v2.scrapers.assessor_lookup --county "$COUNTY" --limit "$LIMIT"
+    else
+      for county in jefferson arapahoe adams denver el_paso boulder douglas weld; do
+        echo "[enrich-owners] Running assessor lookup for county=$county limit=$LIMIT ..."
+        python3 -m verifuse_v2.scrapers.assessor_lookup --county "$county" --limit "$LIMIT" || true
+      done
+    fi
+    ;;
+
+  # unclaimed-seed: Seed sample unclaimed property leads into the pipeline
+  # Usage: bin/vf unclaimed-seed [--dry-run]
+  unclaimed-seed)
+    shift
+    DRY_RUN=""
+    for arg in "$@"; do [[ "$arg" == "--dry-run" ]] && DRY_RUN="1"; done
+    python3 - "$@" <<'PYEOF'
+import sys, sqlite3, os, uuid
+from datetime import date
+
+dry_run = "--dry-run" in sys.argv
+DB = os.environ.get("VERIFUSE_DB_PATH", "verifuse_v2/data/verifuse_v2.db")
+conn = sqlite3.connect(DB)
+conn.row_factory = sqlite3.Row
+
+SEEDS = [
+    ("jefferson", "UP-JEF-2024-001", "DORMANT_BANK", "John T. Morrison", 12450.00, "Commerce City Savings & Loan dormant account", "§ 38-13-101"),
+    ("jefferson", "UP-JEF-2024-002", "UNCASHED_CHECK", "Maria L. Gutierrez", 3800.00, "State Farm Insurance uncashed settlement check", "§ 38-13-101"),
+    ("arapahoe", "UP-ARP-2024-001", "UTILITY_DEPOSIT", "Robert J. Blackwell", 875.00, "Xcel Energy security deposit refund", "§ 38-13-101"),
+    ("arapahoe", "UP-ARP-2024-002", "INSURANCE_PROCEEDS", "Sandra K. Odum", 28600.00, "Life insurance death benefit proceeds", "§ 38-13-101"),
+    ("adams", "UP-ADA-2024-001", "DORMANT_BANK", "Carlos A. Mendez", 6700.00, "First Bank of Colorado savings account", "§ 38-13-101"),
+    ("adams", "UP-ADA-2024-002", "UNCASHED_CHECK", "Linda R. Thompson", 1250.00, "United Healthcare claims overpayment refund", "§ 38-13-101"),
+    ("el_paso", "UP-ELP-2024-001", "DORMANT_BANK", "James W. Patterson", 44200.00, "Wells Fargo investment account (inactive 3+ yrs)", "§ 38-13-101"),
+    ("el_paso", "UP-ELP-2024-002", "INSURANCE_PROCEEDS", "Patricia M. Schulz", 18900.00, "Northwestern Mutual whole life policy", "§ 38-13-101"),
+    ("el_paso", "UP-ELP-2024-003", "UTILITY_DEPOSIT", "Angela R. Torres", 420.00, "Colorado Springs Utilities deposit refund", "§ 38-13-101"),
+    ("denver", "UP-DEN-2024-001", "DORMANT_BANK", "William H. Foster", 89500.00, "US Bank brokerage account (5 years inactive)", "§ 38-13-101"),
+    ("denver", "UP-DEN-2024-002", "UNCASHED_CHECK", "Rachel E. Kim", 5100.00, "Anthem BCBS premium refund unclaimed", "§ 38-13-101"),
+    ("denver", "UP-DEN-2024-003", "INSURANCE_PROCEEDS", "Michael D. Grant", 62000.00, "Principal Financial Group life insurance", "§ 38-13-101"),
+    ("boulder", "UP-BOU-2024-001", "DORMANT_BANK", "Elizabeth A. Murphy", 15700.00, "ColoEast Bankshares checking account", "§ 38-13-101"),
+    ("boulder", "UP-BOU-2024-002", "UTILITY_DEPOSIT", "David C. Larson", 310.00, "Excel Energy gas service deposit", "§ 38-13-101"),
+    ("larimer", "UP-LAR-2024-001", "DORMANT_BANK", "Nancy J. Caldwell", 9350.00, "Farmers State Bank savings account", "§ 38-13-101"),
+    ("larimer", "UP-LAR-2024-002", "INSURANCE_PROCEEDS", "Thomas R. Whitfield", 23100.00, "Allstate auto accident settlement unclaimed", "§ 38-13-101"),
+    ("weld", "UP-WEL-2024-001", "UNCASHED_CHECK", "Beverly D. Ingram", 2600.00, "Platte Valley Medical Center refund", "§ 38-13-101"),
+    ("weld", "UP-WEL-2024-002", "DORMANT_BANK", "Richard L. Hawkins", 7890.00, "Guarantee Federal Bancshares account", "§ 38-13-101"),
+    ("douglas", "UP-DOU-2024-001", "INSURANCE_PROCEEDS", "Catherine S. Wellington", 31500.00, "New York Life policy death benefit", "§ 38-13-101"),
+    ("douglas", "UP-DOU-2024-002", "DORMANT_BANK", "Steven P. Harrington", 18300.00, "Park State Bank investment account", "§ 38-13-101"),
+]
+
+inserted = 0
+skipped = 0
+for (county, case_number, subcategory, owner, amount, description, statute) in SEEDS:
+    existing = conn.execute("SELECT id FROM leads WHERE case_number=?", [case_number]).fetchone()
+    if existing:
+        skipped += 1
+        continue
+    if dry_run:
+        print(f"[dry-run] Would insert: {county} {case_number} {owner} ${amount:,.2f}")
+        inserted += 1
+        continue
+    lead_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO leads (
+            id, county, case_number, data_grade, processing_status,
+            surplus_stream, overbid_amount, estimated_surplus, owner_name,
+            ned_source, ingestion_source, updated_at
+        ) VALUES (?,?,?,'BRONZE','STAGED','UNCLAIMED_PROPERTY',?,?,?,?,
+                  'unclaimed_seed',datetime('now'))
+    """, [lead_id, county, case_number, amount, amount, owner,
+          f"CO Treasury Great Colorado Payback — {subcategory}: {description} ({statute})"])
+    inserted += 1
+
+if not dry_run:
+    conn.commit()
+conn.close()
+
+print(f"unclaimed-seed: {'(dry-run) ' if dry_run else ''}inserted={inserted} skipped={skipped}")
+PYEOF
+    ;;
+
+  # unclaimed-property-run: Scrape CO State Treasurer for Public Trustee turnovers.
+  # Finds overbid funds where the 6-month window expired and PT turned over to State.
+  # Statute: C.R.S. § 38-38-111 → § 38-13-101. Fee cap: § 38-13-1304 (HB25-1224, 10%).
+  # Usage: bin/vf unclaimed-property-run [--county jefferson] [--all-counties] [--dry-run]
+  unclaimed-property-run)
+    shift
+    flock -n "$LOCKFILE" python3 -m verifuse_v2.scrapers.unclaimed_property_scraper "$@"
+    ;;
+
+  # unclaimed-crossref: Print leads with expired restriction windows — candidates for CO Treasurer check.
+  # Usage: bin/vf unclaimed-crossref [--county jefferson]
+  unclaimed-crossref)
+    shift
+    python3 -m verifuse_v2.scrapers.unclaimed_property_scraper --build-crossref-list "$@"
+    ;;
+
+  # dispatch-alerts: Email GOLD lead alerts to all active subscribed attorneys.
+  # Finds GOLD leads promoted in the last 48h (or --hours N).
+  # Attorneys with territory locks only receive alerts for their counties.
+  # Usage: bin/vf dispatch-alerts [--hours 72] [--dry-run]
+  dispatch-alerts)
+    shift
+    python3 -m verifuse_v2.ingest.alert_dispatcher "$@"
+    ;;
+
   # Promote SILVER → GOLD for leads whose 6-month restriction window has expired.
   # Targets leads with data_grade='SILVER', non-null sale_date, and
   # sale_date + 6 calendar months <= today. Safe to run at any frequency.
@@ -194,8 +310,9 @@ conn.row_factory = sqlite3.Row
 today = date.today()
 
 candidates = conn.execute(
-    "SELECT id, county, case_number, sale_date, overbid_amount FROM leads "
-    "WHERE data_grade='SILVER' AND sale_date IS NOT NULL"
+    "SELECT id, county, case_number, sale_date, overbid_amount, surplus_amount FROM leads "
+    "WHERE data_grade='SILVER' AND sale_date IS NOT NULL "
+    "AND (overbid_amount > 0 OR surplus_amount > 0)"
 ).fetchall()
 
 promoted = []
@@ -431,6 +548,69 @@ conn.close()
 PYEOF
     ;;
 
+  # tax-deed-seed: Seed sample tax deed surplus leads (C.R.S. § 39-12-111)
+  # Usage: bin/vf tax-deed-seed [--dry-run]
+  tax-deed-seed)
+    shift
+    DRY_RUN=""
+    for arg in "$@"; do [[ "$arg" == "--dry-run" ]] && DRY_RUN="1"; done
+    python3 - "$@" <<'PYEOF'
+import sys, sqlite3, os, uuid
+
+dry_run = "--dry-run" in sys.argv
+DB = os.environ.get("VERIFUSE_DB_PATH", "verifuse_v2/data/verifuse_v2.db")
+conn = sqlite3.connect(DB)
+conn.row_factory = sqlite3.Row
+
+TAX_DEED_SEEDS = [
+    ("jefferson", "TD-JEF-2024-001", "Robert A. Nkosi", 34200.00, "2024-03-15", "Tax deed sale surplus — property sold for $184,200 vs $150,000 taxes/fees owed", "Jeffco Treasurer"),
+    ("jefferson", "TD-JEF-2024-002", "Maria C. Delgado", 18700.00, "2024-05-22", "Tax deed surplus — sale exceeded outstanding tax obligation", "Jeffco Treasurer"),
+    ("arapahoe", "TD-ARP-2024-001", "George T. Williams", 52100.00, "2024-02-08", "Tax deed auction surplus — buyer paid $302,100 vs $250,000 delinquent taxes", "Arapahoe County Treasurer"),
+    ("arapahoe", "TD-ARP-2024-002", "Susan L. Mitchell", 11400.00, "2024-06-14", "Tax deed sale proceeds exceed lien amount — surplus held by county", "Arapahoe County Treasurer"),
+    ("adams", "TD-ADA-2024-001", "Patrick E. Sullivan", 23800.00, "2024-01-30", "Adams County tax deed surplus — commercial property auction", "Adams County Treasurer"),
+    ("el_paso", "TD-ELP-2024-001", "Jennifer M. Kowalski", 67500.00, "2024-04-10", "El Paso tax deed sale — residential property surplus funds", "EPCO Treasurer"),
+    ("el_paso", "TD-ELP-2024-002", "Harold D. Simmons", 8900.00, "2024-07-19", "Tax deed auction surplus held per § 39-12-111", "EPCO Treasurer"),
+    ("larimer", "TD-LAR-2024-001", "Christine B. Anderson", 29300.00, "2024-03-01", "Larimer County tax deed surplus — buyer overbid exceeds tax obligation", "Larimer County Treasurer"),
+    ("weld", "TD-WEL-2024-001", "Anthony R. Pierce", 41200.00, "2024-05-05", "Weld County tax deed surplus — agricultural parcel auction", "Weld County Treasurer"),
+    ("boulder", "TD-BOU-2024-001", "Deborah K. Chen", 88700.00, "2024-02-20", "Boulder County tax deed surplus — high-value residential property", "Boulder County Treasurer"),
+    ("douglas", "TD-DOU-2024-001", "Marcus J. Olsen", 156300.00, "2024-06-01", "Douglas County tax deed surplus — luxury residential property auction", "Douglas County Treasurer"),
+    ("douglas", "TD-DOU-2024-002", "Victoria L. Pham", 33100.00, "2024-08-12", "Douglas County tax deed surplus — townhome auction proceeds", "Douglas County Treasurer"),
+    ("mesa", "TD-MES-2024-001", "Frank W. Bauer", 19600.00, "2024-04-25", "Mesa County tax deed surplus — commercial lot auction", "Mesa County Treasurer"),
+    ("teller", "TD-TEL-2024-001", "Gloria N. Washington", 27800.00, "2024-03-18", "Teller County tax deed surplus — mountain cabin property", "Teller County Treasurer"),
+    ("garfield", "TD-GAR-2024-001", "Steven C. Hendricks", 45000.00, "2024-07-03", "Garfield County tax deed surplus — rural parcel with mineral rights", "Garfield County Treasurer"),
+]
+
+inserted = 0
+skipped = 0
+for (county, case_number, owner, amount, sale_date, description, source) in TAX_DEED_SEEDS:
+    existing = conn.execute("SELECT id FROM leads WHERE case_number=?", [case_number]).fetchone()
+    if existing:
+        skipped += 1
+        continue
+    if dry_run:
+        print(f"[dry-run] Would insert: {county} {case_number} {owner} ${amount:,.2f} sale={sale_date}")
+        inserted += 1
+        continue
+    lead_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO leads (
+            id, county, case_number, data_grade, processing_status,
+            surplus_stream, overbid_amount, estimated_surplus, owner_name,
+            sale_date, ned_source, ingestion_source, updated_at
+        ) VALUES (?,?,?,'BRONZE','STAGED','TAX_DEED_SURPLUS',?,?,?,?,?,
+                  'tax_deed_seed',datetime('now'))
+    """, [lead_id, county, case_number, amount, amount, owner,
+          sale_date, f"C.R.S. § 39-12-111 — {description}. Source: {source}"])
+    inserted += 1
+
+if not dry_run:
+    conn.commit()
+conn.close()
+
+print(f"tax-deed-seed: {'(dry-run) ' if dry_run else ''}inserted={inserted} skipped={skipped}")
+PYEOF
+    ;;
+
   # ops-jobs: list recent admin ops center jobs
   # Usage: bin/vf ops-jobs [--limit 20]
   ops-jobs)
@@ -464,6 +644,203 @@ PYEOF
     echo "Manual approval required before each step. See docs/RUNBOOK.md."
     ;;
 
+  # evidence-audit: Lists all ATTORNEY_READY/GOLD leads with zero evidence → flags for backfill
+  # Usage: bin/vf evidence-audit [--county jefferson]
+  evidence-audit)
+    shift
+    COUNTY_FILTER=""
+    for arg in "$@"; do
+      [[ "$arg" == --county=* ]] && COUNTY_FILTER="${arg#--county=}"
+    done
+    python3 - "$@" <<'PYEOF'
+import sys, sqlite3, os
+
+COUNTY = None
+for arg in sys.argv[1:]:
+    if arg.startswith("--county="):
+        COUNTY = arg.split("=", 1)[1]
+    elif arg == "--county" and sys.argv.index(arg) + 1 < len(sys.argv):
+        COUNTY = sys.argv[sys.argv.index(arg) + 1]
+
+DB = os.environ.get("VERIFUSE_DB_PATH", "verifuse_v2/data/verifuse_v2.db")
+conn = sqlite3.connect(DB)
+conn.row_factory = sqlite3.Row
+
+where = "WHERE l.data_grade IN ('GOLD') AND l.processing_status != 'REJECT'"
+params = []
+if COUNTY:
+    where += " AND l.county = ?"
+    params.append(COUNTY)
+
+rows = conn.execute(f"""
+    SELECT l.id, l.county, l.case_number, l.data_grade, l.processing_status,
+           (SELECT COUNT(*) FROM evidence_documents ed WHERE ed.asset_id = 'FORECLOSURE:CO:' || UPPER(l.county) || ':' || l.case_number) as pdf_ct,
+           (SELECT COUNT(*) FROM html_snapshots hs
+            WHERE hs.asset_id = 'FORECLOSURE:CO:' || UPPER(l.county) || ':' || UPPER(l.case_number)) as snap_ct
+    FROM leads l
+    {where}
+    ORDER BY l.county, l.case_number
+""", params).fetchall()
+
+flagged = 0
+for r in rows:
+    total_evidence = (r["pdf_ct"] or 0) + (r["snap_ct"] or 0)
+    if total_evidence == 0:
+        print(f"[NO EVIDENCE] {r['county']:15s} {r['case_number']:20s} {r['data_grade']:8s} {r['processing_status']}")
+        flagged += 1
+
+conn.close()
+print(f"\nevidence-audit: {flagged} GOLD leads with zero evidence (county={COUNTY or 'ALL'})")
+if flagged > 0:
+    print("Remediation: bin/vf gate4-run-all OR bin/vf sale-info-backfill --county <county>")
+PYEOF
+    ;;
+
+  # record-outcome: Record attorney case filing outcome into case_outcomes table.
+  # Usage: bin/vf record-outcome --case-id J2500134 --result won --amount 45000 --days 87
+  #        bin/vf record-outcome --case-id C123 --result settled --amount 32000 --county jefferson
+  record-outcome)
+    shift
+    python3 - "$@" <<'PYEOF'
+import sys, sqlite3, os, uuid
+from datetime import datetime, timezone
+
+CASE_ID = None; RESULT = None; AMOUNT = None; DAYS = None; COUNTY = None
+
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    if args[i] == "--case-id" and i+1 < len(args):
+        CASE_ID = args[i+1]; i += 2
+    elif args[i] == "--result" and i+1 < len(args):
+        RESULT = args[i+1]; i += 2
+    elif args[i] == "--amount" and i+1 < len(args):
+        try: AMOUNT = int(float(args[i+1]) * 100)
+        except: pass
+        i += 2
+    elif args[i] == "--days" and i+1 < len(args):
+        try: DAYS = int(args[i+1])
+        except: pass
+        i += 2
+    elif args[i] == "--county" and i+1 < len(args):
+        COUNTY = args[i+1]; i += 2
+    else:
+        i += 1
+
+VALID = ("won","settled","dismissed","pending","withdrawn")
+if not CASE_ID:
+    print("ERROR: --case-id required"); sys.exit(1)
+if not RESULT or RESULT not in VALID:
+    print(f"ERROR: --result required, must be one of {VALID}"); sys.exit(1)
+
+DB = os.environ.get("VERIFUSE_DB_PATH", "verifuse_v2/data/verifuse_v2.db")
+conn = sqlite3.connect(DB)
+
+# Ensure case_outcomes table exists
+conn.execute("""
+CREATE TABLE IF NOT EXISTS case_outcomes (
+    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    case_id TEXT,
+    attorney_id TEXT,
+    filing_date TEXT,
+    hearing_date TEXT,
+    result TEXT CHECK(result IN ('won','settled','dismissed','pending','withdrawn')),
+    amount_recovered_cents INTEGER,
+    time_to_recovery_days INTEGER,
+    judge_name TEXT,
+    county TEXT,
+    notes TEXT,
+    recorded_at TEXT DEFAULT (datetime('now')),
+    recorded_by TEXT
+)
+""")
+
+outcome_id = str(uuid.uuid4())
+conn.execute("""
+INSERT INTO case_outcomes (id, case_id, result, amount_recovered_cents, time_to_recovery_days, county, recorded_by)
+VALUES (?, ?, ?, ?, ?, ?, 'bin/vf record-outcome')
+""", [outcome_id, CASE_ID, RESULT, AMOUNT, DAYS, COUNTY])
+conn.commit()
+conn.close()
+
+amount_str = f"${AMOUNT/100:,.2f}" if AMOUNT else "unspecified"
+days_str = f"{DAYS} days" if DAYS else "unspecified"
+print(f"[record-outcome] Recorded: case={CASE_ID} result={RESULT} amount={amount_str} days={days_str} county={COUNTY or 'unspecified'}")
+print(f"  outcome_id={outcome_id}")
+PYEOF
+    ;;
+
+  # verify-sota: Run SOTA triple-verification on a single GOLD lead
+  # Usage: bin/vf verify-sota --asset-id FORECLOSURE:CO:ARAPAHOE:0148-2023
+  # Usage: bin/vf verify-sota --all-gold          (batch all active GOLD leads)
+  verify-sota)
+    shift
+    ASSET_ID=""
+    ALL_GOLD=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --asset-id) ASSET_ID="$2"; shift 2 ;;
+        --all-gold) ALL_GOLD=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    python3 - "$ASSET_ID" "$ALL_GOLD" << 'PYEOF'
+import sys, os, sqlite3
+from decimal import Decimal
+
+asset_id = sys.argv[1]
+all_gold = sys.argv[2] == "1"
+
+db_path = os.environ.get("VERIFUSE_DB_PATH", "verifuse_v2/data/verifuse_v2.db")
+conn = sqlite3.connect(db_path, timeout=30)
+conn.row_factory = sqlite3.Row
+conn.execute("PRAGMA journal_mode=WAL")
+
+from verifuse_v2.core.ai_verification_engine import VerificationEngine
+engine = VerificationEngine(use_docai=True, use_gemini=True, use_claude=False)
+
+if all_gold == "0" and asset_id:
+    row = conn.execute(
+        "SELECT overbid_amount FROM leads WHERE id=? OR 'FORECLOSURE:CO:'||UPPER(county)||':'||case_number=?",
+        [asset_id, asset_id]
+    ).fetchone()
+    overbid = Decimal(str(row["overbid_amount"] or 0)) if row else Decimal("0")
+    result = engine.verify_from_vault(asset_id, overbid, conn)
+    print(f"\nASSET: {result.asset_id}")
+    print(f"TIER:  {result.tier}  (confidence: {result.confidence:.0%})")
+    print(f"NOTES: {result.verification_notes}")
+    if result.errors: print(f"ERRORS: {result.errors}")
+    print(f"TIME:  {result.duration_ms}ms\n")
+else:
+    # Batch all active GOLD leads
+    rows = conn.execute("""
+        SELECT 'FORECLOSURE:CO:'||UPPER(county)||':'||case_number as asset_id,
+               overbid_amount
+        FROM leads WHERE data_grade='GOLD' AND overbid_amount > 0
+        AND (claim_deadline IS NULL OR claim_deadline >= date('now'))
+        ORDER BY overbid_amount DESC
+    """).fetchall()
+    print(f"\nRunning SOTA verification on {len(rows)} GOLD leads...\n")
+    triple = ai_ver = html_only = disputed = 0
+    for r in rows:
+        try:
+            result = engine.verify_from_vault(r["asset_id"], Decimal(str(r["overbid_amount"])), conn)
+            if result.tier == "TRIPLE_VERIFIED": triple += 1
+            elif result.tier == "AI_VERIFIED": ai_ver += 1
+            elif result.tier == "DISPUTED": disputed += 1
+            else: html_only += 1
+            print(f"  {r['asset_id']}: {result.tier} ({result.confidence:.0%})")
+        except Exception as e:
+            print(f"  {r['asset_id']}: ERROR — {e}")
+            html_only += 1
+    print(f"\n{'='*50}")
+    print(f"TRIPLE_VERIFIED: {triple}  AI_VERIFIED: {ai_ver}  HTML_MATH: {html_only}  DISPUTED: {disputed}")
+    print(f"{'='*50}\n")
+
+conn.close()
+PYEOF
+    ;;
+
   *)
     cat <<'USAGE'
 VeriFuse one-command ops wrapper
@@ -484,8 +861,8 @@ Required commands:
   scraper-enum            Sequential case enumerator (flock; --county --prefix --start-num --end-num)
   extract-batch           Gate 4 batch extraction on BRONZE leads (--county --limit)
   gate4-run-all           Full Gate 4 pipeline: Phase 1 (adams/weld/douglas/gilpin/arapahoe/denver) + Phase 2 (jefferson/boulder/broomfield with SALE_INFO backfill)
-  pending-sales           Scrape Active/Pending pre-sale cases (--county or --all-counties)
-  pre-sale-scan           Alias for pending-sales (--county or --all-counties)
+  pending-sales           Scrape Active/Pending pre-sale cases (--county or --all-counties; 18 active counties)
+  pre-sale-scan           Alias for pending-sales (--county or --all-counties; 18 active counties)
   sale-info-backfill      Re-scrape BRONZE leads missing SALE_INFO (--county --limit)
   denver-scrape           Denver Public Trustee PDF scraper (--dry-run to preview)
   promote-eligible        Promote SILVER → GOLD when 6-month restriction expires (--dry-run)
@@ -503,6 +880,14 @@ Optional commands:
   pdf-intake              Submit a PDF for paper-only county (COUNTY PDF_PATH CASE_NUMBER [OVERBID])
   research-county         Probe URL patterns to identify county platform (COUNTY_SLUG)
   scraper-run             Run date-window scraper for a specific county
+  enrich-owners           Run assessor owner/address lookup for all supported counties (--county --limit)
+  unclaimed-seed          Seed 20 sample Colorado unclaimed property leads (C.R.S. § 38-13-101)
+  unclaimed-property-run  Scrape CO State Treasurer for Public Trustee unclaimed foreclosure surplus (§ 38-13-101)
+  unclaimed-crossref      List expired-window leads that are candidates for CO Treasurer unclaimed property check
+  tax-deed-seed           Seed 15 sample tax deed surplus leads (C.R.S. § 39-12-111)
+  evidence-audit          List GOLD leads with zero evidence → flag for backfill (--county optional)
+  record-outcome          Record attorney case outcome into case_outcomes (--case-id --result --amount --days)
+  verify-sota             SOTA triple-verification on a GOLD lead (--asset-id ID | --all-gold)
 
 Examples:
   vf migrate

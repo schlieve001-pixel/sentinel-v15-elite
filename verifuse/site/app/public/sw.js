@@ -1,5 +1,5 @@
 // VeriFuse Service Worker — Shell precache strategy
-const CACHE_NAME = "verifuse-shell-v1";
+const CACHE_NAME = "verifuse-shell-v4";
 
 // Shell assets to precache (Vite-built paths handled at runtime)
 const SHELL_ASSETS = [

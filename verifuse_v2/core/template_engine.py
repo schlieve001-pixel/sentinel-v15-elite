@@ -6,7 +6,15 @@ Raises ValueError with field list if validation fails — caller converts to HTT
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
+
+
+class TemplateRenderError(ValueError):
+    """Raised when template rendering leaves unresolved {{variable}} placeholders."""
+    def __init__(self, message: str, unresolved: list):
+        super().__init__(message)
+        self.unresolved = unresolved
 
 
 # Fields that must be non-empty for any document generation
@@ -93,3 +101,35 @@ class TemplateEngine:
             raise ValueError(
                 f"Cannot generate packet — missing required fields: {', '.join(missing)}"
             )
+
+    def render(self, template_text: str, variables: dict, strict: bool = True) -> str:
+        """
+        Render template_text by substituting {{key}} → value for each key in variables.
+
+        After substitution, scans for remaining {{...}} patterns.
+        If strict=True (default) and any remain: raises TemplateRenderError.
+        If strict=False: returns partially-rendered text (caller accepts responsibility).
+
+        Args:
+            template_text: Template string with {{variable}} placeholders
+            variables: Dict of variable_name → value to substitute
+            strict: If True, raise TemplateRenderError for unresolved variables
+
+        Returns:
+            Fully rendered string (when strict=True and all variables resolved)
+
+        Raises:
+            TemplateRenderError: When strict=True and unresolved {{...}} remain
+        """
+        result = template_text
+        for key, value in variables.items():
+            result = result.replace(f"{{{{{key}}}}}", str(value) if value is not None else "")
+
+        # Scan for any remaining unresolved placeholders
+        unresolved = re.findall(r'\{\{([^}]+)\}\}', result)
+        if unresolved and strict:
+            raise TemplateRenderError(
+                f"Unresolved template variables: {unresolved}",
+                unresolved=unresolved,
+            )
+        return result

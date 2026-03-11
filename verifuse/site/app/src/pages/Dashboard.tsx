@@ -411,7 +411,7 @@ function CountyCoverageTable({ counties }: { counties: Stats["counties"] }) {
 
 export default function Dashboard() {
   const { user, loading: authLoading, logout } = useAuth();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
   const isPreviewRoute = location.pathname === "/preview";
@@ -430,8 +430,12 @@ export default function Dashboard() {
   const [previewLeads, setPreviewLeads] = useState<PreviewLead[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [county, setCounty] = useState("");
-  const [grade, setGrade] = useState("");
-  const [sortBy, setSortBy] = useState<"surplus" | "newest" | "grade">("surplus");
+  // Initialize grade + sort from URL params (enables KPI card deep-links)
+  const [grade, setGrade] = useState(() => searchParams.get("grade") || "");
+  const [streamFilter, setStreamFilter] = useState("");
+  const [sortBy, setSortBy] = useState<"surplus" | "newest" | "grade">(
+    () => (searchParams.get("sort") === "newest" ? "newest" : "surplus")
+  );
   const [viewMode, setViewMode] = useState<"actionable" | "watchlist" | "my_leads">("actionable");
 
   // Search bar state (2A)
@@ -455,9 +459,19 @@ export default function Dashboard() {
   const [verifyMsg, setVerifyMsg] = useState("");
   const [legalOpen, setLegalOpen] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  // C4: Market velocity
+  const [marketVelocity, setMarketVelocity] = useState<any>(null);
   const [secondsAgo, setSecondsAgo] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const healthOk = useHealth();
+
+  // Sync URL params → state when navigating via KPI card links
+  useEffect(() => {
+    const g = searchParams.get("grade") || "";
+    const s = searchParams.get("sort");
+    setGrade(g);
+    if (s === "newest") setSortBy("newest");
+  }, [searchParams]);
 
   // Scroll preservation
   useEffect(() => {
@@ -543,6 +557,10 @@ export default function Dashboard() {
           setSecondsAgo(0);
         })
         .finally(() => setStatsLoading(false));
+      // C4: Fetch market velocity
+      fetch(`${API_BASE || ""}/api/intelligence/market-velocity`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("vf_token") || ""}` }
+      }).then(r => r.ok ? r.json() : null).then(d => d && setMarketVelocity(d)).catch(() => {});
     }
   }, [isPreview]);
 
@@ -570,7 +588,10 @@ export default function Dashboard() {
       return () => ac.abort();
     }
     setLoading(true);
-    getLeads({ county: county || undefined, grade: grade || undefined, limit: 50 }, ac.signal)
+    // B3: RTF filter passes verification_state param instead of grade
+    const gradeParam = grade === "RTF" ? undefined : (grade || undefined);
+    const rtfParam = grade === "RTF" ? "READY_TO_FILE" : undefined;
+    getLeads({ county: county || undefined, grade: gradeParam, surplus_stream: streamFilter || undefined, limit: 50, ...(rtfParam ? { verification_state: rtfParam } : {}) } as any, ac.signal)
       .then((r) => setLeads(r.leads))
       .catch((err) => {
         if (err instanceof Error && err.name === "AbortError") return;
@@ -578,7 +599,7 @@ export default function Dashboard() {
       })
       .finally(() => setLoading(false));
     return () => ac.abort();
-  }, [county, grade, isPreview]);
+  }, [county, grade, streamFilter, isPreview]);
 
   // Dynamic county list from stats API (falls back to leads-based counties)
   const countyOptions: string[] = stats?.county_list?.length
@@ -649,6 +670,7 @@ export default function Dashboard() {
                 </button>
               )}
               <Link to="/my-cases" className="btn-outline-sm">MY PIPELINE</Link>
+              <Link to="/account" className="btn-outline-sm">ACCOUNT</Link>
               <Link to="/pricing" className="btn-outline-sm">PRICING</Link>
               {user.is_admin && (
                 <Link to="/admin" className="btn-outline-sm">ADMIN PANEL</Link>
@@ -732,18 +754,21 @@ export default function Dashboard() {
                 sub={stats.total_claimable_surplus > 0 ? formatCurrencyShort(stats.total_claimable_surplus) + " total" : undefined}
                 grade="gold"
                 icon={Star}
+                href="?grade=GOLD"
                 tooltip="GOLD: Math-confirmed overbid with official provenance document on file. Highest confidence — ready for immediate attorney outreach."
               />
               <KpiCard
                 label="SILVER Leads"
                 value={silverCount}
                 grade="silver"
+                href="?grade=SILVER"
                 tooltip="SILVER: Probable overbid detected. Restriction window active (C.R.S. § 38-38-111) or secondary doc validation pending. Monitor for GOLD promotion."
               />
               <KpiCard
                 label="BRONZE Leads"
                 value={bronzeCount}
                 grade="bronze"
+                href="?grade=BRONZE"
                 tooltip="BRONZE: Pre-validation stage. Overbid likely but sale documents or math not yet confirmed. Gate 4 extraction running."
               />
               <KpiCard
@@ -788,8 +813,30 @@ export default function Dashboard() {
                 value={(stats as any).new_leads_7d ?? 0}
                 sub="leads added in last 7 days"
                 icon={Star}
+                href="?sort=newest"
                 tooltip="New leads ingested in the past 7 days across all counties and grades. Reflects recent scraper activity."
               />
+              {/* C4: Market Pulse */}
+              {marketVelocity?.most_urgent_county && (
+                <div style={{
+                  background: "#111827",
+                  border: "1px solid #78350f",
+                  borderRadius: 8,
+                  padding: "16px 20px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 4,
+                  minWidth: 0,
+                }}>
+                  <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.55, textTransform: "uppercase" }}>MARKET PULSE</div>
+                  <div style={{ fontWeight: 700, color: "#f59e0b", fontSize: "1.2em", lineHeight: 1.2, marginTop: 4 }}>
+                    {marketVelocity.most_urgent_county.replace(/_/g, " ").toUpperCase()}
+                  </div>
+                  <div style={{ fontSize: "0.78em", opacity: 0.5 }}>
+                    {marketVelocity.most_urgent_count} urgent leads
+                  </div>
+                </div>
+              )}
             </>
           ) : null}
         </div>
@@ -1029,6 +1076,25 @@ export default function Dashboard() {
           ))}
         </select>
 
+        <span className="grade-filter-label">STREAM</span>
+        <div className="grade-filters">
+          {[
+            { value: "",                    label: "ALL",         tip: "All surplus streams" },
+            { value: "FORECLOSURE_OVERBID", label: "FORECLOSURE", tip: "Post-sale overbid (§ 38-38-111)" },
+            { value: "TAX_DEED_SURPLUS",    label: "TAX DEED",    tip: "Tax deed surplus (§ 39-12-111) — no 6-month restriction" },
+            { value: "UNCLAIMED_PROPERTY",  label: "UNCLAIMED",   tip: "Unclaimed Property (§ 38-13-1304 / HB25-1224)" },
+          ].map((s) => (
+            <Tooltip key={s.value || "ALL_STREAM"} content={s.tip} position="top">
+              <button
+                className={`grade-filter-btn ${streamFilter === s.value ? "active" : ""}`}
+                onClick={() => { setStreamFilter(s.value); setLoading(true); }}
+              >
+                {s.label}
+              </button>
+            </Tooltip>
+          ))}
+        </div>
+
         <span className="grade-filter-label">GRADE</span>
         <div className="grade-filters">
           {[
@@ -1040,12 +1106,35 @@ export default function Dashboard() {
             <Tooltip key={g.value || "ALL"} content={g.tip} position="top">
               <button
                 className={`grade-filter-btn ${grade === g.value ? "active" : ""}`}
-                onClick={() => { setGrade(g.value); setLoading(true); }}
+                onClick={() => {
+                  setGrade(g.value);
+                  setLoading(true);
+                  setSearchParams(g.value ? { grade: g.value } : {}, { replace: true });
+                }}
               >
                 {g.label}
               </button>
             </Tooltip>
           ))}
+          {/* B3: RTF filter */}
+          <Tooltip content="READY TO FILE: All verification gates passed. Cleared for immediate attorney filing." position="top">
+            <button
+              style={{
+                padding: "0.35rem 0.75rem",
+                borderRadius: "0.375rem",
+                border: `1px solid ${grade === "RTF" ? "#22c55e" : "#334155"}`,
+                background: grade === "RTF" ? "#14532d" : "#1e293b",
+                color: grade === "RTF" ? "#4ade80" : "#64748b",
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                fontWeight: grade === "RTF" ? 700 : 400,
+                fontFamily: "monospace",
+              }}
+              onClick={() => { setGrade(grade === "RTF" ? "" : "RTF"); setLoading(true); }}
+            >
+              RTF ✓
+            </button>
+          </Tooltip>
         </div>
 
         <select
