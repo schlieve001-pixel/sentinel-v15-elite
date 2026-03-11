@@ -1713,6 +1713,8 @@ const PIPELINE_COMMANDS: {
   // ── Alternative Streams ───────────────────────────────────────────
   { id: "tax-lien-run",           label: "▶ TAX LIEN RUN",        desc: "Tax lien surplus pipeline (C.R.S. § 39-11-151)", hint: "Populates TAX_LIEN surplus stream. Run monthly to capture county tax sale overages.", eta: "5–10 min", group: "STREAMS" },
   { id: "unclaimed-property-run", label: "▶ UNCLAIMED PROPERTY",  desc: "CO State Treasurer unclaimed property scraper (§ 38-13-101)", hint: "Populates UNCLAIMED_PROPERTY stream. Queries the CO State Treasurer's unclaimed property database.", eta: "5–15 min", group: "STREAMS" },
+  // ── Alerts ────────────────────────────────────────────────────────
+  { id: "dispatch-alerts",     label: "▶ DISPATCH ALERTS",     desc: "Email GOLD lead alerts to all subscribed attorneys (last 72h)", hint: "Sends deadline and new-lead alert emails to active subscribers. Run after Gate 4 to notify attorneys of new GOLD leads.", color: "#22c55e", eta: "< 2 min", group: "ALERTS" },
   // ── DB / System ───────────────────────────────────────────────────
   { id: "coverage-report",     label: "▶ COVERAGE REPORT",     desc: "Print full county coverage report (active/inactive/leads/GOLD per county)", hint: "Diagnostic report. Useful for identifying counties with stale data or zero leads.", eta: "< 1 min", group: "SYSTEM" },
   { id: "backup-db",           label: "⬇ BACKUP DB",           desc: "SQLite online backup → timestamped .bak file", hint: "Safe to run anytime — does not lock the DB. Creates a point-in-time snapshot.", eta: "< 1 min", group: "SYSTEM" },

@@ -179,7 +179,7 @@ export default function Pricing() {
       return;
     }
     if (!stripeReady) {
-      setCheckoutError("Billing is being configured. Contact us at verifuse.tech@gmail.com.");
+      setCheckoutError("Billing is being configured. Contact us at support@verifuse.tech.");
       return;
     }
     setCheckoutLoading(tier);
@@ -205,7 +205,7 @@ export default function Pricing() {
       return;
     }
     if (!stripeReady) {
-      setCheckoutError("Billing is being configured. Contact us at verifuse.tech@gmail.com.");
+      setCheckoutError("Billing is being configured. Contact us at support@verifuse.tech.");
       return;
     }
     setCheckoutLoading(key);
@@ -266,7 +266,7 @@ export default function Pricing() {
           </p>
           {!stripeReady && (
             <div style={{ display: "inline-block", background: "#1c2534", border: "1px solid #374151", borderRadius: 6, padding: "8px 18px", fontSize: "0.8em", color: "#f59e0b" }}>
-              ⚠ Billing configuration in progress — contact verifuse.tech@gmail.com to subscribe
+              ⚠ Billing configuration in progress — contact support@verifuse.tech to subscribe
             </div>
           )}
 
@@ -474,7 +474,7 @@ export default function Pricing() {
               </p>
             </div>
             <a
-              href="mailto:verifuse.tech@gmail.com?subject=Enterprise Inquiry"
+              href="mailto:support@verifuse.tech?subject=Enterprise Inquiry"
               style={{
                 display: "inline-block", padding: "11px 24px", border: "1px solid #22c55e",
                 color: "#22c55e", textDecoration: "none", borderRadius: 6, fontSize: "0.85em",
@@ -525,7 +525,7 @@ export default function Pricing() {
             HB25-1224 compliant — 10% attorney fee cap tracked.
           </p>
           <p style={{ margin: 0 }}>
-            Questions? <a href="mailto:verifuse.tech@gmail.com" style={{ color: "#22c55e" }}>verifuse.tech@gmail.com</a>
+            Questions? <a href="mailto:support@verifuse.tech" style={{ color: "#22c55e" }}>support@verifuse.tech</a>
           </p>
         </div>
 

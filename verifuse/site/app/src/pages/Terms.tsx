@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 
 const EFFECTIVE_DATE = "June 4, 2025";
-const COMPANY = "VeriFuse LLC";
+const COMPANY = "VeriFuse Technologies LLC";
 const CONTACT_EMAIL = "legal@verifuse.tech";
 
 export default function Terms() {

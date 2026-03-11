@@ -366,7 +366,7 @@ def _build_html_email(title: str, body_html: str) -> str:
             {body_html}
             <hr style="border:none;border-top:1px solid #334155;margin:24px 0;">
             <p style="color:#64748b;font-size:0.75rem;margin:0;">
-              VeriFuse · Colorado Foreclosure Surplus Intelligence<br>
+              VeriFuse Technologies LLC · Colorado Foreclosure Surplus Intelligence<br>
               support@verifuse.tech · <a href="https://verifuse.tech" style="color:#22c55e;text-decoration:none;">verifuse.tech</a>
             </p>
           </td>
@@ -438,7 +438,7 @@ def _send_email(to: str, subject: str, body: str, html_body: str | None = None) 
                 },
                 json={
                     "personalizations": [{"to": [{"email": to}]}],
-                    "from": {"email": FROM},
+                    "from": {"email": FROM, "name": "VeriFuse Technologies LLC"},
                     "subject": subject,
                     "content": content,
                 },
@@ -3606,8 +3606,9 @@ async def billing_checkout(request: Request):
 # ── POST /api/billing/one-time — Any one-time pack purchase ─────────
 
 _ONE_TIME_SKUS = {
-    "starter":          {"env_key": "STARTER",          "credits": 10, "name": "Starter Pack"},
+    "starter":          {"env_key": "STARTER",          "credits": 10, "name": "Lead Unlock Bundle"},
     "investigation":    {"env_key": "INVESTIGATION",     "credits": 25, "name": "Investigation Pack"},
+    "skip_trace":       {"env_key": "SKIP_TRACE",        "credits": 1,  "name": "Skip Trace"},
     "filing_pack":      {"env_key": "FILING_PACK",       "credits": 3,  "name": "Filing Pack"},
     "premium_dossier":  {"env_key": "PREMIUM_DOSSIER",   "credits": 5,  "name": "Premium Dossier"},
 }
@@ -3644,7 +3645,7 @@ async def billing_one_time(request: Request):
                 "credits": str(meta["credits"]),
             },
             line_items=[{"price": price_id, "quantity": 1}],
-            success_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/dashboard?pack=success",
+            success_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/account?credits=1",
             cancel_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/pricing",
         )
         return {"checkout_url": session.url}
@@ -3682,7 +3683,7 @@ async def billing_starter(request: Request):
                 "credits": str(STARTER_PACK["credits"]),
             },
             line_items=[{"price": starter_price_id, "quantity": 1}],
-            success_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/dashboard?starter=success",
+            success_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/account?credits=1",
             cancel_url=f"{os.environ.get('VERIFUSE_BASE_URL', 'https://verifuse.tech')}/pricing",
         )
         return {"checkout_url": session.url}
@@ -3939,44 +3940,47 @@ async def stripe_webhook(request: Request):
 
 
 def _handle_checkout_session(session: dict) -> None:
-    """Handle checkout.session.completed — starter pack crediting."""
+    """Handle checkout.session.completed — one-time pack crediting and subscription activation."""
     metadata = session.get("metadata", {})
     sku = metadata.get("sku", "")
 
-    if sku == "starter_pack":
-        # Starter pack validation — ALL must pass
-        if session.get("mode") != "payment":
-            log.warning("Starter: mode != payment")
-            return
+    # ── One-time payment packs ───────────────────────────────────────────
+    # Canonical SKU map for all one-time purchases
+    _PACK_REGISTRY: dict[str, dict] = {
+        "starter_pack":    {"credits": STARTER_PACK["credits"],        "expiry_days": STARTER_PACK.get("expiry_days", 90),  "source": "starter"},
+        "starter":         {"credits": STARTER_PACK["credits"],        "expiry_days": STARTER_PACK.get("expiry_days", 90),  "source": "starter"},
+        "investigation":   {"credits": INVESTIGATION_PACK["credits"],  "expiry_days": INVESTIGATION_PACK.get("expiry_days", 90), "source": "investigation"},
+        "skip_trace":      {"credits": 1,                              "expiry_days": 90, "source": "skip_trace"},
+        "filing_pack":     {"credits": CREDIT_COSTS["filing_pack"],    "expiry_days": 90, "source": "filing_pack"},
+        "premium_dossier": {"credits": CREDIT_COSTS["premium_dossier"],"expiry_days": 90, "source": "premium_dossier"},
+    }
+
+    if session.get("mode") == "payment" and sku in _PACK_REGISTRY:
+        pack = _PACK_REGISTRY[sku]
+        # Strict validation
         if session.get("payment_status") != "paid":
-            log.warning("Starter: payment_status != paid")
+            log.warning("Pack %s: payment_status != paid", sku)
             return
         user_id = metadata.get("user_id", "")
         if not user_id:
-            log.warning("Starter: no user_id in metadata")
+            log.warning("Pack %s: no user_id in metadata", sku)
             return
         if session.get("client_reference_id") != user_id:
-            log.warning("Starter: client_reference_id mismatch")
-            return
-        credits_str = metadata.get("credits", "")
-        if credits_str != str(STARTER_PACK["credits"]):
-            log.warning("Starter: credits mismatch (got %s, expected %s)", credits_str, STARTER_PACK["credits"])
+            log.warning("Pack %s: client_reference_id mismatch", sku)
             return
         amount_total = session.get("amount_total", 0)
         if amount_total <= 0:
-            log.warning("Starter: amount_total <= 0")
+            log.warning("Pack %s: amount_total <= 0", sku)
             return
         currency = (session.get("currency") or "").lower()
         if currency != EXPECTED_CURRENCY:
-            log.warning("Starter: currency mismatch (got %s)", currency)
+            log.warning("Pack %s: currency mismatch (got %s)", sku, currency)
             return
 
-        # Credit the starter pack via FIFO ledger (30-day expiry)
         import uuid as _uuid_mod
         session_id = session.get("id", "")
-        credits = STARTER_PACK["credits"]
-        expiry_days = STARTER_PACK.get("expiry_days", 30)
-        expires_ts = _epoch_now() + expiry_days * 86400
+        credits = pack["credits"]
+        expires_ts = _epoch_now() + pack["expiry_days"] * 86400
 
         conn = _get_conn()
         try:
@@ -3984,19 +3988,19 @@ def _handle_checkout_session(session: dict) -> None:
                 conn.execute(
                     "INSERT INTO unlock_ledger_entries "
                     "(id, user_id, source, qty_total, qty_remaining, purchased_ts, expires_ts, stripe_event_id) "
-                    "VALUES (?, ?, 'starter', ?, ?, ?, ?, ?)",
-                    [str(_uuid_mod.uuid4()), user_id, credits, credits,
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [str(_uuid_mod.uuid4()), user_id, pack["source"], credits, credits,
                      _epoch_now(), expires_ts, session_id],
                 )
             except sqlite3.IntegrityError:
-                log.info("Starter pack already credited (stripe_event_id dup): %s", session_id)
+                log.info("Pack %s already credited (stripe_event_id dup): %s", sku, session_id)
                 return
-            _audit_log(conn, user_id, "starter_pack_credited", {
-                "credits": credits, "amount_total": amount_total,
+            _audit_log(conn, user_id, f"{pack['source']}_credited", {
+                "sku": sku, "credits": credits, "amount_total": amount_total,
                 "session_id": session_id, "expires_ts": expires_ts,
             })
             conn.commit()
-            log.info("Starter pack credited: user=%s credits=%d expires=%d", user_id, credits, expires_ts)
+            log.info("Pack credited: user=%s sku=%s credits=%d expires=%d", user_id, sku, credits, expires_ts)
         finally:
             conn.close()
     else:
@@ -6963,6 +6967,10 @@ _OPS_WHITELIST: dict[str, list[str]] = {
     "unclaimed-crossref":   ["unclaimed-crossref"],
     # Coverage report
     "coverage-report":      ["coverage-report"],
+    # Alert dispatch
+    "dispatch-alerts":      ["dispatch-alerts"],
+    # OCR processor
+    "ocr-processor":        ["ocr-processor"],
 }
 
 # ── Background job executor (separate from DB executor) ───────────────────────

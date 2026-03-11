@@ -841,6 +841,30 @@ conn.close()
 PYEOF
     ;;
 
+  ocr-processor)
+    echo "[vf] Running OCR batch processor on unprocessed evidence documents..."
+    python3 - <<'PYEOF'
+import sqlite3, os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(".")), "verifuse_v2"))
+DB = "verifuse_v2/data/verifuse_v2.db"
+conn = sqlite3.connect(DB)
+conn.row_factory = sqlite3.Row
+# Find leads with html_snapshots but no field_evidence extracted yet
+rows = conn.execute("""
+    SELECT DISTINCT hs.asset_id
+    FROM html_snapshots hs
+    LEFT JOIN field_evidence fe ON fe.asset_id = hs.asset_id
+    WHERE fe.asset_id IS NULL
+    LIMIT 50
+""").fetchall()
+print(f"[OCR-PROCESSOR] {len(rows)} assets need field_evidence extraction")
+for r in rows:
+    print(f"  - {r['asset_id']}")
+conn.close()
+print("[OCR-PROCESSOR] Done. Run 'vf extract-batch --county <county> --limit 20' to process.")
+PYEOF
+    ;;
+
   *)
     cat <<'USAGE'
 VeriFuse one-command ops wrapper

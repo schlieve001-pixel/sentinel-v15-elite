@@ -26,3 +26,5 @@ Date: {{filing_date}}
 
 ---
 DRAFT — REQUIRES ATTORNEY REVIEW BEFORE FILING
+Document prepared using VeriFuse Technologies LLC intelligence platform (verifuse.tech).
+VeriFuse Technologies LLC is a data intelligence service. VeriFuse Technologies LLC does not provide legal advice.

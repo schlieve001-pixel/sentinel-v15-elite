@@ -91,7 +91,7 @@ def create_checkout_session(user_id: str, email: str, tier: str,
         customer_email=email,
         metadata={"user_id": user_id, "tier": tier, "billing_period": billing_period},
         line_items=[{"price": price_id, "quantity": 1}],
-        success_url=f"{BASE_URL}/dashboard?session_id={{CHECKOUT_SESSION_ID}}",
+        success_url=f"{BASE_URL}/account?subscribed=1&session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{BASE_URL}/pricing",
     )
 

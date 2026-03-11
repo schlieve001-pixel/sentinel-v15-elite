@@ -309,7 +309,7 @@ export default function Landing() {
           <Link to="/privacy">Privacy</Link>
         </div>
         <div className="footer-copy">
-          © {new Date().getFullYear()} VeriFuse LLC. All rights reserved.
+          © {new Date().getFullYear()} VeriFuse Technologies LLC. All rights reserved.
           Data sourced from public county records.
         </div>
       </footer>

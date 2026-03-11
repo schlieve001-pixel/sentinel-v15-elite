@@ -473,10 +473,14 @@ export default function Dashboard() {
     if (s === "newest") setSortBy("newest");
   }, [searchParams]);
 
-  // Scroll preservation
+  // Scroll preservation — restore after list loads
   useEffect(() => {
     const y = Number(sessionStorage.getItem("leadsScrollY") || 0);
-    if (y > 0) requestAnimationFrame(() => window.scrollTo(0, y));
+    if (y > 0) {
+      // Wait for lead cards to render before scrolling
+      const t = setTimeout(() => window.scrollTo({ top: y, behavior: "instant" as ScrollBehavior }), 200);
+      return () => clearTimeout(t);
+    }
     return () => { sessionStorage.setItem("leadsScrollY", String(window.scrollY)); };
   }, []);
 
@@ -818,22 +822,35 @@ export default function Dashboard() {
               />
               {/* C4: Market Pulse */}
               {marketVelocity?.most_urgent_county && (
-                <div style={{
-                  background: "#111827",
-                  border: "1px solid #78350f",
-                  borderRadius: 8,
-                  padding: "16px 20px",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 4,
-                  minWidth: 0,
-                }}>
-                  <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.55, textTransform: "uppercase" }}>MARKET PULSE</div>
+                <div
+                  onClick={() => {
+                    setGrade("GOLD");
+                    setCounty(marketVelocity.most_urgent_county);
+                    setSearchParams(p => { p.set("grade", "GOLD"); p.set("county", marketVelocity.most_urgent_county); return p; });
+                    window.scrollTo({ top: 600, behavior: "smooth" });
+                  }}
+                  style={{
+                    background: "#111827",
+                    border: "1px solid #78350f",
+                    borderRadius: 8,
+                    padding: "16px 20px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 4,
+                    minWidth: 0,
+                    cursor: "pointer",
+                    transition: "border-color 0.15s",
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.borderColor = "#f59e0b")}
+                  onMouseLeave={e => (e.currentTarget.style.borderColor = "#78350f")}
+                  title={`View ${marketVelocity.most_urgent_count} urgent GOLD leads in ${marketVelocity.most_urgent_county.replace(/_/g, " ")}`}
+                >
+                  <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", opacity: 0.55, textTransform: "uppercase" }}>MARKET PULSE ↗</div>
                   <div style={{ fontWeight: 700, color: "#f59e0b", fontSize: "1.2em", lineHeight: 1.2, marginTop: 4 }}>
                     {marketVelocity.most_urgent_county.replace(/_/g, " ").toUpperCase()}
                   </div>
                   <div style={{ fontSize: "0.78em", opacity: 0.5 }}>
-                    {marketVelocity.most_urgent_count} urgent leads
+                    {marketVelocity.most_urgent_count} urgent leads — click to filter
                   </div>
                 </div>
               )}

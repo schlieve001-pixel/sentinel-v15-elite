@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import {
   getBillingStatus, getBillingPortalUrl, getInvoices, updateAccount,
@@ -124,13 +124,15 @@ function ProfileSection({ user }: { user: any }) {
   const [fullName, setFullName] = useState(user?.full_name || "");
   const [firmName, setFirmName] = useState(user?.firm_name || "");
   const [barNumber, setBarNumber] = useState(user?.bar_number || "");
-  const [barState, setBarState] = useState("CO");
-  const [firmAddress, setFirmAddress] = useState("");
-  const [firmPhone, setFirmPhone] = useState("");
-  const [firmWebsite, setFirmWebsite] = useState("");
+  const [barState, setBarState] = useState(user?.bar_state || "CO");
+  const [firmAddress, setFirmAddress] = useState(user?.firm_address || "");
+  const [firmPhone, setFirmPhone] = useState(user?.firm_phone || "");
+  const [firmWebsite, setFirmWebsite] = useState(user?.firm_website || "");
   const [saving, setSaving] = useState(false);
 
-  const barVerified = Boolean(user?.bar_number?.trim());
+  // Bar number is locked once set — requires admin to change (fraud prevention)
+  const barLocked = Boolean(user?.bar_number?.trim());
+  const barVerified = barLocked;
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -171,8 +173,21 @@ function ProfileSection({ user }: { user: any }) {
             <input style={INPUT} type="text" value={firmName} onChange={e => setFirmName(e.target.value)} placeholder="Smith & Associates LLC" />
           </label>
           <label>
-            <span style={LABEL}>Bar Number</span>
-            <input style={INPUT} type="text" value={barNumber} onChange={e => setBarNumber(e.target.value)} placeholder="CO12345" />
+            <span style={LABEL}>Bar Number {barLocked && <span style={{ color: "#f59e0b", fontWeight: 700, marginLeft: 4 }}>🔒</span>}</span>
+            <input
+              style={{ ...INPUT, opacity: barLocked ? 0.6 : 1, cursor: barLocked ? "not-allowed" : "text" }}
+              type="text"
+              value={barNumber}
+              onChange={e => !barLocked && setBarNumber(e.target.value)}
+              readOnly={barLocked}
+              placeholder="CO12345"
+              title={barLocked ? "Bar number is locked once set. Contact support to update." : "Enter your Colorado bar number"}
+            />
+            {barLocked && (
+              <div style={{ fontSize: "0.7em", color: "#94a3b8", marginTop: 3 }}>
+                Locked — contact <a href="mailto:support@verifuse.tech" style={{ color: "#22c55e" }}>support@verifuse.tech</a> to update
+              </div>
+            )}
           </label>
           <label>
             <span style={LABEL}>Bar State</span>
@@ -407,12 +422,17 @@ function InvoiceSection({ invoices }: { invoices: Invoice[] }) {
 export default function Account() {
   const { user, loading: authLoading, logout } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [billingLoading, setBillingLoading] = useState(true);
   const [portalLoading, setPortalLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"subscription" | "profile" | "security" | "api" | "invoices">("subscription");
+
+  // Success banners from Stripe redirects
+  const justSubscribed = searchParams.get("subscribed") === "1";
+  const justCredited = searchParams.get("credits") === "1";
 
   useEffect(() => {
     if (!authLoading && !user) navigate("/login");
@@ -459,6 +479,19 @@ export default function Account() {
 
   return (
     <div className="dashboard">
+      {/* Stripe success banners */}
+      {justSubscribed && (
+        <div style={{ background: "rgba(34,197,94,0.12)", borderBottom: "1px solid rgba(34,197,94,0.3)", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ color: "#22c55e", fontWeight: 700 }}>✓ Subscription activated! Your credits have been added.</span>
+          <button onClick={() => setSearchParams(p => { p.delete("subscribed"); p.delete("session_id"); return p; })} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "1.1em" }}>×</button>
+        </div>
+      )}
+      {justCredited && !justSubscribed && (
+        <div style={{ background: "rgba(34,197,94,0.12)", borderBottom: "1px solid rgba(34,197,94,0.3)", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ color: "#22c55e", fontWeight: 700 }}>✓ Credits added to your account. They're ready to use now.</span>
+          <button onClick={() => setSearchParams(p => { p.delete("credits"); return p; })} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "1.1em" }}>×</button>
+        </div>
+      )}
       {/* Header */}
       <header className="dash-header">
         <Link to="/dashboard" className="dash-logo">
@@ -531,7 +564,7 @@ export default function Account() {
             </button>
           </div>
           <p style={{ fontSize: "0.72em", opacity: 0.3, marginTop: 12 }}>
-            To delete your account or export your data, contact support: verifuse.tech@gmail.com
+            To delete your account or export your data, contact support: support@verifuse.tech
           </p>
         </section>
       </div>

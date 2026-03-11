@@ -19,33 +19,33 @@ from typing import Optional
 
 TIERS: dict[str, dict] = {
     "associate": {
-        "monthly_price_cents": 14900,  # $149/month
+        "monthly_price_cents": 19900,  # $199/month (Investigator)
         "credits": 30,
         "daily_limit": None,
         "sessions": 1,
-        "label": "Associate",
+        "label": "Investigator",
         "rollover_days": 30,
         "max_bank_multiplier": 1.5,    # max 45 banked
-        "access": ["foreclosure_overbid"],
+        "access": ["foreclosure_overbid", "tax_deed"],
     },
     "partner": {
         "monthly_price_cents": 39900,  # $399/month
-        "credits": 100,
+        "credits": 75,
         "daily_limit": None,
         "sessions": 2,
         "label": "Partner",
         "rollover_days": 60,
-        "max_bank_multiplier": 1.5,    # max 150 banked
-        "access": ["foreclosure_overbid", "tax_lien", "tax_deed", "hoa"],
+        "max_bank_multiplier": 1.5,    # max 113 banked
+        "access": ["foreclosure_overbid", "tax_lien", "tax_deed", "unclaimed_property"],
     },
     "sovereign": {
-        "monthly_price_cents": 89900,  # $899/month
-        "credits": 250,
+        "monthly_price_cents": 89900,  # $899/month (Enterprise)
+        "credits": 200,
         "daily_limit": None,
         "sessions": 5,
-        "label": "Sovereign",
+        "label": "Enterprise",
         "rollover_days": 90,
-        "max_bank_multiplier": 1.5,    # max 375 banked
+        "max_bank_multiplier": 1.5,    # max 300 banked
         "access": ["foreclosure_overbid", "tax_lien", "tax_deed", "hoa", "unclaimed_property", "estate_cases", "api", "county_reports"],
     },
 }
