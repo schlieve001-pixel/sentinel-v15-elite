@@ -1,0 +1,13 @@
+EXHIBIT A — TRUSTEE SALE INFORMATION
+=====================================
+County: {{county_upper}}
+Case Number: {{case_number}}
+Property: {{property_address}}
+Sale Date: {{sale_date}}
+Successful Bid at Sale: ${{overbid_amount}} [ATTORNEY: VERIFY AGAINST OFFICIAL RECORDS]
+
+SOURCE: GovSoft/GTSData foreclosure sale record ({{data_sources}})
+Verified: {{generated_at}}
+
+NOTE: Attorney must verify this exhibit against official Public Trustee records
+prior to filing. This data is for reference only.

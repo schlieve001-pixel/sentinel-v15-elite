@@ -77,10 +77,24 @@ function SubscriptionSection({ user, billing, billingLoading, portalLoading, onM
               {billing?.subscription_status?.toUpperCase() || (!billing?.stripe_customer_id ? "FREE TIER" : "—")}
             </div>
           </div>
+          {(billing as any)?.billing_period && (
+            <div>
+              <span style={LABEL}>Billing</span>
+              <div style={{ fontWeight: 700, color: (billing as any).billing_period === "annual" ? "#22c55e" : "#e5e7eb" }}>
+                {(billing as any).billing_period === "annual" ? "ANNUAL PLAN" : "MONTHLY PLAN"}
+              </div>
+            </div>
+          )}
           {billing?.current_period_end && (
             <div>
               <span style={LABEL}>Renews</span>
               <div style={{ fontWeight: 700 }}>{fmtDate(billing.current_period_end)}</div>
+            </div>
+          )}
+          {(billing as any)?.subscribed_since && (
+            <div>
+              <span style={LABEL}>Member Since</span>
+              <div style={{ fontWeight: 700 }}>{fmtDate((billing as any).subscribed_since)}</div>
             </div>
           )}
           {billing?.founders_pricing && (

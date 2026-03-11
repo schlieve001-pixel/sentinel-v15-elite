@@ -1041,7 +1041,20 @@ def _row_to_safe(row: dict) -> dict:
     grade_reasons = _compute_grade_reasons(row)
 
     # Phase 4: verification state
-    vstate = _compute_verification_state(row)
+    _computed_vs = _compute_verification_state(row)
+    # Persist if DB value differs (non-blocking — best-effort)
+    if row.get("verification_state") != _computed_vs:
+        try:
+            _bg_conn = _get_conn()
+            _bg_conn.execute(
+                "UPDATE leads SET verification_state=? WHERE id=?",
+                [_computed_vs, row.get("id")]
+            )
+            _bg_conn.commit()
+            _bg_conn.close()
+        except Exception:
+            pass
+    vstate = _computed_vs
 
     # Phase 5: two-tier net-to-owner display label
     pool_source = pool_src  # already computed above
@@ -1825,6 +1838,7 @@ async def startup():
                 "password_reset_token": "TEXT",
                 "password_reset_sent_at": "TEXT",
                 "token_version": "INTEGER DEFAULT 0",  # Incremented on password change/logout → revokes old JWTs
+                "billing_period": "TEXT DEFAULT 'monthly'",
             }
             for _col, _typedef in _016.items():
                 if _col not in _mc_cols:
@@ -3700,12 +3714,21 @@ async def billing_status(request: Request):
     user = _require_user(request)
     conn = _get_conn()
     try:
-        row = conn.execute(
-            """SELECT tier, credits_remaining, stripe_customer_id, stripe_subscription_id,
-                      subscription_status, current_period_end, founders_pricing
-               FROM users WHERE user_id = ?""",
-            [user["user_id"]],
-        ).fetchone()
+        try:
+            row = conn.execute(
+                """SELECT tier, credits_remaining, stripe_customer_id, stripe_subscription_id,
+                          subscription_status, current_period_end, founders_pricing,
+                          billing_period, created_at
+                   FROM users WHERE user_id = ?""",
+                [user["user_id"]],
+            ).fetchone()
+        except Exception:
+            row = conn.execute(
+                """SELECT tier, credits_remaining, stripe_customer_id, stripe_subscription_id,
+                          subscription_status, current_period_end, founders_pricing, created_at
+                   FROM users WHERE user_id = ?""",
+                [user["user_id"]],
+            ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="User not found.")
         from verifuse_v2.server.pricing import MONTHLY_CREDITS
@@ -3719,6 +3742,28 @@ async def billing_status(request: Request):
             "current_period_end": row["current_period_end"],
             "founders_pricing": bool(row["founders_pricing"]),
             "stripe_configured": bool(STRIPE_SECRET_KEY),
+            "billing_period": (row["billing_period"] if "billing_period" in row.keys() else None) or "monthly",
+            "subscribed_since": row["created_at"],
+        }
+    finally:
+        conn.close()
+
+
+# ── GET /api/founding/status — Founding attorney program status ──────
+
+@app.get("/api/founding/status")
+async def founding_status():
+    """Public endpoint — returns founding attorney program status."""
+    conn = _get_conn()
+    try:
+        claimed = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE founders_pricing = 1"
+        ).fetchone()[0]
+        total = 10
+        return {
+            "slots_claimed": claimed,
+            "slots_total": total,
+            "is_open": claimed < total,
         }
     finally:
         conn.close()
@@ -6841,7 +6886,7 @@ async def generate_court_filing(asset_id: str, request: Request):
         try:
             row = conn.execute("""
                 SELECT case_number, county, sale_date, overbid_amount,
-                       property_address, owner_name
+                       property_address, owner_name, calc_hash, pool_source, audit_grade
                 FROM leads WHERE id = ?
             """, [asset_id]).fetchone()
             if not row:
@@ -6878,6 +6923,11 @@ async def generate_court_filing(asset_id: str, request: Request):
         "attorney_phone": "[ATTORNEY PHONE]",
         "attorney_email": user.get("email", "[ATTORNEY EMAIL]"),
         "filing_date": datetime.now(timezone.utc).strftime("%B %d, %Y"),
+        "owner_name": lead.get("owner_name") or "[OWNER NAME — VERIFY]",
+        "calculation_hash": lead.get("calc_hash") or "NOT_COMPUTED",
+        "calc_engine_version": "surplus_calc_v2",
+        "data_sources": lead.get("pool_source") or "UNVERIFIED",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     buf = io.BytesIO()
@@ -6886,6 +6936,9 @@ async def generate_court_filing(asset_id: str, request: Request):
             ("motion_for_disbursement.txt", "01_Motion_for_Disbursement.txt"),
             ("notice_of_claim.txt",         "02_Notice_of_Claim.txt"),
             ("affidavit_of_representation.txt", "03_Affidavit_of_Representation.txt"),
+            ("certificate_of_service.txt",  "04_Certificate_of_Service.txt"),
+            ("exhibit_a_trustee_sale.txt",  "Exhibit_A_Trustee_Sale.txt"),
+            ("exhibit_b_property_record.txt", "Exhibit_B_Property_Record.txt"),
         ]:
             tmpl_path = TEMPLATES_DIR / tmpl_file
             content = _render_template(tmpl_path, filing_vars)
@@ -7554,11 +7607,21 @@ async def county_outcomes(county: str = Query(None), request: Request = None):
 
 @app.get("/api/lead/{lead_id}/owner-contact")
 async def get_owner_contact(lead_id: str, request: Request):
-    """Get aggregated owner contact intel. Gated at partner+ tier."""
+    """Get aggregated owner contact intel. Partner/Sovereign free; associate costs 1 credit."""
     user = _require_user(request)
     tier = user.get("tier", "associate")
+    user_id = user["user_id"]
+    _deduct = False
     if tier == "associate" and not _effective_admin(user):
-        raise HTTPException(403, detail="Owner contact intel requires Partner or Sovereign tier.")
+        # Check credits
+        conn2 = _get_conn()
+        try:
+            creds = conn2.execute("SELECT credits_remaining FROM users WHERE user_id=?", [user_id]).fetchone()
+            if not creds or creds["credits_remaining"] < 1:
+                raise HTTPException(402, detail="Insufficient credits. Purchase a Skip Trace pack ($29) on the Pricing page.")
+            _deduct = True
+        finally:
+            conn2.close()
     conn = _get_conn()
     try:
         row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
@@ -7569,18 +7632,64 @@ async def get_owner_contact(lead_id: str, request: Request):
         contact_json = row.get("owner_contact_json")
         if contact_json:
             try:
-                return json.loads(contact_json)
+                result = json.loads(contact_json)
+            except Exception:
+                result = None
+        else:
+            result = None
+        if result is None:
+            # Fallback: build from available fields
+            result = {
+                "mailing_address": row.get("property_address"),
+                "address_source": "property_record",
+                "address_confidence": "MEDIUM",
+                "forwarding_address": None,
+                "last_verified": row.get("updated_at", "")[:10] if row.get("updated_at") else None,
+                "note": "Enhanced owner contact available — purchase Skip Trace ($29) for multi-source cross-reference including forwarding address and phone lookup.",
+            }
+    finally:
+        conn.close()
+    # Deduct credit for associate tier after successfully fetching data
+    if _deduct:
+        _cconn = _get_conn()
+        try:
+            _cconn.execute("BEGIN IMMEDIATE")
+            _cconn.execute(
+                "UPDATE users SET credits_remaining = credits_remaining - 1 WHERE user_id = ? AND credits_remaining > 0",
+                [user_id]
+            )
+            import uuid as _uid
+            _cconn.execute(
+                "INSERT INTO audit_log(id, user_id, action, meta_json, ip, created_at) VALUES(?,?,?,?,?,datetime('now'))",
+                [str(_uid.uuid4()), user_id, "skip_trace_credit_deduct", json.dumps({"lead_id": lead_id}), "system"]
+            )
+            _cconn.execute("COMMIT")
+        except Exception as _ce:
+            log.error("skip_trace credit deduct failed: %s", _ce)
+            try:
+                _cconn.execute("ROLLBACK")
             except Exception:
                 pass
-        # Fallback: build from available fields
-        return {
-            "mailing_address": row.get("property_address"),
-            "address_source": "property_record",
-            "address_confidence": "MEDIUM",
-            "forwarding_address": None,
-            "last_verified": row.get("updated_at", "")[:10] if row.get("updated_at") else None,
-            "note": "Enhanced owner contact available — purchase Skip Trace ($29) for multi-source cross-reference including forwarding address and phone lookup.",
-        }
+        finally:
+            _cconn.close()
+    return result
+
+
+# ── C6: Evidence Preview ─────────────────────────────────────────────
+
+@app.get("/api/lead/{lead_id}/evidence-preview")
+async def evidence_preview(lead_id: str, request: Request):
+    """Return document metadata (no file content) — no unlock required, just registered user."""
+    user = _require_user(request)
+    conn = _get_conn()
+    try:
+        docs = conn.execute(
+            """SELECT id, doc_family, filename, recording_number, doc_type,
+                      file_size_bytes, created_at
+               FROM evidence_documents WHERE asset_id=? ORDER BY created_at DESC""",
+            [lead_id],
+        ).fetchall()
+        return {"docs": [dict(d) for d in docs], "count": len(docs)}
     finally:
         conn.close()
 

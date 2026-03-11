@@ -455,6 +455,20 @@ def run_extraction(asset_id: str, conn=None) -> dict:
             asset_id, data_grade, processing_status, has_voucher_doc, voucher_overbid,
         )
 
+        # ── Evidence gate: block GOLD if no evidence docs ────────────────────
+        if data_grade == "GOLD":
+            ev_count = conn.execute(
+                "SELECT COUNT(*) FROM evidence_documents WHERE asset_id=?", [asset_id]
+            ).fetchone()[0]
+            snap_count = conn.execute(
+                "SELECT COUNT(*) FROM html_snapshots WHERE asset_id=? AND snapshot_type='SALE_INFO'",
+                [asset_id]
+            ).fetchone()[0]
+            if ev_count == 0 and snap_count == 0:
+                log.warning("[gate4] %s blocked from GOLD: no evidence docs", asset_id)
+                data_grade = "SILVER"
+                processing_status = "NEEDS_REVIEW"
+
         # ── 7. Write results ──────────────────────────────────────────────────
         overbid_cents = int(overbid_at_sale * 100)
         if has_voucher_doc and voucher_overbid is None:

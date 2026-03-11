@@ -4,10 +4,11 @@ import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downlo
 import { useAuth } from "../lib/auth";
 import { toast } from "../components/Toast";
 
-function SkipTracePanel({ assetId }: { assetId: string }) {
+function SkipTracePanel({ assetId, userCredits }: { assetId: string; userCredits: number }) {
   const [contact, setContact] = useState<Record<string, string | null> | null>(null);
   const [loading, setLoading] = useState(false);
   const [ran, setRan] = useState(false);
+  const [buyLoading, setBuyLoading] = useState(false);
 
   const _apiBase = () => API_BASE;
   const _token = () => localStorage.getItem("vf_token") || "";
@@ -22,15 +23,35 @@ function SkipTracePanel({ assetId }: { assetId: string }) {
         const data = await res.json();
         setContact(data);
         setRan(true);
-      } else if (res.status === 403) {
-        toast("Skip Trace requires Partner or Sovereign tier — or purchase a Skip Trace add-on ($29)", "error");
       } else if (res.status === 402) {
-        toast("Insufficient credits — purchase a Skip Trace pack from the Pricing page", "error");
+        toast("No credits remaining. Purchase a Skip Trace pack below.", "error");
+      } else if (res.status === 403) {
+        toast("Skip Trace requires credits. Purchase a pack to continue.", "error");
       } else {
         toast("Contact data not yet available for this lead", "error");
       }
     } catch { toast("Failed to fetch contact intel", "error"); }
     finally { setLoading(false); }
+  }
+
+  async function buyAndRun() {
+    setBuyLoading(true);
+    try {
+      const res = await fetch(`${_apiBase()}/api/billing/one-time`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${_token()}` },
+        body: JSON.stringify({ sku: "skip_trace", lead_id: assetId, return_path: window.location.pathname + "?credits=1" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.checkout_url) window.location.href = data.checkout_url;
+        else toast("Checkout unavailable", "error");
+      } else {
+        const err = await res.json().catch(() => ({}));
+        toast(err.detail || "Checkout failed", "error");
+      }
+    } catch { toast("Failed to start checkout", "error"); }
+    finally { setBuyLoading(false); }
   }
 
   if (ran && contact) {
@@ -57,20 +78,39 @@ function SkipTracePanel({ assetId }: { assetId: string }) {
     );
   }
 
+  const hasCredits = userCredits > 0;
+
   return (
     <div>
-      <button
-        onClick={runSkipTrace}
-        disabled={loading}
-        style={{ background: loading ? "#1f2937" : "#14532d", border: "1px solid #22c55e", borderRadius: 4, color: "#4ade80", cursor: loading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
-      >
-        {loading ? "RUNNING SKIP TRACE..." : "RUN SKIP TRACE →"}
-      </button>
-      <div style={{ marginTop: 6, fontSize: "0.68em", color: "#4b5563" }}>
-        Multi-source owner address lookup: assessor records + property transfers + CO SOS.
-        Partner/Sovereign tier or purchase Skip Trace add-on ($29/record) on the{" "}
-        <a href="/pricing" style={{ color: "#22c55e", textDecoration: "none" }}>Pricing page</a>.
-      </div>
+      {hasCredits ? (
+        <>
+          <button
+            onClick={runSkipTrace}
+            disabled={loading}
+            style={{ background: loading ? "#1f2937" : "#14532d", border: "1px solid #22c55e", borderRadius: 4, color: "#4ade80", cursor: loading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
+          >
+            {loading ? "RUNNING SKIP TRACE..." : "RUN SKIP TRACE — 1 CREDIT"}
+          </button>
+          <div style={{ marginTop: 4, fontSize: "0.7em", color: "#4b5563" }}>
+            {userCredits} credit{userCredits !== 1 ? "s" : ""} remaining · Multi-source owner address lookup
+          </div>
+        </>
+      ) : (
+        <>
+          <button
+            onClick={buyAndRun}
+            disabled={buyLoading}
+            style={{ background: buyLoading ? "#1f2937" : "#1c1f2e", border: "1px solid #3b82f6", borderRadius: 4, color: "#93c5fd", cursor: buyLoading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
+          >
+            {buyLoading ? "REDIRECTING..." : "PURCHASE & RUN — $29"}
+          </button>
+          <div style={{ marginTop: 6, fontSize: "0.68em", color: "#4b5563" }}>
+            No credits remaining. $29 one-time purchase — result appears on this page after payment.
+            Or{" "}
+            <a href="/pricing" style={{ color: "#22c55e", textDecoration: "none" }}>subscribe for monthly credits →</a>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -114,6 +154,9 @@ export default function LeadDetail() {
   const [auditTrail, setAuditTrail] = useState<LeadAuditTrail | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
+
+  // C6: Evidence preview (visible regardless of lock status)
+  const [evidencePreview, setEvidencePreview] = useState<any[]>([]);
 
   // Case timeline (2C)
   const [showTimeline, setShowTimeline] = useState(false);
@@ -208,6 +251,18 @@ export default function LeadDetail() {
       .finally(() => setEvidenceLoading(false));
     return () => ac.abort();
   }, [lead?.registry_asset_id, user]);
+
+  // C6: Evidence preview — fetch metadata regardless of lock status
+  useEffect(() => {
+    if (!assetId) return;
+    const token = localStorage.getItem("vf_token") || "";
+    fetch(`${API_BASE}/api/lead/${assetId}/evidence-preview`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.ok ? r.json() : { docs: [] })
+      .then(d => setEvidencePreview(d.docs || []))
+      .catch(() => {});
+  }, [assetId]);
 
   function handleUnlockError(err: unknown) {
     if (isVerifyEmailError(err)) {
@@ -400,6 +455,16 @@ export default function LeadDetail() {
             </div>
           </div>
 
+          {/* F1: Ready To File Banner */}
+          {(lead as any).verification_state === 'READY_TO_FILE' && (
+            <div style={{ margin: "16px 0", padding: "14px 20px", background: "rgba(34,197,94,0.08)", border: "1px solid #22c55e", borderRadius: 8, display: "flex", alignItems: "center", gap: 12 }}>
+              <span style={{ color: "#22c55e", fontWeight: 700, fontSize: "1.1em" }}>✓ READY TO FILE</span>
+              <span style={{ fontSize: "0.82em", color: "#6b7280" }}>
+                All required fields confirmed · Expected recovery: {lead.estimated_surplus != null && lead.estimated_surplus > 0 ? `$${lead.estimated_surplus.toLocaleString()}` : "see details"} · Filing packet: 3 credits
+              </span>
+            </div>
+          )}
+
           {/* ══════════════════════════════════════════════════════════
               TWO-COLUMN INTELLIGENCE GRID
               ══════════════════════════════════════════════════════════ */}
@@ -433,6 +498,12 @@ export default function LeadDetail() {
               {/* Financial analysis */}
               <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px" }}>
                 <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>FINANCIAL ANALYSIS</div>
+                {/* C1: Unverified overbid pool warning */}
+                {(lead as any).winning_bid && !((lead as any).total_debt) && lead.pool_source === "UNVERIFIED" && (
+                  <div style={{ marginBottom: 12, padding: "8px 12px", background: "#1c1005", border: "1px solid #78350f44", borderRadius: 4, fontSize: "0.78em", color: "#f59e0b" }}>
+                    OVERBID POOL: {fmt((lead as any).winning_bid)} (Unverified — total debt not extracted)
+                  </div>
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 24px" }}>
                   <div>
                     <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>OVERBID AMOUNT</div>
@@ -444,13 +515,22 @@ export default function LeadDetail() {
                       <div style={{ fontSize: "1.1em", color: "#e5e7eb", fontWeight: 700 }}>{fmt(lead.gross_surplus_cents / 100)}</div>
                     </div>
                   )}
-                  {lead.net_owner_equity_cents != null && (
+                  {/* C1: Net Owner Equity only when math_verified or audit_grade A/B */}
+                  {lead.net_owner_equity_cents != null && ((lead as any).math_verified === true || (lead as any).audit_grade === "A" || (lead as any).audit_grade === "B") && (
                     <div>
-                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>NET TO OWNER</div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>NET OWNER EQUITY</div>
                       <div style={{ fontSize: "1.1em", color: "#22c55e", fontWeight: 700 }}>{fmt(lead.net_owner_equity_cents / 100)}</div>
                     </div>
                   )}
-                  {lead.estimated_surplus != null && lead.estimated_surplus > 0 && (
+                  {/* C1: Potential Surplus Recovery Opportunity only when math_verified or audit_grade A/B */}
+                  {lead.estimated_surplus != null && lead.estimated_surplus > 0 && ((lead as any).math_verified === true || (lead as any).audit_grade === "A" || (lead as any).audit_grade === "B") && (
+                    <div>
+                      <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>POTENTIAL SURPLUS RECOVERY OPPORTUNITY</div>
+                      <div style={{ fontSize: "1.1em", color: "#22c55e", fontWeight: 700 }}>{fmt(lead.estimated_surplus)}</div>
+                    </div>
+                  )}
+                  {/* C1: estimated_surplus for MAX FEE only when pool_source !== UNVERIFIED */}
+                  {lead.estimated_surplus != null && lead.estimated_surplus > 0 && lead.pool_source !== "UNVERIFIED" && (
                     <div>
                       <div style={{ fontSize: "0.58em", letterSpacing: "0.1em", color: "#374151", marginBottom: 2 }}>MAX FEE CAP (10%)</div>
                       <div style={{ fontSize: "1.1em", color: "#94a3b8", fontWeight: 700 }}>{fmt(lead.estimated_surplus * 0.1)}</div>
@@ -818,7 +898,7 @@ export default function LeadDetail() {
               {/* Owner Contact Intel — Skip Trace */}
               <div style={{ borderTop: "1px solid #1f2937", paddingTop: 14, marginTop: 4 }}>
                 <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#6ee7b7", marginBottom: 10 }}>OWNER CONTACT INTEL — SKIP TRACE</div>
-                {assetId && <SkipTracePanel assetId={assetId} />}</div>
+                {assetId && <SkipTracePanel assetId={assetId} userCredits={user?.credits_remaining ?? 0} />}</div>
             </div>
           )}
 
@@ -828,8 +908,32 @@ export default function LeadDetail() {
             return (
               <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px", marginBottom: 12 }}>
                 <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>EVIDENCE DOCUMENTS</div>
+                {/* C3: GOLD Evidence Gap Warning */}
+                {lead.data_grade === 'GOLD' && (!(lead as any).evidence_docs || (lead as any).evidence_docs.length === 0) && (
+                  <div style={{ margin: "12px 0", padding: "10px 14px", background: "rgba(245,158,11,0.08)", border: "1px solid #78350f", borderRadius: 6, fontSize: "0.8em", color: "#f59e0b" }}>
+                    ⚠ EVIDENCE GAP — Marked GOLD but no source documents on file. Re-verification needed.
+                  </div>
+                )}
                 {!isAttorney ? (
-                  <div style={{ fontSize: "0.78em", color: "#4b5563" }}>Attorney verification required to access evidence documents.</div>
+                  /* C6: Show document metadata even for locked/non-attorney users */
+                  <div>
+                    {evidencePreview.length === 0 ? (
+                      <div style={{ fontSize: "0.78em", color: "#4b5563" }}>No evidence documents on file for this asset.</div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {evidencePreview.map((doc: any, i: number) => (
+                          <div key={doc.id || i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", border: "1px solid #1f2937", borderRadius: 4 }}>
+                            <span style={{ opacity: 0.75, minWidth: 120, fontSize: "0.75em" }}>{doc.doc_family_label || doc.doc_family || "—"}</span>
+                            <span style={{ flex: 1, opacity: 0.6, fontSize: "0.75em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{doc.filename || doc.title || "—"}</span>
+                            {doc.recording_number && <span style={{ fontSize: "0.68em", color: "#4b5563" }}>Rec# {doc.recording_number}</span>}
+                            {doc.date && <span style={{ fontSize: "0.68em", color: "#4b5563" }}>{doc.date}</span>}
+                            <span style={{ fontSize: "0.68em", color: "#4b5563", fontStyle: "italic" }}>(download requires unlock)</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ marginTop: 8, fontSize: "0.72em", color: "#374151" }}>Attorney verification required to download evidence documents.</div>
+                  </div>
                 ) : (
                   <>
                     {evidenceLoading && <div style={{ fontSize: "0.78em", color: "#4b5563" }}>Loading evidence...</div>}

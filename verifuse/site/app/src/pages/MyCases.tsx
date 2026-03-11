@@ -11,6 +11,12 @@ interface AttorneyCase {
   stage: Stage;
   notes?: string;
   outcome_type?: string;
+  outcome_funds_cents?: number;
+  contacted_at?: string;
+  retainer_signed_at?: string;
+  filed_at?: string;
+  hearing_date?: string;
+  credits_spent?: number;
   created_at: string;
   updated_at: string;
   case_number: string;
@@ -141,6 +147,26 @@ export default function MyCases() {
         {/* Kanban Board */}
         {cases.length > 0 && (
           <>
+          {/* ROI Panel */}
+          <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
+            {(() => {
+              const won = cases.filter((c) => (["PAID", "CLOSED"] as string[]).includes(c.stage) || (c.outcome_funds_cents || 0) > 0);
+              const totalRecovered = cases.reduce((s, c) => s + (c.outcome_funds_cents || 0), 0);
+              const totalCreditsSpent = cases.reduce((s, c) => s + (c.credits_spent || 1), 0);
+              return [
+                { label: "Cases Won", value: won.length },
+                { label: "Total Recovered", value: totalRecovered > 0 ? `$${(totalRecovered / 100).toLocaleString()}` : "$0" },
+                { label: "Active Cases", value: cases.filter((c) => !(["PAID", "CLOSED"] as string[]).includes(c.stage)).length },
+                { label: "Credits Used", value: totalCreditsSpent },
+              ].map(kpi => (
+                <div key={kpi.label} style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 6, padding: "14px 20px", minWidth: 130 }}>
+                  <div style={{ fontSize: "0.65em", opacity: 0.4, letterSpacing: "0.1em", marginBottom: 6 }}>{kpi.label.toUpperCase()}</div>
+                  <div style={{ fontWeight: 700, fontSize: "1.3em", color: "#22c55e" }}>{kpi.value}</div>
+                </div>
+              ));
+            })()}
+          </div>
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "1rem", overflowX: "auto" }}>
             {STAGES.map((stage) => {
               const stageCases = casesByStage(stage);
@@ -191,6 +217,26 @@ export default function MyCases() {
                             {c.property_address}
                           </div>
                         )}
+                        {/* Date milestone fields */}
+                        {[
+                          { label: "Contacted", val: c.contacted_at },
+                          { label: "Retainer", val: c.retainer_signed_at },
+                          { label: "Filed", val: c.filed_at },
+                          { label: "Hearing", val: c.hearing_date },
+                        ].filter(f => f.val).map(f => (
+                          <div key={f.label} style={{ fontSize: "0.68em", color: "#6b7280", marginTop: 2 }}>
+                            {f.label}: {f.val?.split("T")[0] || f.val}
+                          </div>
+                        ))}
+                        {(c.outcome_funds_cents || 0) > 0 && (
+                          <div style={{ fontSize: "0.75em", color: "#22c55e", fontWeight: 700, marginTop: 4 }}>
+                            RECOVERED: ${((c.outcome_funds_cents || 0) / 100).toLocaleString()}
+                          </div>
+                        )}
+                        {/* VIEW LEAD link */}
+                        <a href={`/lead/${c.asset_id}`} style={{ fontSize: "0.7em", color: "#22c55e", textDecoration: "none", display: "block", marginTop: 6 }}>
+                          VIEW LEAD DETAIL →
+                        </a>
                         {/* Stage selector */}
                         <select
                           value={c.stage}

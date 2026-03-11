@@ -1,0 +1,38 @@
+STATE OF COLORADO
+DISTRICT COURT, {{county_upper}} COUNTY
+Court Address: [COURT ADDRESS — ATTORNEY TO VERIFY]
+{{court_district}} Judicial District
+
+Case No.: {{case_number}}
+
+CERTIFICATE OF SERVICE
+
+I, {{attorney_name}}, hereby certify that on {{filing_date}}, a true and correct copy
+of the foregoing Motion for Disbursement of Surplus Funds was served upon the following
+parties by [METHOD OF SERVICE]:
+
+1. Office of the Public Trustee, {{county_name}} County
+   [ADDRESS]
+
+2. [ADDITIONAL PARTIES — ATTORNEY TO COMPLETE]
+
+The property at issue is located at:
+{{property_address}}
+
+Original sale date: {{sale_date}}
+Surplus amount: ${{overbid_amount}}
+
+                                    Respectfully submitted,
+
+                                    ________________________________
+                                    {{attorney_name}}
+                                    Colorado Bar No. {{attorney_bar_number}}
+                                    {{attorney_firm}}
+                                    {{attorney_email}}
+
+================================================================================
+VERIFUSE DOCUMENT INTEGRITY RECORD
+Calculation Fingerprint: SHA256: {{calculation_hash}}
+Engine Version: {{calc_engine_version}} | Data Sources: {{data_sources}}
+Generated: {{generated_at}}
+================================================================================

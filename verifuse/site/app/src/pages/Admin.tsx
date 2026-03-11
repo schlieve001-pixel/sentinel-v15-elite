@@ -1043,6 +1043,31 @@ function UsersTab() {
 
 type SystemSubTab = "operations" | "engineering";
 
+// E4: New 4-factor county health score formula
+// coverage(40%) + extraction(30%) + evidence(20%) + recency(10%)
+function computeHealthScore(county: {
+  total_leads: number;
+  leads_with_sale_date: number | null;
+  gold_count: number;
+  silver_count: number;
+  bronze_count: number;
+  leads_with_evidence: number | null;
+  hours_since_run: number;
+}): number {
+  const coveragePct = county.leads_with_sale_date != null && county.total_leads > 0
+    ? (county.leads_with_sale_date / county.total_leads) * 40
+    : 0;
+  const extractionPct = county.gold_count >= 0 && (county.gold_count + county.silver_count + county.bronze_count) > 0
+    ? (county.gold_count / (county.gold_count + county.silver_count + county.bronze_count)) * 30
+    : 0;
+  const evidencePct = county.gold_count > 0 && county.leads_with_evidence != null
+    ? (Math.min(county.leads_with_evidence / county.gold_count, 1)) * 20
+    : (county.gold_count > 0 ? 10 : 0);
+  const hoursSinceRun = county.hours_since_run ?? 999;
+  const recencyScore = hoursSinceRun < 24 ? 1.0 : hoursSinceRun < 72 ? 0.5 : 0.0;
+  return Math.round(coveragePct + extractionPct + evidencePct + recencyScore * 10);
+}
+
 function AuditLog() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1274,6 +1299,28 @@ function SystemTab() {
             </div>
           </section>
 
+          {/* E1: Engineering Metrics */}
+          <section>
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: "0.68em", letterSpacing: "0.1em", opacity: 0.4, marginBottom: 12 }}>ENGINEERING METRICS</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+                {[
+                  { label: "DB Size", value: stats?.db_size_mb ? `${stats.db_size_mb} MB` : "—" },
+                  { label: "WAL Pages", value: stats?.wal_pages ? String(stats.wal_pages) : "—" },
+                  { label: "Gold Leads", value: stats?.scoreboard?.find(s => s.data_grade === "GOLD")?.lead_count?.toString() ?? "—" },
+                  { label: "Total Leads", value: stats?.total_leads?.toLocaleString() ?? "—" },
+                  { label: "Active Subs", value: String(stats?.user_counts?.total ?? "—") },
+                  { label: "Stripe Mode", value: (stats?.stripe_mode || "—").toUpperCase() },
+                ].map(kpi => (
+                  <div key={kpi.label} style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 6, padding: "12px 16px" }}>
+                    <div style={{ fontSize: "0.65em", opacity: 0.45, letterSpacing: "0.1em", marginBottom: 6 }}>{kpi.label.toUpperCase()}</div>
+                    <div style={{ fontWeight: 700, fontSize: "1.1em", color: "#22c55e" }}>{kpi.value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
           {/* Scoreboard */}
           {stats?.scoreboard && stats.scoreboard.length > 0 && (
             <section>
@@ -1378,15 +1425,21 @@ function SystemTab() {
                               <td style={{ padding: "6px 10px", textAlign: "right", color: goldPctColor, fontWeight: goldPct >= 10 ? 700 : 400, fontSize: "0.8em" }}>
                                 {(p.gold + p.silver + p.bronze) > 0 ? `${goldPct}%` : "—"}
                               </td>
-                              {/* E2: County Health Score */}
+                              {/* E4: County Health Score — 4-factor formula */}
                               <td style={{ padding: "6px 10px", textAlign: "right" }}>
                                 {(() => {
-                                  const total = (p.gold || 0) + (p.silver || 0) + (p.bronze || 0) + (p.reject || 0);
-                                  const gpct = total > 0 ? (p.gold || 0) / total : 0;
-                                  const recency = p.last_verified_ts ? (Date.now()/1000 - p.last_verified_ts) < 86400 ? 1.0 : (Date.now()/1000 - p.last_verified_ts) < 259200 ? 0.5 : 0.0 : 0.0;
-                                  const health = Math.round((gpct * 0.7 + recency * 0.3) * 100);
-                                  const hColor = health >= 80 ? GREEN : health >= 50 ? AMBER : RED;
-                                  return <span style={{ color: hColor, fontWeight: 600, fontSize: "0.8em" }}>{health}%</span>;
+                                  const hoursAgo = p.last_verified_ts ? (Date.now()/1000 - p.last_verified_ts) / 3600 : 999;
+                                  const health = computeHealthScore({
+                                    total_leads: (p.gold || 0) + (p.silver || 0) + (p.bronze || 0) + (p.reject || 0),
+                                    leads_with_sale_date: p.bronze_no_sale_date != null ? ((p.gold || 0) + (p.silver || 0) + (p.bronze || 0)) - (p.bronze_no_sale_date || 0) : null,
+                                    gold_count: p.gold || 0,
+                                    silver_count: p.silver || 0,
+                                    bronze_count: p.bronze || 0,
+                                    leads_with_evidence: null,
+                                    hours_since_run: hoursAgo,
+                                  });
+                                  const hColor = health >= 70 ? GREEN : health >= 40 ? AMBER : RED;
+                                  return <span style={{ color: hColor, fontWeight: 600, fontSize: "0.8em" }}>{health}</span>;
                                 })()}
                               </td>
                               <td style={{ padding: "6px 10px" }}>
@@ -1489,11 +1542,13 @@ function SystemTab() {
                     <th style={{ padding: "0.375rem 0.5rem" }}>PLATFORM</th>
                     <th style={{ padding: "0.375rem 0.5rem" }}>LAST RUN</th>
                     <th style={{ padding: "0.375rem 0.5rem" }}>CASES</th>
+                    <th style={{ padding: "0.375rem 0.5rem" }}>SCHEMA</th>
+                    <th style={{ padding: "0.375rem 0.5rem" }}>LAST GOLD</th>
                     <th style={{ padding: "0.375rem 0.5rem" }}>HEALTH</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(pipeline || []).filter(p => p.platform_type === "govsoft" || p.total > 0).map((p: PipelineCounty) => {
+                  {(pipeline || []).filter(p => p.platform_type === "govsoft" || p.total > 0).map((p: PipelineCounty & { schema_version?: string; last_gold_date?: string }) => {
                     const ts = p.last_ingestion_ts;
                     let daysAgo: number | null = null;
                     if (ts) {
@@ -1512,6 +1567,12 @@ function SystemTab() {
                           {daysAgo != null ? `${daysAgo}d ago` : "Never"}
                         </td>
                         <td style={{ padding: "0.375rem 0.5rem", color: TEXT_MUTED }}>{p.total > 0 ? p.total.toLocaleString() : "—"}</td>
+                        <td style={{ padding: "0.375rem 0.5rem", color: TEXT_MUTED, fontFamily: "monospace", fontSize: "0.82em" }}>
+                          {p.schema_version || "—"}
+                        </td>
+                        <td style={{ padding: "0.375rem 0.5rem", color: p.last_gold_date ? AMBER : TEXT_MUTED, fontSize: "0.85em" }}>
+                          {p.last_gold_date || "Never"}
+                        </td>
                         <td style={{ padding: "0.375rem 0.5rem", color: statusColor, fontWeight: 700, fontSize: "0.78em" }}>
                           {status}
                         </td>
@@ -1519,7 +1580,7 @@ function SystemTab() {
                     );
                   })}
                   {pipeline.length === 0 && (
-                    <tr><td colSpan={5} style={{ padding: "0.75rem 0.5rem", color: TEXT_MUTED }}>No scraper data available.</td></tr>
+                    <tr><td colSpan={7} style={{ padding: "0.75rem 0.5rem", color: TEXT_MUTED }}>No scraper data available.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1716,9 +1777,13 @@ const PIPELINE_COMMANDS: {
   // ── Alerts ────────────────────────────────────────────────────────
   { id: "dispatch-alerts",     label: "▶ DISPATCH ALERTS",     desc: "Email GOLD lead alerts to all subscribed attorneys (last 72h)", hint: "Sends deadline and new-lead alert emails to active subscribers. Run after Gate 4 to notify attorneys of new GOLD leads.", color: "#22c55e", eta: "< 2 min", group: "ALERTS" },
   // ── DB / System ───────────────────────────────────────────────────
+  { id: "force-regrade",       label: "▶ FORCE REGRADE",       desc: "Re-run Gate 4 on a specific lead ID", hint: "Use when a lead is stuck in BRONZE despite having SALE_INFO. Requires --lead-id argument.", needsCounty: false, eta: "< 1 min", group: "GATE 4" },
   { id: "coverage-report",     label: "▶ COVERAGE REPORT",     desc: "Print full county coverage report (active/inactive/leads/GOLD per county)", hint: "Diagnostic report. Useful for identifying counties with stale data or zero leads.", eta: "< 1 min", group: "SYSTEM" },
   { id: "backup-db",           label: "⬇ BACKUP DB",           desc: "SQLite online backup → timestamped .bak file", hint: "Safe to run anytime — does not lock the DB. Creates a point-in-time snapshot.", eta: "< 1 min", group: "SYSTEM" },
   { id: "migrate",             label: "⬆ RUN MIGRATIONS",      desc: "Apply all pending DB migrations (idempotent — safe to re-run)", hint: "Run after deploying new code. Idempotent — will not re-apply already-applied migrations.", eta: "< 1 min", group: "SYSTEM" },
+  { id: "health-check",        label: "▶ HEALTH CHECK",        desc: "Run daily_healthcheck now (re-grade + self-heal)", hint: "Runs the full daily healthcheck: re-grades all leads, auto-triggers Gate 4 for struggling counties, checks DB integrity.", color: "#22c55e", eta: "2–5 min", group: "SYSTEM" },
+  { id: "orphan-cleanup",      label: "▶ ORPHAN CLEANUP",      desc: "Remove leads with no snapshots (data ghosts)", hint: "Deletes BRONZE leads with no html_snapshots and no evidence_documents. Reduces DB clutter.", danger: true, eta: "< 1 min", group: "SYSTEM" },
+  { id: "verify-email-send",   label: "▶ TEST EMAIL",          desc: "Send a test email via SendGrid to verify delivery", hint: "Sends a test email to your admin address. Use to verify SendGrid is configured correctly.", eta: "< 10 sec", group: "SYSTEM" },
 ];
 
 function jobStatusColor(status: string) {
@@ -1900,29 +1965,34 @@ function OpsCenter() {
       )}
 
       {/* ── Quick Actions ── */}
-      <div style={{ background: BG2, border: `1px solid ${BORDER2}`, borderRadius: 8, padding: "12px 16px" }}>
-        <div style={{ fontSize: "0.68em", letterSpacing: "0.1em", color: TEXT_MUTED, marginBottom: 10 }}>QUICK ACTIONS</div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <div style={{ background: BG2, border: `1px solid ${BORDER2}`, borderRadius: 8, padding: "14px 18px" }}>
+        <div style={{ fontSize: "0.68em", letterSpacing: "0.1em", color: TEXT_MUTED, marginBottom: 12 }}>QUICK ACTIONS</div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           {[
-            { label: "▶ PRE-SALE SCAN ALL", cmd: "pending-sales", needsCounty: false, color: "#22c55e", hint: "Runs pre-sale scan on all counties" },
-            { label: "▶ GATE 4 ALL",        cmd: "gate4-run-all",  needsCounty: false, color: "#f59e0b", hint: "Full Gate 4 extraction (30+ min)" },
-            { label: "⬇ BACKUP NOW",         cmd: "backup-db",      needsCounty: false, color: BLUE,      hint: "Safe DB backup (< 1 min)" },
-            { label: "▶ PROMOTE ELIGIBLE",  cmd: "promote-eligible", needsCounty: false, color: "#a78bfa", hint: "SILVER → GOLD promotion check" },
+            { label: "▶ PRE-SALE SCAN ALL", cmd: "pending-sales",   color: "#22c55e", hint: "Runs pre-sale scan on all counties",      desc: "Scan all counties for upcoming sales" },
+            { label: "▶ GATE 4 ALL",        cmd: "gate4-run-all",   color: "#f59e0b", hint: "Full Gate 4 extraction (30+ min)",        desc: "Extract overbids — all counties" },
+            { label: "⬇ BACKUP NOW",         cmd: "backup-db",       color: BLUE,      hint: "Safe DB backup (< 1 min)",               desc: "SQLite snapshot to .bak file" },
+            { label: "▶ PROMOTE ELIGIBLE",  cmd: "promote-eligible", color: "#a78bfa", hint: "SILVER → GOLD promotion check",          desc: "Check promotion eligibility" },
+            { label: "▶ HEALTH CHECK",      cmd: "health-check",    color: "#22c55e", hint: "Re-grade all leads + self-heal (2–5 min)", desc: "Daily healthcheck on demand" },
           ].map(qa => (
-            <button
-              key={qa.cmd}
-              title={qa.hint}
-              onClick={() => triggerJob(qa.cmd)}
-              disabled={!!runningCmd}
-              style={{
-                background: qa.color + "18", border: `1px solid ${qa.color + "55"}`, color: qa.color,
-                borderRadius: 5, padding: "6px 14px", fontFamily: "monospace", fontSize: "0.73em",
-                fontWeight: 700, cursor: runningCmd ? "not-allowed" : "pointer", letterSpacing: "0.04em",
-                opacity: runningCmd ? 0.5 : 1,
-              }}
-            >
-              {runningCmd === qa.cmd ? "QUEUING..." : qa.label}
-            </button>
+            <div key={qa.cmd} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <button
+                title={qa.hint}
+                onClick={() => triggerJob(qa.cmd)}
+                disabled={!!runningCmd}
+                style={{
+                  background: qa.color + "18", border: `1px solid ${qa.color + "55"}`, color: qa.color,
+                  borderRadius: 5, padding: "10px 18px", fontFamily: "monospace", fontSize: "0.78em",
+                  fontWeight: 700, cursor: runningCmd ? "not-allowed" : "pointer", letterSpacing: "0.04em",
+                  opacity: runningCmd ? 0.5 : 1, whiteSpace: "nowrap" as const,
+                }}
+              >
+                {runningCmd === qa.cmd ? "QUEUING..." : qa.label}
+              </button>
+              <div style={{ fontSize: "0.65em", color: TEXT_MUTED, textAlign: "center" as const, paddingLeft: 4, paddingRight: 4 }}>
+                {qa.desc}
+              </div>
+            </div>
           ))}
         </div>
       </div>
@@ -1956,90 +2026,103 @@ function OpsCenter() {
           </div>
 
           {/* Command buttons — grouped */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {(() => {
-              const rendered: React.ReactNode[] = [];
-              let lastGroup = "";
-              PIPELINE_COMMANDS.forEach((cmd) => {
-                if (cmd.group && cmd.group !== lastGroup) {
-                  lastGroup = cmd.group;
-                  rendered.push(
-                    <div key={`g-${cmd.group}`} style={{
+          {(() => {
+            const commandGroups = PIPELINE_COMMANDS.reduce((acc, cmd) => {
+              const g = cmd.group || "OTHER";
+              if (!acc[g]) acc[g] = [];
+              acc[g].push(cmd);
+              return acc;
+            }, {} as Record<string, typeof PIPELINE_COMMANDS>);
+            const groupOrder = ["PRE-SALE", "SCRAPER", "GATE 4", "VERIFY", "PROMOTE", "INTEL", "STREAMS", "ALERTS", "SYSTEM"];
+            const orderedGroups = [
+              ...groupOrder.filter(g => commandGroups[g]),
+              ...Object.keys(commandGroups).filter(g => !groupOrder.includes(g)),
+            ];
+            return (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {orderedGroups.map(groupName => (
+                  <div key={groupName}>
+                    <div style={{
                       fontSize: "0.62em", letterSpacing: "0.12em", color: "#4b5563",
-                      borderBottom: `1px solid ${BORDER}`, paddingBottom: 3, marginTop: 8,
-                    }}>{cmd.group}</div>
-                  );
-                }
-                const isRunning = runningCmd === cmd.id;
-                const countyRequired = !!(cmd.needsCounty && !selectedCounty);
-                rendered.push(
-                  <div key={cmd.id} style={{
-                    border: `1px solid ${(cmd.color || BORDER2) + "44"}`,
-                    borderRadius: 8, padding: "10px 14px", background: BG,
-                    display: "flex", alignItems: "flex-start", gap: 10,
-                  }}>
-                    <button
-                      onClick={() => triggerJob(cmd.id, cmd.needsCounty ? (selectedCounty || undefined) : undefined)}
-                      disabled={isRunning || !!runningCmd || countyRequired}
-                      title={cmd.hint}
-                      style={{
-                        background: (cmd.color || BLUE) + "22",
-                        border: `1px solid ${(cmd.color || BLUE) + "55"}`,
-                        color: countyRequired ? TEXT_MUTED : (cmd.color || BLUE),
-                        borderRadius: 5, padding: "5px 14px",
-                        fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700,
-                        cursor: (isRunning || !!runningCmd || countyRequired) ? "not-allowed" : "pointer",
-                        letterSpacing: "0.04em", flexShrink: 0,
-                        opacity: (isRunning || !!runningCmd) ? 0.6 : 1,
-                        marginTop: 2,
-                      }}
-                    >
-                      {isRunning ? "QUEUING..." : cmd.label}
-                    </button>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: "0.78em", color: TEXT, fontWeight: 600 }}>{cmd.id}</span>
-                        {cmd.needsCounty && <span style={{ fontSize: "0.65em", color: countyRequired ? "#f59e0b" : TEXT_MUTED, border: `1px solid ${countyRequired ? "#f59e0b44" : BORDER}`, padding: "1px 5px", borderRadius: 3 }}>COUNTY</span>}
-                        {cmd.eta && <span style={{ fontSize: "0.65em", color: TEXT_MUTED, marginLeft: "auto" }}>~{cmd.eta}</span>}
-                      </div>
-                      <div style={{ fontSize: "0.7em", color: TEXT_MUTED, marginTop: 3, lineHeight: 1.4 }}>
-                        {countyRequired ? "⚠ SELECT A COUNTY ABOVE FIRST" : cmd.desc}
-                      </div>
-                      {!countyRequired && cmd.hint && (
-                        <div style={{ fontSize: "0.68em", color: "#4b5563", marginTop: 3, lineHeight: 1.35, fontStyle: "italic" }}>
-                          {cmd.hint}
-                        </div>
-                      )}
+                      borderBottom: `1px solid ${BORDER}`, paddingBottom: 3, marginTop: 10, marginBottom: 6,
+                      textTransform: "uppercase" as const,
+                    }}>{groupName}</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      {commandGroups[groupName].map(cmd => {
+                        const isRunning = runningCmd === cmd.id;
+                        const countyRequired = !!(cmd.needsCounty && !selectedCounty);
+                        return (
+                          <div key={cmd.id} style={{
+                            border: `1px solid ${(cmd.danger ? RED : (cmd.color || BORDER2)) + "44"}`,
+                            borderRadius: 8, padding: "10px 14px", background: BG,
+                            display: "flex", alignItems: "flex-start", gap: 10,
+                          }}>
+                            <button
+                              onClick={() => triggerJob(cmd.id, cmd.needsCounty ? (selectedCounty || undefined) : undefined)}
+                              disabled={isRunning || !!runningCmd || countyRequired}
+                              title={cmd.hint}
+                              style={{
+                                background: (cmd.danger ? RED : (cmd.color || BLUE)) + "22",
+                                border: `1px solid ${(cmd.danger ? RED : (cmd.color || BLUE)) + "55"}`,
+                                color: countyRequired ? TEXT_MUTED : (cmd.danger ? RED : (cmd.color || BLUE)),
+                                borderRadius: 5, padding: "5px 14px",
+                                fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700,
+                                cursor: (isRunning || !!runningCmd || countyRequired) ? "not-allowed" : "pointer",
+                                letterSpacing: "0.04em", flexShrink: 0,
+                                opacity: (isRunning || !!runningCmd) ? 0.6 : 1,
+                                marginTop: 2,
+                              }}
+                            >
+                              {isRunning ? "QUEUING..." : cmd.label}
+                            </button>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: "0.78em", color: TEXT, fontWeight: 600 }}>{cmd.id}</span>
+                                {cmd.needsCounty && <span style={{ fontSize: "0.65em", color: countyRequired ? "#f59e0b" : TEXT_MUTED, border: `1px solid ${countyRequired ? "#f59e0b44" : BORDER}`, padding: "1px 5px", borderRadius: 3 }}>COUNTY</span>}
+                                {cmd.danger && <span style={{ fontSize: "0.65em", color: RED, border: `1px solid ${RED}44`, padding: "1px 5px", borderRadius: 3 }}>DANGER</span>}
+                                {cmd.eta && <span style={{ fontSize: "0.65em", color: TEXT_MUTED, marginLeft: "auto" }}>~{cmd.eta}</span>}
+                              </div>
+                              <div style={{ fontSize: "0.7em", color: TEXT_MUTED, marginTop: 3, lineHeight: 1.4 }}>
+                                {countyRequired ? "⚠ SELECT A COUNTY ABOVE FIRST" : cmd.desc}
+                              </div>
+                              {!countyRequired && cmd.hint && (
+                                <div style={{ fontSize: "0.68em", color: "#4b5563", marginTop: 3, lineHeight: 1.35, fontStyle: "italic" }}>
+                                  {cmd.hint}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
-                );
-              });
-              return rendered;
-            })()}
+                ))}
+              </div>
+            );
+          })()}
 
-            {/* PRE-SALE PROMOTE special button */}
-            <div style={{
-              border: `1px solid #a78bfa44`, borderRadius: 8, padding: "10px 14px",
-              background: BG, display: "flex", alignItems: "center", gap: 10,
-            }}>
-              <button
-                onClick={promotePresale}
-                disabled={promoting}
-                style={{
-                  background: "#a78bfa22", border: "1px solid #a78bfa55",
-                  color: "#a78bfa", borderRadius: 5, padding: "5px 14px",
-                  fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700,
-                  cursor: promoting ? "not-allowed" : "pointer", letterSpacing: "0.04em",
-                  flexShrink: 0, opacity: promoting ? 0.6 : 1,
-                }}
-              >
-                {promoting ? "PROMOTING..." : "▶ PROMOTE PRE-SALE"}
-              </button>
-              <div>
-                <div style={{ fontSize: "0.78em", color: TEXT, fontWeight: 600 }}>promote-presale</div>
-                <div style={{ fontSize: "0.7em", color: TEXT_MUTED, marginTop: 2 }}>
-                  Scan existing leads with future sale_date → set PRE_SALE status ({summary?.pre_sale_promotion_candidates ?? 0} candidates)
-                </div>
+          {/* PRE-SALE PROMOTE special button */}
+          <div style={{
+            border: `1px solid #a78bfa44`, borderRadius: 8, padding: "10px 14px", marginTop: 6,
+            background: BG, display: "flex", alignItems: "center", gap: 10,
+          }}>
+            <button
+              onClick={promotePresale}
+              disabled={promoting}
+              style={{
+                background: "#a78bfa22", border: "1px solid #a78bfa55",
+                color: "#a78bfa", borderRadius: 5, padding: "5px 14px",
+                fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700,
+                cursor: promoting ? "not-allowed" : "pointer", letterSpacing: "0.04em",
+                flexShrink: 0, opacity: promoting ? 0.6 : 1,
+              }}
+            >
+              {promoting ? "PROMOTING..." : "▶ PROMOTE PRE-SALE"}
+            </button>
+            <div>
+              <div style={{ fontSize: "0.78em", color: TEXT, fontWeight: 600 }}>promote-presale</div>
+              <div style={{ fontSize: "0.7em", color: TEXT_MUTED, marginTop: 2 }}>
+                Scan existing leads with future sale_date → set PRE_SALE status ({summary?.pre_sale_promotion_candidates ?? 0} candidates)
               </div>
             </div>
           </div>
@@ -2092,19 +2175,29 @@ function OpsCenter() {
         </div>
       </div>
 
-      {/* ── Job Log Viewer ── */}
-      {selectedJob && (
-        <div>
-          <SectionHeader action={
-            <button onClick={() => setSelectedJob(null)} style={{
+      {/* ── Job Log Viewer — always visible ── */}
+      <div>
+        <SectionHeader action={
+          <div style={{ display: "flex", gap: 8 }}>
+            {selectedJob && (
+              <button onClick={() => { setLiveOutput(""); setSelectedJob(null); }} style={{
+                background: "none", border: `1px solid ${BORDER2}`, color: TEXT_MUTED,
+                borderRadius: 4, padding: "3px 10px", fontSize: "0.7em", cursor: "pointer", fontFamily: "monospace",
+              }}>✕ CLOSE</button>
+            )}
+            <button onClick={() => setLiveOutput("")} style={{
               background: "none", border: `1px solid ${BORDER2}`, color: TEXT_MUTED,
               borderRadius: 4, padding: "3px 10px", fontSize: "0.7em", cursor: "pointer", fontFamily: "monospace",
-            }}>✕ CLOSE</button>
-          }>
-            JOB LOG — {selectedJob.command}{selectedJob.county ? ` [${selectedJob.county}]` : ""}{" "}
-            <Badge color={jobStatusColor(selectedJob.status)}>{selectedJob.status}</Badge>
-          </SectionHeader>
+            }}>CLEAR</button>
+          </div>
+        }>
+          {selectedJob
+            ? <>JOB LOG — {selectedJob.command}{selectedJob.county ? ` [${selectedJob.county}]` : ""}{" "}<Badge color={jobStatusColor(selectedJob.status)}>{selectedJob.status}</Badge></>
+            : "JOB OUTPUT"
+          }
+        </SectionHeader>
 
+        {selectedJob && (
           <div style={{ display: "flex", gap: 16, marginBottom: 10 }}>
             {[
               { label: "JOB ID",    value: selectedJob.id.slice(0, 12) + "...", mono: true },
@@ -2117,24 +2210,27 @@ function OpsCenter() {
                 color={(s as { color?: string }).color} mono={!!(s as { mono?: boolean }).mono} />
             ))}
           </div>
+        )}
 
-          <pre
-            ref={logRef}
-            style={{
-              background: "#0a0f16", border: `1px solid ${BORDER}`, borderRadius: 8,
-              padding: "14px 16px", fontSize: "0.72em", color: "#86efac",
-              maxHeight: 380, overflowY: "auto", overflowX: "auto",
-              whiteSpace: "pre-wrap", wordBreak: "break-all", fontFamily: "monospace",
-              lineHeight: 1.5,
-            }}
-          >
-            {liveOutput || (selectedJob.status === "QUEUED" ? "Waiting to start...\n" : "No output yet.\n")}
-            {selectedJob.status === "RUNNING" && (
-              <span style={{ animation: "pulse 1s infinite", color: BLUE }}>▌</span>
-            )}
-          </pre>
-        </div>
-      )}
+        <pre
+          ref={logRef}
+          style={{
+            background: "#0a0f16", border: `1px solid ${BORDER}`, borderRadius: 8,
+            padding: "14px 16px", fontSize: "0.72em", color: "#86efac",
+            minHeight: 200, maxHeight: 380, overflowY: "auto", overflowX: "auto",
+            whiteSpace: "pre-wrap", wordBreak: "break-all", fontFamily: "monospace",
+            lineHeight: 1.5,
+          }}
+        >
+          {selectedJob
+            ? (liveOutput || (selectedJob.status === "QUEUED" ? "Waiting to start...\n" : "No output yet.\n"))
+            : (liveOutput || <span style={{ color: "#4b5563", fontStyle: "italic" }}>{"// No job selected — click a job above or trigger a command to see output here"}</span>)
+          }
+          {selectedJob?.status === "RUNNING" && (
+            <span style={{ animation: "pulse 1s infinite", color: BLUE }}>▌</span>
+          )}
+        </pre>
+      </div>
 
       {/* ── Snapshot + Run Stats ── */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>

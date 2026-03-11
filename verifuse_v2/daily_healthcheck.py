@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -238,6 +239,55 @@ def regrade_all_assets() -> dict:
     return stats
 
 
+def auto_trigger_gate4_for_struggling_counties() -> dict:
+    """Auto-trigger Gate 4 for counties with BRONZE leads but zero GOLD."""
+    results = {"triggered": [], "skipped": []}
+    try:
+        db.init_db()
+        with db.get_db() as conn:
+            rows = conn.execute("""
+                SELECT county,
+                       SUM(CASE WHEN data_grade='BRONZE' THEN 1 ELSE 0 END) as bronze_count,
+                       SUM(CASE WHEN data_grade='GOLD' THEN 1 ELSE 0 END) as gold_count
+                FROM leads
+                WHERE county IS NOT NULL
+                GROUP BY county
+                HAVING bronze_count > 5 AND gold_count = 0
+                ORDER BY bronze_count DESC
+                LIMIT 3
+            """).fetchall()
+    except Exception as e:
+        log.error("auto_trigger: DB query failed: %s", e)
+        return results
+
+    repo_root = Path(__file__).resolve().parent.parent
+    vf_bin = repo_root / "bin" / "vf"
+
+    for row in rows:
+        county = row["county"] if isinstance(row, dict) else row[0]
+        log.info("[self-heal] Auto-triggering Gate 4 for county=%s (bronze=%s, gold=0)", county, row[1] if not isinstance(row, dict) else row["bronze_count"])
+        try:
+            result = subprocess.run(
+                [str(vf_bin), "extract-batch", "--county", county],
+                capture_output=True, text=True, timeout=300,
+                cwd=str(repo_root),
+            )
+            if result.returncode == 0:
+                results["triggered"].append(county)
+                log.info("[self-heal] Gate 4 completed for %s", county)
+            else:
+                results["skipped"].append(f"{county}:exit={result.returncode}")
+                log.warning("[self-heal] Gate 4 failed for %s: %s", county, result.stderr[:200])
+        except subprocess.TimeoutExpired:
+            results["skipped"].append(f"{county}:timeout")
+            log.warning("[self-heal] Gate 4 timed out for %s", county)
+        except Exception as e:
+            results["skipped"].append(f"{county}:error={e}")
+            log.error("[self-heal] Gate 4 error for %s: %s", county, e)
+
+    return results
+
+
 def scrape_denver() -> dict:
     """Attempt to download and parse the latest Denver excess funds PDF."""
     try:
@@ -346,6 +396,12 @@ def run():
     regrade = regrade_all_assets()
     log.info("  Total: %d | Promoted: %d | Closed: %d | Unchanged: %d",
              regrade["total"], regrade["promoted"], regrade["closed"], regrade["unchanged"])
+
+    # Step 2b: Self-heal struggling counties via Gate 4
+    log.info("[2b/6] Auto-triggering Gate 4 for struggling counties...")
+    gate4_heal = auto_trigger_gate4_for_struggling_counties()
+    log.info("  Gate 4 self-heal: triggered=%s skipped=%s",
+             gate4_heal.get("triggered", []), gate4_heal.get("skipped", []))
 
     # Step 3: Scrape Denver
     log.info("[3/6] Scraping Denver excess funds...")

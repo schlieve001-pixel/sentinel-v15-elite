@@ -465,11 +465,13 @@ export default function Dashboard() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const healthOk = useHealth();
 
-  // Sync URL params → state when navigating via KPI card links
+  // Sync URL params → state when navigating via KPI card links (URL is source of truth)
   useEffect(() => {
     const g = searchParams.get("grade") || "";
+    const c = searchParams.get("county") || "";
     const s = searchParams.get("sort");
     setGrade(g);
+    setCounty(c);
     if (s === "newest") setSortBy("newest");
   }, [searchParams]);
 
@@ -824,8 +826,7 @@ export default function Dashboard() {
               {marketVelocity?.most_urgent_county && (
                 <div
                   onClick={() => {
-                    setGrade("GOLD");
-                    setCounty(marketVelocity.most_urgent_county);
+                    // URL is source of truth — URL sync useEffect handles state update
                     setSearchParams(p => { p.set("grade", "GOLD"); p.set("county", marketVelocity.most_urgent_county); return p; });
                     window.scrollTo({ top: 600, behavior: "smooth" });
                   }}

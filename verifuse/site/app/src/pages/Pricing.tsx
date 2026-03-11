@@ -12,7 +12,6 @@ const TIERS = [
     price: 199,
     credits: 30,
     rollover: "30-day rollover (max 45 banked)",
-    sessions: 1,
     features: [
       "30 unlocks/month",
       "Foreclosure surplus (§ 38-38-111)",
@@ -21,7 +20,7 @@ const TIERS = [
       "Lead unlock (1 credit each)",
       "Evidence document + dossier access",
       "Deadline alert emails",
-      "1 seat · 30-day credit rollover",
+      "Unlimited devices · 30-day credit rollover",
     ],
     cta: "Start Investigator",
     highlight: false,
@@ -32,14 +31,13 @@ const TIERS = [
     price: 399,
     credits: 75,
     rollover: "60-day rollover (max 113 banked)",
-    sessions: 2,
     features: [
       "75 unlocks/month",
       "All 4 surplus streams",
       "Foreclosure · Tax Deed · Tax Lien · Unclaimed Property",
       "Court Filing Packet (3 credits/case)",
       "Bulk CSV export",
-      "2 seats · priority data updates",
+      "Priority data updates · unlimited devices",
       "60-day credit rollover",
     ],
     cta: "Start Partner",
@@ -51,14 +49,13 @@ const TIERS = [
     price: 899,
     credits: 200,
     rollover: "90-day rollover (max 300 banked)",
-    sessions: 5,
     features: [
       "200 unlocks/month",
       "All 4 surplus streams + estate cases",
       "Full REST API access",
       "White-label dossier exports",
       "Skip Trace included (10/mo)",
-      "5 seats · county coverage reports",
+      "County coverage reports · unlimited devices",
       "90-day credit rollover",
     ],
     cta: "Start Enterprise",
@@ -132,7 +129,7 @@ const FEATURE_MATRIX = [
   { feature: "White-label dossiers",      associate: "—",     partner: "—",     sovereign: "✓" },
   { feature: "Heir notification letters", associate: "—",     partner: "—",     sovereign: "✓" },
   { feature: "County coverage reports",   associate: "—",     partner: "—",     sovereign: "✓" },
-  { feature: "Seats",                     associate: "1",     partner: "2",     sovereign: "5" },
+  { feature: "Devices",                   associate: "Unlimited", partner: "Unlimited", sovereign: "Unlimited" },
 ];
 
 const CREDIT_COSTS = [
@@ -151,6 +148,79 @@ function authHeaders(): Record<string, string> {
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
+// ── Founding Attorney Section ─────────────────────────────────────────────────
+
+function FoundingAttorneySection() {
+  const [status, setStatus] = useState<{ slots_claimed: number; slots_total: number; is_open: boolean } | null>(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/founding/status`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => d && setStatus(d))
+      .catch(() => {});
+  }, []);
+
+  const claimed = status?.slots_claimed ?? 0;
+  const total = status?.slots_total ?? 10;
+  const isOpen = status?.is_open !== false;
+  const remaining = total - claimed;
+
+  return (
+    <div style={{ background: "rgba(245,158,11,0.06)", border: "1px solid #78350f", borderRadius: 10, padding: "28px 32px", marginBottom: 48 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 8 }}>
+        <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", color: "#f59e0b" }}>
+          FOUNDING ATTORNEY PROGRAM — {isOpen ? `${remaining} OF ${total} SPOTS REMAINING` : "ALL SPOTS CLAIMED"}
+        </div>
+        {status && (
+          <div style={{ display: "flex", gap: 4 }}>
+            {Array.from({ length: total }).map((_, i) => (
+              <div key={i} style={{
+                width: 12, height: 12, borderRadius: 2,
+                background: i < claimed ? "#f59e0b" : "#374151",
+              }} />
+            ))}
+          </div>
+        )}
+      </div>
+      <h3 style={{ margin: "0 0 10px", fontSize: "1.1em" }}>
+        {isOpen ? "Lock In Founder Pricing — Forever" : "Founding Program Closed — Prices Have Increased"}
+      </h3>
+      <ul style={{ margin: "0 0 16px", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
+        <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
+          <span style={{ color: "#f59e0b" }}>★</span>
+          <span>"Founding Attorney" badge — current prices ($199/$399/$899) locked forever</span>
+        </li>
+        <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
+          <span style={{ color: "#f59e0b" }}>★</span>
+          <span>5 bonus credits added to your account upon registration</span>
+        </li>
+        <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
+          <span style={{ color: "#f59e0b" }}>★</span>
+          <span>After first {total} attorneys, prices increase 30% — to $259/$519/$1,169/mo</span>
+        </li>
+      </ul>
+      {isOpen ? (
+        <>
+          <Link to="/register" style={{
+            display: "inline-block", padding: "10px 24px", background: "#f59e0b",
+            color: "#0a0f1a", textDecoration: "none", borderRadius: 6, fontSize: "0.85em",
+            fontWeight: 700, letterSpacing: "0.06em", fontFamily: "inherit",
+          }}>
+            CLAIM FOUNDING ATTORNEY STATUS — LOCK IN $199/$399/$899 FOREVER →
+          </Link>
+          <div style={{ marginTop: 10, fontSize: "0.75em", opacity: 0.5 }}>
+            After first {total} attorneys, pricing increases to $259/$519/$1,169. Current members locked in.
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: "0.85em", color: "#f59e0b", opacity: 0.7 }}>
+          Founding spots filled. Subscribe above to access all surplus intelligence features.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Annual pricing: ~10% discount vs monthly (2 months free)
 const ANNUAL_PRICES: Record<string, { price: number; savings: number }> = {
   associate: { price: 2149, savings: 239 },   // Investigator annual ($199×12 - 10%)
@@ -162,15 +232,17 @@ export default function Pricing() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [billing, setBilling] = useState<"monthly" | "annual">("monthly");
-  const [stripeReady, setStripeReady] = useState(false);
+  const [stripeReady, setStripeReady] = useState(true); // optimistic — only disable if API says unconfigured
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
   const [checkoutError, setCheckoutError] = useState("");
 
   useEffect(() => {
     fetch(`${API_BASE}/api/public-config`)
       .then((r) => r.json())
-      .then((d) => setStripeReady(!!(d.stripe_configured || d.stripe_publishable_key)))
-      .catch(() => setStripeReady(false));
+      .then((d) => {
+        if (d.stripe_configured === false && !d.stripe_publishable_key) setStripeReady(false);
+      })
+      .catch(() => { /* keep optimistic true — don't block buttons on network error */ });
   }, []);
 
   async function startCheckout(tier: string) {
@@ -487,33 +559,7 @@ export default function Pricing() {
         </div>
 
         {/* Founding Attorney Program */}
-        <div style={{ background: "rgba(245,158,11,0.06)", border: "1px solid #78350f", borderRadius: 10, padding: "28px 32px", marginBottom: 48 }}>
-          <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", color: "#f59e0b", marginBottom: 8 }}>
-            FOUNDING ATTORNEY PROGRAM — LIMITED SEATS
-          </div>
-          <h3 style={{ margin: "0 0 10px", fontSize: "1.1em" }}>First 10 Founding Attorneys — Lock In Founder Pricing</h3>
-          <ul style={{ margin: "0 0 16px", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
-            <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
-              <span style={{ color: "#f59e0b" }}>★</span>
-              <span>"Founding Attorney" badge — current pricing locked forever</span>
-            </li>
-            <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
-              <span style={{ color: "#f59e0b" }}>★</span>
-              <span>First 10 sign-ups: 3-month Partner tier ($399/mo) free trial</span>
-            </li>
-            <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
-              <span style={{ color: "#f59e0b" }}>★</span>
-              <span>CLE credit tracking in your profile (CO: 45 credits/3 years)</span>
-            </li>
-          </ul>
-          <Link to="/register" style={{
-            display: "inline-block", padding: "10px 24px", background: "#f59e0b",
-            color: "#0a0f1a", textDecoration: "none", borderRadius: 6, fontSize: "0.85em",
-            fontWeight: 700, letterSpacing: "0.06em", fontFamily: "inherit",
-          }}>
-            CLAIM FOUNDING ATTORNEY STATUS →
-          </Link>
-        </div>
+        <FoundingAttorneySection />
 
         {/* FAQ Strip */}
         <div style={{ textAlign: "center", fontSize: "0.82em", opacity: 0.5, lineHeight: 2 }}>

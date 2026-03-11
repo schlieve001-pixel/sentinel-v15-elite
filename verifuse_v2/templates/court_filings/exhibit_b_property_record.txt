@@ -1,0 +1,14 @@
+EXHIBIT B — PROPERTY RECORD
+=============================
+Property Address: {{property_address}}
+County: {{county_name}}
+Case Number: {{case_number}}
+
+[ASSESSOR RECORD — ATTORNEY TO OBTAIN AND ATTACH]
+
+Parcel ID: [OBTAIN FROM COUNTY ASSESSOR]
+Legal Description: [OBTAIN FROM COUNTY ASSESSOR]
+Owner of Record at Sale: {{owner_name}} [VERIFY]
+
+NOTE: Attach official assessor record. VeriFuse provides owner data from
+public records scraping — verify against official assessor records.
