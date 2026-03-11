@@ -1304,17 +1304,18 @@ export default function Dashboard() {
         </strong>
         {legalOpen && (<>
           <p>
-            This platform provides access to publicly available foreclosure sale data compiled
-            from county public records. This platform does not provide finder services, does not
-            contact homeowners, and does not assist in the recovery of overbid or surplus funds.
+            VeriFuse Technologies LLC provides verified foreclosure surplus intelligence compiled
+            from county public records, including surplus amounts, owner contact intelligence
+            (via Skip Trace add-on), and court-ready document packages for licensed attorneys.
           </p>
           <p>
             Statutory restrictions under C.R.S. § 38-38-111 and § 38-13-1304 may apply
-            depending on sale date and fund status. Consult counsel.
+            depending on sale date and fund status. Statutory fee cap of 10% under HB25-1224
+            (eff. June 4, 2025). Consult counsel before filing.
           </p>
           <p>
             This data subscription does not constitute legal advice.
-            No phone numbers, email addresses, or skip-tracing data are provided by this platform.
+            VeriFuse Technologies LLC is a data intelligence platform — attorneys perform all legal actions.
           </p>
         </>)}
       </div>

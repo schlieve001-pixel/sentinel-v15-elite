@@ -4,6 +4,77 @@ import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downlo
 import { useAuth } from "../lib/auth";
 import { toast } from "../components/Toast";
 
+function SkipTracePanel({ assetId }: { assetId: string }) {
+  const [contact, setContact] = useState<Record<string, string | null> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [ran, setRan] = useState(false);
+
+  const _apiBase = () => API_BASE;
+  const _token = () => localStorage.getItem("vf_token") || "";
+
+  async function runSkipTrace() {
+    setLoading(true);
+    try {
+      const res = await fetch(`${_apiBase()}/api/lead/${assetId}/owner-contact`, {
+        headers: { Authorization: `Bearer ${_token()}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setContact(data);
+        setRan(true);
+      } else if (res.status === 403) {
+        toast("Skip Trace requires Partner or Sovereign tier — or purchase a Skip Trace add-on ($29)", "error");
+      } else if (res.status === 402) {
+        toast("Insufficient credits — purchase a Skip Trace pack from the Pricing page", "error");
+      } else {
+        toast("Contact data not yet available for this lead", "error");
+      }
+    } catch { toast("Failed to fetch contact intel", "error"); }
+    finally { setLoading(false); }
+  }
+
+  if (ran && contact) {
+    return (
+      <div style={{ fontSize: "0.8em", lineHeight: 1.8 }}>
+        {contact.mailing_address && (
+          <div><span style={{ color: "#6b7280" }}>MAILING ADDRESS: </span><span style={{ color: "#e5e7eb", fontWeight: 700 }}>{contact.mailing_address}</span></div>
+        )}
+        {contact.forwarding_address && (
+          <div><span style={{ color: "#6b7280" }}>FORWARDING: </span><span style={{ color: "#22c55e", fontWeight: 700 }}>{contact.forwarding_address}</span></div>
+        )}
+        {contact.address_source && (
+          <div style={{ fontSize: "0.85em", color: "#4b5563", marginTop: 4 }}>
+            Source: {contact.address_source} · Confidence: {contact.address_confidence || "—"}
+            {contact.last_verified && ` · Verified: ${contact.last_verified}`}
+          </div>
+        )}
+        {contact.note && (
+          <div style={{ marginTop: 6, padding: "6px 10px", background: "#1a2332", border: "1px solid #3b82f6", borderRadius: 4, fontSize: "0.82em", color: "#93c5fd" }}>
+            {contact.note}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button
+        onClick={runSkipTrace}
+        disabled={loading}
+        style={{ background: loading ? "#1f2937" : "#14532d", border: "1px solid #22c55e", borderRadius: 4, color: "#4ade80", cursor: loading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
+      >
+        {loading ? "RUNNING SKIP TRACE..." : "RUN SKIP TRACE →"}
+      </button>
+      <div style={{ marginTop: 6, fontSize: "0.68em", color: "#4b5563" }}>
+        Multi-source owner address lookup: assessor records + property transfers + CO SOS.
+        Partner/Sovereign tier or purchase Skip Trace add-on ($29/record) on the{" "}
+        <a href="/pricing" style={{ color: "#22c55e", textDecoration: "none" }}>Pricing page</a>.
+      </div>
+    </div>
+  );
+}
+
 function isVerifyEmailError(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 &&
     /verify/i.test(err.message) && /email/i.test(err.message);
@@ -744,29 +815,10 @@ export default function LeadDetail() {
                 </div>
               </div>
 
-              {/* Owner Contact Intel */}
+              {/* Owner Contact Intel — Skip Trace */}
               <div style={{ borderTop: "1px solid #1f2937", paddingTop: 14, marginTop: 4 }}>
-                <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 10 }}>OWNER CONTACT INTEL</div>
-                <button
-                  onClick={async () => {
-                    try {
-                      const res = await fetch(`${_apiBase()}/api/lead/${assetId}/owner-contact`, { headers: { Authorization: `Bearer ${_token()}` } });
-                      if (res.ok) {
-                        const data = await res.json();
-                        toast(`Mailing address: ${data.mailing_address || "Not available"} (${data.address_source || "unknown source"})`, "success");
-                      } else if (res.status === 403) {
-                        toast("Owner contact intel requires Partner or Sovereign tier", "error");
-                      } else {
-                        toast("Contact data not yet available for this lead", "error");
-                      }
-                    } catch { toast("Failed to fetch contact intel", "error"); }
-                  }}
-                  style={{ background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 4, color: "#93c5fd", cursor: "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "6px 14px" }}
-                >
-                  FETCH OWNER MAILING ADDRESS →
-                </button>
-                <div style={{ marginTop: 6, fontSize: "0.68em", color: "#4b5563" }}>Aggregated from assessor records + property transfers. Partner/Sovereign tier.</div>
-              </div>
+                <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#6ee7b7", marginBottom: 10 }}>OWNER CONTACT INTEL — SKIP TRACE</div>
+                {assetId && <SkipTracePanel assetId={assetId} />}</div>
             </div>
           )}
 
@@ -1078,8 +1130,8 @@ export default function LeadDetail() {
           {/* Footer Legal Notice */}
           <div style={{ marginTop: 32, padding: "16px 20px", borderTop: "1px solid #1f2937", fontSize: "0.68em", color: "#374151", lineHeight: 1.7 }}>
             <div style={{ fontWeight: 700, color: "#4b5563", marginBottom: 6, letterSpacing: "0.08em" }}>LEGAL NOTICE</div>
-            <p style={{ margin: "0 0 6px" }}>This platform provides access to publicly available foreclosure sale data. It does not provide finder services, does not contact homeowners, and does not assist in recovery of surplus funds. No phone numbers, email addresses, or skip-tracing data are provided.</p>
-            <p style={{ margin: 0 }}>C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Statutory restrictions may apply depending on sale date and fund status. Consult counsel.</p>
+            <p style={{ margin: "0 0 6px" }}>VeriFuse Technologies LLC provides access to publicly available foreclosure sale data compiled from county public records, including verified surplus amounts, owner contact intelligence (via Skip Trace), and court-ready document packages. VeriFuse Technologies LLC is a data intelligence platform — attorneys perform all legal actions. This data does not constitute legal advice.</p>
+            <p style={{ margin: 0 }}>C.R.S. § 38-38-111 and § 38-13-1304 restrictions apply. Statutory fee cap of 10% under HB25-1224 (eff. June 4, 2025). Consult counsel before filing.</p>
           </div>
 
           </>

@@ -7579,7 +7579,7 @@ async def get_owner_contact(lead_id: str, request: Request):
             "address_confidence": "MEDIUM",
             "forwarding_address": None,
             "last_verified": row.get("updated_at", "")[:10] if row.get("updated_at") else None,
-            "note": "Full skip-trace requires assessor enrichment — run bin/vf enrich-owners",
+            "note": "Enhanced owner contact available — purchase Skip Trace ($29) for multi-source cross-reference including forwarding address and phone lookup.",
         }
     finally:
         conn.close()
