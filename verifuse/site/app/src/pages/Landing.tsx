@@ -739,9 +739,10 @@ export default function Landing() {
               ★ FOUNDING ATTORNEY PROGRAM
             </div>
             <h2 style={{ margin: "0 0 14px", fontSize: "1.7em" }}>Lock in current pricing. Forever.</h2>
-            <p style={{ color: "#94a3b8", fontSize: "0.9em", maxWidth: 520, margin: "0 auto 28px", lineHeight: 1.7 }}>
+            <p style={{ color: "#94a3b8", fontSize: "0.9em", maxWidth: 540, margin: "0 auto 28px", lineHeight: 1.7 }}>
               First 10 attorneys lock in $199/$399/$899 pricing permanently + receive <strong style={{ color: "#f59e0b" }}>5 bonus credits</strong> on signup.
-              After founding slots fill, prices increase 30%.
+              After founding cohort fills, standard pricing of $299/$599/$1,199/mo applies — founding members save
+              <strong style={{ color: "#f59e0b" }}> $1,200–$3,600/year forever</strong>.
             </p>
             {slotsLeft !== null && (
               <div style={{
@@ -763,7 +764,7 @@ export default function Landing() {
               </Link>
             </div>
             <div style={{ marginTop: 14, fontSize: "0.72em", color: "#78350f" }}>
-              After first 10 attorneys: $259 / $519 / $1,169 per month · Current members locked in forever
+              After founding cohort: $299 / $599 / $1,199 per month · Founding members locked in at $199/$399/$899 forever
             </div>
           </div>
         </div>

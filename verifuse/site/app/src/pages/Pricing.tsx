@@ -184,6 +184,11 @@ function authHeaders(): Record<string, string> {
 
 // ── Founding Attorney Section ─────────────────────────────────────────────────
 
+// Standard prices after founding cohort fills — clean, intentional price points
+// Savings per month: $100 / $200 / $300 (memorable round numbers)
+// Savings per year:  $1,200 / $2,400 / $3,600 (founding value compounds forever)
+const STANDARD_PRICES = { associate: 299, partner: 599, sovereign: 1199 };
+
 function FoundingAttorneySection() {
   const [status, setStatus] = useState<{ slots_claimed: number; slots_total: number; is_open: boolean } | null>(null);
 
@@ -198,57 +203,108 @@ function FoundingAttorneySection() {
   const total = status?.slots_total ?? 10;
   const isOpen = status?.is_open !== false;
   const remaining = total - claimed;
+  const pct = Math.round((claimed / total) * 100);
+
+  const tiers = [
+    { name: "INVESTIGATOR", key: "associate" as const, founding: 199, standard: STANDARD_PRICES.associate },
+    { name: "PARTNER",      key: "partner"  as const, founding: 399, standard: STANDARD_PRICES.partner   },
+    { name: "ENTERPRISE",   key: "sovereign" as const, founding: 899, standard: STANDARD_PRICES.sovereign },
+  ];
 
   return (
-    <div style={{ background: "rgba(245,158,11,0.06)", border: "1px solid #78350f", borderRadius: 10, padding: "28px 32px", marginBottom: 48 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 8 }}>
-        <div style={{ fontSize: "0.72em", letterSpacing: "0.1em", color: "#f59e0b" }}>
-          FOUNDING ATTORNEY PROGRAM — {isOpen ? `${remaining} OF ${total} SPOTS REMAINING` : "ALL SPOTS CLAIMED"}
-        </div>
-        {status && (
-          <div style={{ display: "flex", gap: 4 }}>
-            {Array.from({ length: total }).map((_, i) => (
-              <div key={i} style={{
-                width: 12, height: 12, borderRadius: 2,
-                background: i < claimed ? "#f59e0b" : "#374151",
-              }} />
-            ))}
+    <div style={{ background: "rgba(245,158,11,0.05)", border: "1px solid rgba(245,158,11,0.25)", borderRadius: 12, padding: "32px 36px", marginBottom: 48 }}>
+
+      {/* Header row */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 16, marginBottom: 24 }}>
+        <div>
+          <div style={{ fontSize: "0.65em", letterSpacing: "0.15em", color: "#f59e0b", marginBottom: 6 }}>
+            ★ FOUNDING ATTORNEY PROGRAM
           </div>
-        )}
+          <h3 style={{ margin: 0, fontSize: "1.15em" }}>
+            {isOpen ? "Lock in current pricing. Save hundreds per month. Forever." : "Founding cohort closed — standard pricing now in effect."}
+          </h3>
+        </div>
+        {/* Slot progress bar */}
+        <div style={{ minWidth: 160, textAlign: "right" }}>
+          <div style={{ fontSize: "0.68em", color: "#f59e0b", marginBottom: 6, letterSpacing: "0.08em" }}>
+            {isOpen ? `${remaining} of ${total} spots remaining` : "ALL SPOTS CLAIMED"}
+          </div>
+          <div style={{ background: "#1f2937", borderRadius: 4, height: 6, overflow: "hidden" }}>
+            <div style={{ background: "#f59e0b", width: `${pct}%`, height: "100%", transition: "width 0.5s" }} />
+          </div>
+          <div style={{ fontSize: "0.6em", color: "#4b5563", marginTop: 4 }}>{claimed} / {total} claimed</div>
+        </div>
       </div>
-      <h3 style={{ margin: "0 0 10px", fontSize: "1.1em" }}>
-        {isOpen ? "Lock In Founder Pricing — Forever" : "Founding Program Closed — Prices Have Increased"}
-      </h3>
-      <ul style={{ margin: "0 0 16px", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
-        <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
-          <span style={{ color: "#f59e0b" }}>★</span>
-          <span>"Founding Attorney" badge — current prices ($199/$399/$899) locked forever</span>
-        </li>
-        <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
-          <span style={{ color: "#f59e0b" }}>★</span>
-          <span>5 bonus credits added to your account upon registration</span>
-        </li>
-        <li style={{ fontSize: "0.85em", display: "flex", gap: 8 }}>
-          <span style={{ color: "#f59e0b" }}>★</span>
-          <span>After first {total} attorneys, prices increase 30% — to $259/$519/$1,169/mo</span>
-        </li>
-      </ul>
+
+      {/* Three-column pricing comparison */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 24 }}>
+        {tiers.map((t) => {
+          const savedPerMonth = t.standard - t.founding;
+          const savedPerYear = savedPerMonth * 12;
+          return (
+            <div key={t.key} style={{
+              background: "#0d1117", border: "1px solid rgba(245,158,11,0.15)",
+              borderRadius: 8, padding: "16px 18px",
+            }}>
+              <div style={{ fontSize: "0.6em", letterSpacing: "0.12em", color: "#4b5563", marginBottom: 8 }}>{t.name}</div>
+
+              {/* Founding price — the keeper */}
+              <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginBottom: 4 }}>
+                <span style={{ fontSize: "1.6em", fontWeight: 700, color: "#f59e0b" }}>${t.founding}</span>
+                <span style={{ fontSize: "0.7em", color: "#6b7280" }}>/mo forever</span>
+              </div>
+
+              {/* Standard price — what they're avoiding */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+                <span style={{ fontSize: "0.78em", color: "#4b5563", textDecoration: "line-through" }}>${t.standard}/mo standard</span>
+              </div>
+
+              {/* Annual savings — the hook */}
+              <div style={{
+                background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.2)",
+                borderRadius: 4, padding: "5px 8px", fontSize: "0.72em", color: "#fbbf24", fontWeight: 700,
+              }}>
+                Save ${savedPerYear.toLocaleString()}/year · forever
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Perks list */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 24px", marginBottom: 20 }}>
+        {[
+          '"Founding Attorney" badge locked to your account',
+          "5 bonus credits on signup",
+          "Price locked for lifetime of membership — never increases",
+          "Priority access to new county coverage",
+        ].map(p => (
+          <div key={p} style={{ fontSize: "0.78em", display: "flex", gap: 6 }}>
+            <span style={{ color: "#f59e0b" }}>✓</span>
+            <span style={{ color: "#9ca3af" }}>{p}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* CTA */}
       {isOpen ? (
-        <>
+        <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
           <Link to="/register" style={{
-            display: "inline-block", padding: "10px 24px", background: "#f59e0b",
+            display: "inline-block", padding: "11px 28px", background: "#f59e0b",
             color: "#0a0f1a", textDecoration: "none", borderRadius: 6, fontSize: "0.85em",
             fontWeight: 700, letterSpacing: "0.06em", fontFamily: "inherit",
           }}>
-            CLAIM FOUNDING ATTORNEY STATUS — LOCK IN $199/$399/$899 FOREVER →
+            CLAIM FOUNDING STATUS — LOCK IN $199/$399/$899 →
           </Link>
-          <div style={{ marginTop: 10, fontSize: "0.75em", opacity: 0.5 }}>
-            After first {total} attorneys, pricing increases to $259/$519/$1,169. Current members locked in.
+          <div style={{ fontSize: "0.72em", color: "#4b5563", maxWidth: 260 }}>
+            After {total} founding members, standard pricing applies at $299/$599/$1,199/mo.
+            Current members are locked in permanently.
           </div>
-        </>
+        </div>
       ) : (
-        <div style={{ fontSize: "0.85em", color: "#f59e0b", opacity: 0.7 }}>
-          Founding spots filled. Subscribe above to access all surplus intelligence features.
+        <div style={{ padding: "10px 16px", background: "rgba(245,158,11,0.08)", borderRadius: 6, fontSize: "0.82em", color: "#f59e0b" }}>
+          Founding cohort is full. Standard pricing ($299/$599/$1,199/mo) now applies.
+          Subscribe above for full platform access.
         </div>
       )}
     </div>

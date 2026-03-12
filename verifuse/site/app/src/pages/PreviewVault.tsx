@@ -544,7 +544,7 @@ export default function PreviewVault() {
           <h2 style={{ margin: "0 0 12px", fontSize: "1.6em" }}>Lock in current pricing. Forever.</h2>
           <p style={{ color: "#94a3b8", fontSize: "0.88em", maxWidth: 520, margin: "0 auto 24px", lineHeight: 1.7 }}>
             First 10 attorneys lock in $199/$399/$899 pricing permanently — plus 5 bonus credits on signup.
-            After founding slots fill, prices increase 30% ($259/$519/$1,169/mo).
+            Founding members save <strong style={{ color: "#f59e0b" }}>$1,200–$3,600/year forever</strong> vs standard pricing.
           </p>
           <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
             <Link to="/register" style={{
@@ -556,7 +556,7 @@ export default function PreviewVault() {
             </Link>
           </div>
           <div style={{ marginTop: 12, fontSize: "0.72em", color: "#78350f" }}>
-            After first 10 attorneys: $259 / $519 / $1,169 per month
+            After founding cohort: $299 / $599 / $1,199 per month · Founding members locked in forever
           </div>
         </div>
       </section>
