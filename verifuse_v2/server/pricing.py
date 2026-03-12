@@ -167,6 +167,9 @@ def build_price_map(mode: str) -> dict[str, dict]:
       STRIPE_TEST_PRICE_ASSOCIATE / STRIPE_LIVE_PRICE_ASSOCIATE
       STRIPE_TEST_PRICE_PARTNER   / STRIPE_LIVE_PRICE_PARTNER
       STRIPE_TEST_PRICE_SOVEREIGN / STRIPE_LIVE_PRICE_SOVEREIGN
+      STRIPE_TEST_PRICE_ASSOCIATE_ANNUAL / STRIPE_LIVE_PRICE_ASSOCIATE_ANNUAL
+      STRIPE_TEST_PRICE_PARTNER_ANNUAL   / STRIPE_LIVE_PRICE_PARTNER_ANNUAL
+      STRIPE_TEST_PRICE_SOVEREIGN_ANNUAL / STRIPE_LIVE_PRICE_SOVEREIGN_ANNUAL
       STRIPE_TEST_PRICE_STARTER   / STRIPE_LIVE_PRICE_STARTER
       STRIPE_TEST_PRICE_INVESTIGATION / STRIPE_LIVE_PRICE_INVESTIGATION
 
@@ -174,11 +177,14 @@ def build_price_map(mode: str) -> dict[str, dict]:
     """
     prefix = "STRIPE_LIVE_PRICE_" if mode == "live" else "STRIPE_TEST_PRICE_"
     definitions = {
-        "ASSOCIATE":     {"tier": "associate", "monthly_credits": get_monthly_credits("associate"), "kind": "subscription"},
-        "PARTNER":       {"tier": "partner",   "monthly_credits": get_monthly_credits("partner"),   "kind": "subscription"},
-        "SOVEREIGN":     {"tier": "sovereign", "monthly_credits": get_monthly_credits("sovereign"), "kind": "subscription"},
-        "STARTER":       {"tier": "starter",   "monthly_credits": STARTER_PACK["credits"],          "kind": "starter"},
-        "INVESTIGATION": {"tier": "none",      "monthly_credits": INVESTIGATION_PACK["credits"],    "kind": "investigation"},
+        "ASSOCIATE":        {"tier": "associate", "monthly_credits": get_monthly_credits("associate"), "kind": "subscription"},
+        "PARTNER":          {"tier": "partner",   "monthly_credits": get_monthly_credits("partner"),   "kind": "subscription"},
+        "SOVEREIGN":        {"tier": "sovereign", "monthly_credits": get_monthly_credits("sovereign"), "kind": "subscription"},
+        "ASSOCIATE_ANNUAL": {"tier": "associate", "monthly_credits": get_monthly_credits("associate"), "kind": "subscription"},
+        "PARTNER_ANNUAL":   {"tier": "partner",   "monthly_credits": get_monthly_credits("partner"),   "kind": "subscription"},
+        "SOVEREIGN_ANNUAL": {"tier": "sovereign", "monthly_credits": get_monthly_credits("sovereign"), "kind": "subscription"},
+        "STARTER":          {"tier": "starter",   "monthly_credits": STARTER_PACK["credits"],          "kind": "starter"},
+        "INVESTIGATION":    {"tier": "none",      "monthly_credits": INVESTIGATION_PACK["credits"],    "kind": "investigation"},
     }
     price_map: dict[str, dict] = {}
     for name, info in definitions.items():

@@ -133,12 +133,54 @@ const FEATURE_MATRIX = [
 ];
 
 const CREDIT_COSTS = [
-  { action: "Lead Unlock", credits: 1, description: "Full case details: owner name, property address, evidence documents, surplus math" },
-  { action: "Tax Deed / Unclaimed", credits: 1, description: "Unlock any surplus stream lead (same rate as foreclosure overbid)" },
-  { action: "Court Filing Packet", credits: 3, description: "Motion for Surplus Release + Notice to Lienholders + Affidavit + Proof of Claim" },
-  { action: "Tax Lien Report", credits: 2, description: "Tax lien surplus feed for 1 county (§ 39-11-151)" },
-  { action: "Skip Trace", credits: 1, description: "Current owner address + phone — multi-source cross-reference ($29 or 1 credit)" },
-  { action: "Premium Dossier", credits: 5, description: "Court Filing Packet + title stack + heir notification letter template" },
+  {
+    action: "Lead Unlock",
+    credits: 1,
+    badge: "STANDARD",
+    badgeColor: "#22c55e",
+    description: "Full case details: owner name, mailing address, property address, case number, surplus math, and all evidence documents",
+    value: "Everything you need to contact the owner and assess the case",
+  },
+  {
+    action: "Skip Trace",
+    credits: 1,
+    badge: "ADD-ON",
+    badgeColor: "#22c55e",
+    description: "Current mailing address + phone number from multi-source cross-reference. Required when owner has moved.",
+    value: "Replaces $150–$300 skip trace services",
+  },
+  {
+    action: "Tax Lien Report",
+    credits: 2,
+    badge: "STREAM",
+    badgeColor: "#3b82f6",
+    description: "Full tax lien surplus feed for 1 county under C.R.S. § 39-11-151 — including owner data and claim deadlines",
+    value: "Separate stream from foreclosure overbids",
+  },
+  {
+    action: "Court Filing Packet",
+    credits: 3,
+    badge: "PREMIUM",
+    badgeColor: "#f59e0b",
+    description: "Generate the complete 6-document court packet: Motion for Surplus Release, Notice to Lienholders, Affidavit, Certificate of Service, Property Exhibit, Evidence Exhibit",
+    value: "Court-ready ZIP — Colorado district court format",
+  },
+  {
+    action: "READY TO FILE Unlock",
+    credits: 3,
+    badge: "RTF",
+    badgeColor: "#22c55e",
+    description: "Unlock a fully verified READY_TO_FILE lead. Includes all owner data + court filing packet in one step — these leads have lien search complete and surplus confirmed.",
+    value: "All-in-one: owner data + complete filing packet",
+  },
+  {
+    action: "Premium Dossier",
+    credits: 5,
+    badge: "ELITE",
+    badgeColor: "#a78bfa",
+    description: "Court Filing Packet + full title stack analysis + heir notification letter template (for estate cases)",
+    value: "Highest-yield cases with complex ownership chains",
+  },
 ];
 
 function authHeaders(): Record<string, string> {
@@ -450,21 +492,56 @@ export default function Pricing() {
         )}
 
         {/* Credit Cost Table */}
-        <div style={{ background: "#0d1117", border: "1px solid #374151", borderRadius: 10, padding: "24px", marginBottom: 60 }}>
-          <h3 style={{ fontSize: "0.8em", letterSpacing: "0.1em", opacity: 0.5, marginBottom: 16, marginTop: 0 }}>
-            CREDIT COSTS
-          </h3>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+        <div style={{ marginBottom: 60 }}>
+          <div style={{ textAlign: "center", marginBottom: 28 }}>
+            <div style={{ fontSize: "0.68em", letterSpacing: "0.15em", color: "#22c55e", marginBottom: 8 }}>THE CREDIT ECONOMY</div>
+            <h2 style={{ margin: "0 0 10px", fontSize: "1.3em", fontWeight: 700 }}>One credit, one case unlocked.</h2>
+            <p style={{ color: "#94a3b8", fontSize: "0.85em", maxWidth: 460, margin: "0 auto" }}>
+              Credits are the universal currency inside VeriFuse. No per-document fees. No hidden charges.
+              Credits roll over within your tier's window. Cancel anytime.
+            </p>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
             {CREDIT_COSTS.map((c) => (
-              <div key={c.action} style={{ borderLeft: "2px solid #22c55e33", paddingLeft: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                  <span style={{ fontWeight: 700, fontSize: "1.1em", color: "#22c55e" }}>{c.credits}</span>
-                  <span style={{ opacity: 0.5, fontSize: "0.75em" }}>credit{c.credits !== 1 ? "s" : ""}</span>
-                  <span style={{ fontWeight: 600, fontSize: "0.85em" }}>{c.action}</span>
+              <div key={c.action} style={{
+                background: "#0d1117",
+                border: `1px solid ${(c as any).badgeColor}22`,
+                borderLeft: `3px solid ${(c as any).badgeColor}`,
+                borderRadius: 8, padding: "16px 18px",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{
+                      background: (c as any).badgeColor, color: "#0a0f1a",
+                      width: 36, height: 36, borderRadius: 6,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontWeight: 700, fontSize: "1.1em", fontFamily: "monospace", flexShrink: 0,
+                    }}>
+                      {c.credits}
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: "0.85em", color: "#e5e7eb" }}>{c.action}</div>
+                      <div style={{ fontSize: "0.65em", color: "#4b5563" }}>{c.credits === 1 ? "1 credit" : `${c.credits} credits`}</div>
+                    </div>
+                  </div>
+                  <span style={{
+                    background: `${(c as any).badgeColor}18`, color: (c as any).badgeColor,
+                    padding: "2px 8px", borderRadius: 4, fontSize: "0.62em", fontWeight: 700,
+                    letterSpacing: "0.08em", fontFamily: "monospace",
+                  }}>
+                    {(c as any).badge}
+                  </span>
                 </div>
-                <p style={{ margin: 0, fontSize: "0.78em", opacity: 0.55, lineHeight: 1.4 }}>{c.description}</p>
+                <p style={{ margin: "0 0 6px", fontSize: "0.78em", color: "#6b7280", lineHeight: 1.45 }}>{c.description}</p>
+                <div style={{ fontSize: "0.72em", color: (c as any).badgeColor, display: "flex", gap: 5, alignItems: "center" }}>
+                  <span style={{ opacity: 0.6 }}>→</span>
+                  <span>{(c as any).value}</span>
+                </div>
               </div>
             ))}
+          </div>
+          <div style={{ marginTop: 16, textAlign: "center", fontSize: "0.78em", color: "#4b5563" }}>
+            Credits roll over · Investigator: 30-day rollover · Partner: 60-day · Enterprise: 90-day
           </div>
         </div>
 

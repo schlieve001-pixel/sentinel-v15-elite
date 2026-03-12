@@ -91,6 +91,7 @@ _IS_DEV = os.environ.get("VERIFUSE_ENV", "production").lower() == "development"
 
 # ── Pricing & entitlements (canonical source) ─────────────────────────
 from verifuse_v2.server.pricing import (
+    CREDIT_COSTS,
     FOUNDERS_MAX_SLOTS,
     STARTER_PACK,
     build_price_map,
@@ -2559,8 +2560,11 @@ async def unlock_lead(lead_id: str, request: Request):
                 detail="RESTRICTED lead requires OPERATOR or SOVEREIGN tier.",
             )
 
-    # Phase 0: cost is always 1 (get_credit_cost reserved for Phase 1)
-    cost = 1
+    # RTF leads cost 3 credits (premium tier); standard leads cost 1
+    if lead.get("verification_state") == "READY_TO_FILE":
+        cost = CREDIT_COSTS.get("rtf_unlock", 3)
+    else:
+        cost = 1
     now_epoch = _epoch_now()
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -4166,11 +4170,11 @@ def _handle_invoice_payment(invoice: dict) -> None:
         if billing_reason == "subscription_update":
             # Tier sync only — NO credits; handled separately from invoice
             # TIER_RANK guard: never allow Stripe to downgrade a user
-            _TIER_RANK = {"scout": 0, "operator": 1, "sovereign": 2}
+            _TIER_RANK = {"recon": 0, "associate": 1, "partner": 2, "sovereign": 3}
             cur_row = conn.execute(
                 "SELECT tier FROM users WHERE user_id = ?", [user_id]
             ).fetchone()
-            current_tier = (cur_row["tier"] if cur_row else None) or "scout"
+            current_tier = (cur_row["tier"] if cur_row else None) or "recon"
             if _TIER_RANK.get(new_tier, 0) >= _TIER_RANK.get(current_tier, 0):
                 conn.execute(
                     "UPDATE users SET tier = ?, subscription_status = 'active' WHERE user_id = ?",

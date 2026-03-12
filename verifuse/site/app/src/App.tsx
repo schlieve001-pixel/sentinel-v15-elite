@@ -20,6 +20,7 @@ import UnclaimedProperty from "./pages/UnclaimedProperty";
 import Account from "./pages/Account";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
+import PreviewVault from "./pages/PreviewVault";
 import "./App.css";
 
 // Detect admin.verifuse.tech subdomain and auto-redirect to /admin
@@ -47,7 +48,7 @@ export default function App() {
           <Route path="/register" element={<Register />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
-          <Route path="/preview" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
+          <Route path="/preview" element={<ErrorBoundary><PreviewVault /></ErrorBoundary>} />
           <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
           <Route path="/lead/:assetId" element={<ErrorBoundary><LeadDetail /></ErrorBoundary>} />
           <Route path="/admin" element={<ErrorBoundary><Admin /></ErrorBoundary>} />

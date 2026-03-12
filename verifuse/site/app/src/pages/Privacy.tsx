@@ -4,9 +4,9 @@ import { Link } from "react-router-dom";
 const EFFECTIVE_DATE   = "June 4, 2025";
 const LAST_UPDATED     = "March 11, 2026";
 const COMPANY          = "VeriFuse Technologies LLC";
-const PRIVACY_EMAIL    = "privacy@verifuse.tech";
-const SECURITY_EMAIL   = "security@verifuse.tech";
-const LEGAL_EMAIL      = "legal@verifuse.tech";
+const PRIVACY_EMAIL    = "support@verifuse.tech";
+const SECURITY_EMAIL   = "support@verifuse.tech";
+const LEGAL_EMAIL      = "support@verifuse.tech";
 
 export default function Privacy() {
   useEffect(() => {

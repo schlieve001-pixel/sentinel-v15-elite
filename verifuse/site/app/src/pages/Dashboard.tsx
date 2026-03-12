@@ -29,8 +29,8 @@ function maxAttorneyFee(surplus: number): string {
   return formatCurrencyShort(surplus * ATTORNEY_FEE_CAP);
 }
 
-function useHealth() {
-  const [ok, setOk] = useState(false);
+function useHealth(): boolean | null {
+  const [ok, setOk] = useState<boolean | null>(null);
   useEffect(() => {
     const base = API_BASE || "";
     const check = () => fetch(`${base}/health`)
@@ -656,8 +656,12 @@ export default function Dashboard() {
           VERIFUSE <span className="text-green">// INTELLIGENCE</span>
         </Link>
         <div className="dash-status">
-          <span className={`blink-dot ${healthOk ? "health-ok" : "health-err"}`}>●</span>
-          <span>{healthOk ? "SYSTEM LIVE" : "SYSTEM ERROR"}</span>
+          {healthOk !== null && (
+            <>
+              <span className={`blink-dot ${healthOk ? "health-ok" : "health-err"}`}>●</span>
+              <span>{healthOk ? "SYSTEM LIVE" : "SYSTEM ERROR"}</span>
+            </>
+          )}
           {!isPreview && lastUpdated && (
             <span style={{ fontSize: "0.75em", opacity: 0.5, marginLeft: 8 }}>
               · updated {secondsAgo}s ago
