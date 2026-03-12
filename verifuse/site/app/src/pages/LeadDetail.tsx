@@ -4,7 +4,7 @@ import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downlo
 import { useAuth } from "../lib/auth";
 import { toast } from "../components/Toast";
 
-function SkipTracePanel({ assetId, userCredits }: { assetId: string; userCredits: number }) {
+function SkipTracePanel({ assetId, userTier }: { assetId: string; userTier: string }) {
   const [contact, setContact] = useState<Record<string, string | null> | null>(null);
   const [loading, setLoading] = useState(false);
   const [ran, setRan] = useState(false);
@@ -12,6 +12,9 @@ function SkipTracePanel({ assetId, userCredits }: { assetId: string; userCredits
 
   const _apiBase = () => API_BASE;
   const _token = () => localStorage.getItem("vf_token") || "";
+
+  // Enterprise users get 10 skip traces/month included
+  const isEnterprise = userTier === "sovereign";
 
   async function runSkipTrace() {
     setLoading(true);
@@ -23,10 +26,6 @@ function SkipTracePanel({ assetId, userCredits }: { assetId: string; userCredits
         const data = await res.json();
         setContact(data);
         setRan(true);
-      } else if (res.status === 402) {
-        toast("No credits remaining. Purchase a Skip Trace pack below.", "error");
-      } else if (res.status === 403) {
-        toast("Skip Trace requires credits. Purchase a pack to continue.", "error");
       } else {
         toast("Contact data not yet available for this lead", "error");
       }
@@ -40,7 +39,7 @@ function SkipTracePanel({ assetId, userCredits }: { assetId: string; userCredits
       const res = await fetch(`${_apiBase()}/api/billing/one-time`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${_token()}` },
-        body: JSON.stringify({ sku: "skip_trace", lead_id: assetId, return_path: window.location.pathname + "?credits=1" }),
+        body: JSON.stringify({ sku: "skip_trace", lead_id: assetId, return_path: window.location.pathname + "?ran=1" }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -78,39 +77,36 @@ function SkipTracePanel({ assetId, userCredits }: { assetId: string; userCredits
     );
   }
 
-  const hasCredits = userCredits > 0;
+  if (isEnterprise) {
+    return (
+      <div>
+        <button
+          onClick={runSkipTrace}
+          disabled={loading}
+          style={{ background: loading ? "#1f2937" : "#14532d", border: "1px solid #22c55e", borderRadius: 4, color: "#4ade80", cursor: loading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
+        >
+          {loading ? "RUNNING SKIP TRACE..." : "RUN SKIP TRACE (INCLUDED)"}
+        </button>
+        <div style={{ marginTop: 4, fontSize: "0.7em", color: "#4b5563" }}>
+          Enterprise plan · 10 skip traces/month included · Multi-source owner address lookup
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
-      {hasCredits ? (
-        <>
-          <button
-            onClick={runSkipTrace}
-            disabled={loading}
-            style={{ background: loading ? "#1f2937" : "#14532d", border: "1px solid #22c55e", borderRadius: 4, color: "#4ade80", cursor: loading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
-          >
-            {loading ? "RUNNING SKIP TRACE..." : "RUN SKIP TRACE — 1 CREDIT"}
-          </button>
-          <div style={{ marginTop: 4, fontSize: "0.7em", color: "#4b5563" }}>
-            {userCredits} credit{userCredits !== 1 ? "s" : ""} remaining · Multi-source owner address lookup
-          </div>
-        </>
-      ) : (
-        <>
-          <button
-            onClick={buyAndRun}
-            disabled={buyLoading}
-            style={{ background: buyLoading ? "#1f2937" : "#1c1f2e", border: "1px solid #3b82f6", borderRadius: 4, color: "#93c5fd", cursor: buyLoading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
-          >
-            {buyLoading ? "REDIRECTING..." : "PURCHASE & RUN — $29"}
-          </button>
-          <div style={{ marginTop: 6, fontSize: "0.68em", color: "#4b5563" }}>
-            No credits remaining. $29 one-time purchase — result appears on this page after payment.
-            Or{" "}
-            <a href="/pricing" style={{ color: "#22c55e", textDecoration: "none" }}>subscribe for monthly credits →</a>
-          </div>
-        </>
-      )}
+      <button
+        onClick={buyAndRun}
+        disabled={buyLoading}
+        style={{ background: buyLoading ? "#1f2937" : "#1c1f2e", border: "1px solid #3b82f6", borderRadius: 4, color: "#93c5fd", cursor: buyLoading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
+      >
+        {buyLoading ? "REDIRECTING..." : "SKIP TRACE — $29"}
+      </button>
+      <div style={{ marginTop: 6, fontSize: "0.68em", color: "#4b5563" }}>
+        One-time purchase · Result appears on this page after payment ·{" "}
+        <a href="/pricing" style={{ color: "#a78bfa", textDecoration: "none" }}>Enterprise includes 10/month →</a>
+      </div>
     </div>
   );
 }
@@ -141,6 +137,7 @@ export default function LeadDetail() {
   }
   const [lead, setLead] = useState<Lead | null>(null);
   const [unlocked, setUnlocked] = useState<UnlockResponse | null>(null);
+  const [autoUnlocking, setAutoUnlocking] = useState(false);
   const [loading, setLoading] = useState(true);
   const [unlocking, setUnlocking] = useState(false);
   const [error, setError] = useState("");
@@ -233,7 +230,8 @@ export default function LeadDetail() {
   // Auto-unlock when lead was already purchased by this user (no credit charge — INSERT OR IGNORE)
   useEffect(() => {
     if (!lead?.unlocked_by_me || !assetId || unlocked) return;
-    unlockLead(assetId).then(setUnlocked).catch(() => {});
+    setAutoUnlocking(true);
+    unlockLead(assetId).then(setUnlocked).catch(() => {}).finally(() => setAutoUnlocking(false));
   }, [lead?.unlocked_by_me, assetId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-load evidence docs for attorneys/admins when registry_asset_id is available
@@ -570,9 +568,9 @@ export default function LeadDetail() {
               <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px" }}>
                 <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 14, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>INTELLIGENCE ACCESS</div>
 
-                {lead.unlocked_by_me ? (
+                {(lead.unlocked_by_me || !!unlocked) ? (
                   <div style={{ background: "#14532d22", border: "1px solid #22c55e44", borderRadius: 6, padding: "10px 14px", marginBottom: 12, fontSize: "0.78em", color: "#4ade80", fontWeight: 700, letterSpacing: "0.06em" }}>
-                    ✓ ALREADY UNLOCKED
+                    ✓ UNLOCKED
                   </div>
                 ) : (
                   <>
@@ -849,7 +847,9 @@ export default function LeadDetail() {
             <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: 8, padding: "16px 20px", marginBottom: 12 }}>
               <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#374151", marginBottom: 12, borderBottom: "1px solid #1f2937", paddingBottom: 8 }}>OWNER INTELLIGENCE</div>
               {lead.unlocked_by_me ? (
-                <div style={{ fontSize: "0.82em", color: "#4ade80", fontWeight: 700 }}>✓ ALREADY UNLOCKED — Use unlock button to reload intel</div>
+                <div style={{ fontSize: "0.82em", color: autoUnlocking ? "#6b7280" : "#4ade80", fontWeight: 700 }}>
+                  {autoUnlocking ? "LOADING INTEL..." : "✓ UNLOCKED — INTEL LOADING ABOVE"}
+                </div>
               ) : (
                 <>
                   <div style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 6, padding: "14px 16px", marginBottom: 8, textAlign: "center", fontSize: "0.82em", color: "#374151", letterSpacing: "0.1em" }}>
@@ -898,7 +898,7 @@ export default function LeadDetail() {
               {/* Owner Contact Intel — Skip Trace */}
               <div style={{ borderTop: "1px solid #1f2937", paddingTop: 14, marginTop: 4 }}>
                 <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#6ee7b7", marginBottom: 10 }}>OWNER CONTACT INTEL — SKIP TRACE</div>
-                {assetId && <SkipTracePanel assetId={assetId} userCredits={user?.credits_remaining ?? 0} />}</div>
+                {assetId && <SkipTracePanel assetId={assetId} userTier={user?.tier ?? ""} />}</div>
             </div>
           )}
 
