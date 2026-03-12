@@ -905,6 +905,9 @@ Optional commands:
   research-county         Probe URL patterns to identify county platform (COUNTY_SLUG)
   scraper-run             Run date-window scraper for a specific county
   enrich-owners           Run assessor owner/address lookup for all supported counties (--county --limit)
+  enrich-bronze           Enrich ALL BRONZE leads missing owner/address (assessor lookup, up to 500 leads)
+  backfill-sale-dates     [Admin API] Copy scheduled_sale_date → sale_date for BRONZE leads — fixes pre-sale timeline
+  state-machine-run       Recompute verification_state for all leads — moves out of stuck RAW state
   unclaimed-seed          Seed 20 sample Colorado unclaimed property leads (C.R.S. § 38-13-101)
   unclaimed-property-run  Scrape CO State Treasurer for Public Trustee unclaimed foreclosure surplus (§ 38-13-101)
   unclaimed-crossref      List expired-window leads that are candidates for CO Treasurer unclaimed property check

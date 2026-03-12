@@ -2773,6 +2773,10 @@ async def get_stats():
             total_surplus = conn.execute(
                 "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) FROM leads WHERE data_grade != 'REJECT' AND COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0) > 0"
             ).fetchone()[0]
+            verified_surplus = conn.execute(
+                "SELECT COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) "
+                "FROM leads WHERE data_grade IN ('GOLD', 'SILVER') AND data_grade != 'REJECT'"
+            ).fetchone()[0]
             counties = conn.execute("""
                 SELECT county, COUNT(*) as cnt,
                        COALESCE(SUM(COALESCE(estimated_surplus, surplus_amount, overbid_amount, 0)), 0) as total
@@ -2868,6 +2872,7 @@ async def get_stats():
             "counties_covered": counties_covered,
             "new_leads_7d": new_leads_7d,
             "total_claimable_surplus": round(total_surplus, 2),
+            "verified_surplus": round(verified_surplus, 2),
             "counties": [dict(r) for r in counties],
             "stream_breakdown": stream_breakdown,
             "verified_pipeline": vp_row["cnt"],
@@ -5815,12 +5820,52 @@ async def get_case_packet(lead_id: str, request: Request):
     )
 
 
+def _compute_lead_completeness(row: dict) -> int:
+    """Compute data completeness score 0-100.
+    Weights reflect what attorneys actually need to work a case.
+    """
+    score = 0
+    if row.get("case_number"):                                       score += 5
+    if row.get("county"):                                            score += 5
+    if row.get("winning_bid") or row.get("opening_bid"):             score += 10
+    if row.get("total_debt") or row.get("overbid_amount"):           score += 10
+    surplus = row.get("surplus_amount") or row.get("overbid_amount") or 0
+    if surplus and float(surplus) > 0:                               score += 15
+    sale_date = row.get("sale_date") or row.get("scheduled_sale_date")
+    if sale_date:                                                     score += 15
+    if row.get("owner_name") and row.get("owner_name", "").strip():  score += 20
+    if row.get("property_address") and row.get("property_address", "").strip(): score += 20
+    return min(score, 100)
+
+
+def _compute_data_tier(row: dict) -> str:
+    """Classify lead data quality tier for display and filtering.
+    ENRICHED  — has owner + address + sale_date + surplus > 0
+    PARTIAL   — has some identifying fields but incomplete
+    MONITORING — raw scraper record, case number only
+    """
+    owner    = bool(row.get("owner_name", "").strip() if row.get("owner_name") else False)
+    addr     = bool(row.get("property_address", "").strip() if row.get("property_address") else False)
+    sale     = bool(row.get("sale_date") or row.get("scheduled_sale_date"))
+    surplus  = float(row.get("surplus_amount") or row.get("overbid_amount") or 0) > 0
+    pool_src = row.get("pool_source", "UNVERIFIED")
+
+    if pool_src in ("VOUCHER", "LEDGER", "HTML_MATH") and owner and addr and sale and surplus:
+        return "ENRICHED"
+    if (owner or addr) and (sale or surplus):
+        return "PARTIAL"
+    if owner or addr or sale or surplus:
+        return "PARTIAL"
+    return "MONITORING"
+
+
 @app.get("/api/leads/pre-sale")
 @limiter.limit("100/minute")
 async def get_presale_leads(
     request: Request,
     county: Optional[str] = Query(None),
     has_data: bool = Query(False),
+    data_tier: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -5833,47 +5878,88 @@ async def get_presale_leads(
     def _run():
         conn = _thread_conn()
         try:
-            where = (" WHERE (processing_status = 'PRE_SALE'"
-                     " OR (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now'))"
-                     " OR (sale_date IS NOT NULL AND sale_date > date('now')))")
+            base_where = (" WHERE (processing_status = 'PRE_SALE'"
+                         " OR (scheduled_sale_date IS NOT NULL AND scheduled_sale_date > date('now'))"
+                         " OR (sale_date IS NOT NULL AND sale_date > date('now')))")
             params: list = []
             if county:
-                where += " AND county = ?"
+                base_where += " AND county = ?"
                 params.append(county)
             if has_data:
-                where += " AND (owner_name IS NOT NULL OR surplus_amount > 0)"
+                base_where += " AND (owner_name IS NOT NULL AND owner_name != '' OR surplus_amount > 0)"
+            if data_tier == "ENRICHED":
+                base_where += (" AND owner_name IS NOT NULL AND owner_name != ''"
+                               " AND property_address IS NOT NULL AND property_address != ''"
+                               " AND (sale_date IS NOT NULL OR scheduled_sale_date IS NOT NULL)"
+                               " AND COALESCE(surplus_amount, overbid_amount, 0) > 0")
+            elif data_tier == "PARTIAL":
+                base_where += (" AND (owner_name IS NOT NULL OR property_address IS NOT NULL"
+                               " OR COALESCE(surplus_amount, overbid_amount, 0) > 0)")
+            elif data_tier == "MONITORING":
+                base_where += (" AND (owner_name IS NULL OR owner_name = '')"
+                               " AND (property_address IS NULL OR property_address = '')"
+                               " AND COALESCE(surplus_amount, overbid_amount, 0) = 0")
 
             total = conn.execute(
-                f"SELECT COUNT(*) FROM leads{where}", params
+                f"SELECT COUNT(*) FROM leads{base_where}", params
             ).fetchone()[0]
 
-            # County breakdown
             county_rows = conn.execute(
                 f"""SELECT county,
                            COUNT(*) cnt,
                            SUM(CASE WHEN owner_name IS NOT NULL AND owner_name != '' THEN 1 ELSE 0 END) with_owner,
-                           SUM(CASE WHEN surplus_amount > 0 THEN 1 ELSE 0 END) with_surplus,
-                           SUM(COALESCE(surplus_amount, 0)) pipeline_surplus
-                    FROM leads{where}
-                    GROUP BY county ORDER BY cnt DESC""",
+                           SUM(CASE WHEN COALESCE(surplus_amount, overbid_amount, 0) > 0 THEN 1 ELSE 0 END) with_surplus,
+                           SUM(CASE WHEN sale_date IS NOT NULL OR scheduled_sale_date IS NOT NULL THEN 1 ELSE 0 END) with_sale_date,
+                           SUM(CASE WHEN owner_name IS NOT NULL AND owner_name != ''
+                                    AND property_address IS NOT NULL AND property_address != ''
+                                    AND (sale_date IS NOT NULL OR scheduled_sale_date IS NOT NULL)
+                                    AND COALESCE(surplus_amount, overbid_amount, 0) > 0
+                               THEN 1 ELSE 0 END) fully_enriched,
+                           SUM(COALESCE(surplus_amount, overbid_amount, 0)) pipeline_surplus
+                    FROM leads{base_where}
+                    GROUP BY county ORDER BY pipeline_surplus DESC, cnt DESC""",
                 params,
             ).fetchall()
 
+            # Order: fully enriched first (completeness DESC), then by surplus
             rows = conn.execute(
                 f"""SELECT id, county, case_number, owner_name, property_address,
                            scheduled_sale_date, sale_date, ned_recorded_date,
-                           opening_bid, surplus_amount, overbid_amount,
-                           lender_name, ned_source, data_grade, ingestion_source,
+                           opening_bid, surplus_amount, overbid_amount, winning_bid, total_debt,
+                           lender_name, ned_source, data_grade, ingestion_source, pool_source,
                            updated_at
-                    FROM leads{where}
-                    ORDER BY county ASC,
-                             COALESCE(surplus_amount, 0) DESC,
-                             case_number ASC
+                    FROM leads{base_where}
+                    ORDER BY
+                        (CASE WHEN owner_name IS NOT NULL AND owner_name != '' THEN 20 ELSE 0 END
+                         + CASE WHEN property_address IS NOT NULL AND property_address != '' THEN 20 ELSE 0 END
+                         + CASE WHEN sale_date IS NOT NULL OR scheduled_sale_date IS NOT NULL THEN 15 ELSE 0 END
+                         + CASE WHEN COALESCE(surplus_amount, overbid_amount, 0) > 0 THEN 15 ELSE 0 END
+                         + CASE WHEN winning_bid IS NOT NULL OR opening_bid IS NOT NULL THEN 10 ELSE 0 END
+                         + CASE WHEN total_debt IS NOT NULL OR overbid_amount IS NOT NULL THEN 10 ELSE 0 END
+                         + CASE WHEN case_number IS NOT NULL THEN 5 ELSE 0 END
+                         + CASE WHEN county IS NOT NULL THEN 5 ELSE 0 END) DESC,
+                        COALESCE(surplus_amount, overbid_amount, 0) DESC,
+                        county ASC
                     LIMIT ? OFFSET ?""",
                 params + [limit, offset],
             ).fetchall()
         finally:
             conn.close()
+
+        def _enrich_lead(r: dict) -> dict:
+            completeness = _compute_lead_completeness(r)
+            tier = _compute_data_tier(r)
+            sale = r.get("sale_date") or r.get("scheduled_sale_date")
+            # Expected action date = 6 months after sale (C.R.S. § 38-38-111(5) restriction)
+            expected_action_date = None
+            if sale:
+                try:
+                    import datetime as _dt
+                    sale_dt = _dt.date.fromisoformat(sale[:10])
+                    expected_action_date = (sale_dt + _dt.timedelta(days=183)).isoformat()
+                except Exception:
+                    pass
+            return {**r, "data_completeness": completeness, "data_tier": tier, "expected_action_date": expected_action_date}
 
         return {
             "count": len(rows),
@@ -5881,7 +5967,7 @@ async def get_presale_leads(
             "limit": limit,
             "offset": offset,
             "county_breakdown": [dict(r) for r in county_rows],
-            "leads": [dict(r) for r in rows],
+            "leads": [_enrich_lead(dict(r)) for r in rows],
         }
 
     loop = asyncio.get_event_loop()
@@ -7008,8 +7094,11 @@ _OPS_WHITELIST: dict[str, list[str]] = {
     "tax-lien-run":         ["tax-lien-run"],
     # Assessor
     "assessor-lookup":      ["assessor-lookup"],
-    # Owner enrichment
+    # Owner enrichment + data quality
     "enrich-owners":        ["enrich-owners"],
+    "enrich-bronze":        ["enrich-owners", "--all-counties", "--limit", "500"],
+    "backfill-sale-dates":  ["pre-sale-scan"],  # triggers promote + date copy via API
+    "state-machine-run":    ["promote-eligible"],
     # Unclaimed property
     "unclaimed-seed":           ["unclaimed-seed"],
     "unclaimed-property-run":   ["unclaimed-property-run"],
@@ -7310,6 +7399,80 @@ async def ops_promote_presale(request: Request, county: Optional[str] = Query(No
             "county_filter": county,
             "message": f"Promoted {promoted_count} leads to PRE_SALE. Total PRE_SALE: {total}",
         }
+
+    return await _run_in_db(_run)
+
+
+@app.post("/api/admin/backfill-sale-dates")
+@limiter.limit("10/minute")
+async def admin_backfill_sale_dates(request: Request):
+    """Backfill sale_date from scheduled_sale_date for BRONZE leads where sale_date is NULL."""
+    user = _require_user(request)
+    if not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            candidates = conn.execute(
+                "SELECT COUNT(*) FROM leads WHERE data_grade = 'BRONZE' "
+                "AND sale_date IS NULL AND scheduled_sale_date IS NOT NULL AND scheduled_sale_date != ''"
+            ).fetchone()[0]
+            result = conn.execute(
+                "UPDATE leads SET sale_date = scheduled_sale_date, updated_at = datetime('now') "
+                "WHERE data_grade = 'BRONZE' AND sale_date IS NULL "
+                "AND scheduled_sale_date IS NOT NULL AND scheduled_sale_date != ''"
+            )
+            updated = result.rowcount
+            conn.commit()
+            _audit_log(conn, user["user_id"], "backfill_sale_dates", {"candidates": candidates, "updated": updated})
+            conn.commit()
+            log.info("backfill_sale_dates: updated %d leads", updated)
+            return {"ok": True, "candidates_found": candidates, "updated": updated,
+                    "message": f"Backfilled sale_date for {updated} BRONZE leads from scheduled_sale_date"}
+        finally:
+            conn.close()
+
+    return await _run_in_db(_run)
+
+
+@app.post("/api/admin/state-machine-backfill")
+@limiter.limit("5/minute")
+async def admin_state_machine_backfill(request: Request):
+    """Recompute and persist verification_state for all non-REJECT leads. Idempotent."""
+    user = _require_user(request)
+    if not _effective_admin(user, request):
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    def _run():
+        conn = _thread_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM leads WHERE data_grade != 'REJECT' LIMIT 25000"
+            ).fetchall()
+            state_counts: dict[str, int] = {}
+            updated = 0
+            for row in rows:
+                d = dict(row)
+                computed = _compute_verification_state(d)
+                stored = d.get("verification_state") or "RAW"
+                if computed != stored:
+                    conn.execute(
+                        "UPDATE leads SET verification_state = ?, updated_at = datetime('now') WHERE id = ?",
+                        [computed, d["id"]],
+                    )
+                    updated += 1
+                state_counts[computed] = state_counts.get(computed, 0) + 1
+            conn.commit()
+            _audit_log(conn, user["user_id"], "state_machine_backfill",
+                       {"total_processed": len(rows), "updated": updated, "states": state_counts})
+            conn.commit()
+            log.info("state_machine_backfill: processed=%d updated=%d", len(rows), updated)
+            return {"ok": True, "total_processed": len(rows), "updated": updated,
+                    "state_distribution": state_counts,
+                    "message": f"Processed {len(rows)} leads, updated {updated} verification states"}
+        finally:
+            conn.close()
 
     return await _run_in_db(_run)
 

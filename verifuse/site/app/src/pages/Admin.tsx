@@ -1275,9 +1275,35 @@ function SystemTab() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
               <StatCard label="GOLD Leads" value={stats?.scoreboard?.find(s => s.data_grade === "GOLD")?.lead_count?.toString() || "0"} color={AMBER} accent sub={stats?.scoreboard?.find(s => s.data_grade === "GOLD") ? formatCurrency(stats?.scoreboard?.find(s => s.data_grade === "GOLD")?.total_surplus ?? 0) + " verified" : undefined} />
               <StatCard label="SILVER Leads" value={stats?.scoreboard?.find(s => s.data_grade === "SILVER")?.lead_count?.toString() || "0"} color="#94a3b8" sub={stats?.scoreboard?.find(s => s.data_grade === "SILVER") ? formatCurrency(stats?.scoreboard?.find(s => s.data_grade === "SILVER")?.total_surplus ?? 0) : undefined} />
-              <StatCard label="BRONZE Leads" value={stats?.scoreboard?.find(s => s.data_grade === "BRONZE")?.lead_count?.toString() || "0"} color="#b45309" sub="pending Gate 4" />
+              <StatCard label="BRONZE (Monitoring)" value={stats?.scoreboard?.find(s => s.data_grade === "BRONZE")?.lead_count?.toString() || "0"} color="#6b7280" sub="unverified pipeline" />
               <StatCard label="CO Counties" value="64" color={BLUE} sub={`${pipeline.filter(p => p.total > 0).length} with data`} />
               <StatCard label="Coverage" value={`${Math.round(pipeline.filter(p => p.total > 0).length / 64 * 100)}%`} color={pipeline.filter(p => p.total > 0).length >= 20 ? GREEN : AMBER} sub="of 64 CO counties" />
+            </div>
+          </section>
+
+          <section>
+            <SectionHeader>DATA QUALITY — ONE-TIME FIXES</SectionHeader>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12 }}>
+              <div style={{ background: BG2, border: `1px solid ${BORDER2}`, borderRadius: 8, padding: "16px 18px" }}>
+                <div style={{ fontSize: "0.72em", color: GREEN, letterSpacing: "0.08em", fontWeight: 700, marginBottom: 6 }}>BACKFILL SALE DATES</div>
+                <div style={{ fontSize: "0.78em", color: TEXT_MUTED, marginBottom: 12, lineHeight: 1.45 }}>
+                  Copy scheduled_sale_date → sale_date for BRONZE leads (97.5% currently NULL). Instant DB operation — run once to fix pre-sale timeline display.
+                </div>
+                <button onClick={() => adminFetch<{message: string}>("/api/admin/backfill-sale-dates", { method: "POST" }).then(r => alert(r.message)).catch(e => alert(String(e)))}
+                  style={{ background: GREEN + "18", border: `1px solid ${GREEN}55`, color: GREEN, borderRadius: 5, padding: "7px 14px", fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700, cursor: "pointer", letterSpacing: "0.04em" }}>
+                  RUN BACKFILL →
+                </button>
+              </div>
+              <div style={{ background: BG2, border: `1px solid ${BORDER2}`, borderRadius: 8, padding: "16px 18px" }}>
+                <div style={{ fontSize: "0.72em", color: BLUE, letterSpacing: "0.08em", fontWeight: 700, marginBottom: 6 }}>STATE MACHINE BACKFILL</div>
+                <div style={{ fontSize: "0.78em", color: TEXT_MUTED, marginBottom: 12, lineHeight: 1.45 }}>
+                  Recompute verification_state for all non-REJECT leads. Moves leads from stuck RAW state into EXTRACTED/MATH_VERIFIED where evidence warrants it.
+                </div>
+                <button onClick={() => adminFetch<{message: string}>("/api/admin/state-machine-backfill", { method: "POST" }).then(r => alert(r.message)).catch(e => alert(String(e)))}
+                  style={{ background: BLUE + "18", border: `1px solid ${BLUE}55`, color: BLUE, borderRadius: 5, padding: "7px 14px", fontFamily: "monospace", fontSize: "0.75em", fontWeight: 700, cursor: "pointer", letterSpacing: "0.04em" }}>
+                  RUN BACKFILL →
+                </button>
+              </div>
             </div>
           </section>
         </>
@@ -1770,6 +1796,7 @@ const PIPELINE_COMMANDS: {
   // ── Owner Intelligence ────────────────────────────────────────────
   { id: "assessor-lookup",     label: "▶ ASSESSOR LOOKUP",     desc: "Pull owner mailing address from county assessor (8 counties)", hint: "Free assessor API. Populates owner_mailing_address on GOLD leads. Run after scraping new county.", eta: "5–20 min", group: "INTEL" },
   { id: "enrich-owners",       label: "▶ ENRICH OWNERS",       desc: "Run full owner enrichment pipeline (assessor + SOS + USPS)", hint: "Combines assessor, CO Secretary of State, and USPS validation to produce owner_contact_json. Best run weekly.", eta: "10–30 min", group: "INTEL" },
+  { id: "enrich-bronze",       label: "▶ ENRICH BRONZE LEADS", desc: "Run owner enrichment on all BRONZE leads (up to 500 at once)", hint: "Runs assessor lookup on BRONZE leads missing owner_name or property_address. Run this to fix the 75% data gap on BRONZE leads. Takes 20–60 min.", color: "#f59e0b", eta: "20–60 min", group: "INTEL" },
   { id: "unclaimed-crossref",  label: "▶ UNCLAIMED CROSSREF",  desc: "Print expired-window leads that may have transferred to CO Treasurer", hint: "Identifies leads with sale_date ≤ 2025-09-01 (past 6-month window) as unclaimed property candidates.", eta: "< 1 min", group: "INTEL" },
   // ── Alternative Streams ───────────────────────────────────────────
   { id: "tax-lien-run",           label: "▶ TAX LIEN RUN",        desc: "Tax lien surplus pipeline (C.R.S. § 39-11-151)", hint: "Populates TAX_LIEN surplus stream. Run monthly to capture county tax sale overages.", eta: "5–10 min", group: "STREAMS" },
@@ -1971,6 +1998,7 @@ function OpsCenter() {
           {[
             { label: "▶ PRE-SALE SCAN ALL", cmd: "pending-sales",   color: "#22c55e", hint: "Runs pre-sale scan on all counties",      desc: "Scan all counties for upcoming sales" },
             { label: "▶ GATE 4 ALL",        cmd: "gate4-run-all",   color: "#f59e0b", hint: "Full Gate 4 extraction (30+ min)",        desc: "Extract overbids — all counties" },
+            { label: "▶ ENRICH BRONZE",     cmd: "enrich-bronze",   color: "#f59e0b", hint: "Assessor lookup on BRONZE leads — fixes 75% missing owner/address data (20–60 min)", desc: "Enrich BRONZE with owner data" },
             { label: "⬇ BACKUP NOW",         cmd: "backup-db",       color: BLUE,      hint: "Safe DB backup (< 1 min)",               desc: "SQLite snapshot to .bak file" },
             { label: "▶ PROMOTE ELIGIBLE",  cmd: "promote-eligible", color: "#a78bfa", hint: "SILVER → GOLD promotion check",          desc: "Check promotion eligibility" },
             { label: "▶ HEALTH CHECK",      cmd: "health-check",    color: "#22c55e", hint: "Re-grade all leads + self-heal (2–5 min)", desc: "Daily healthcheck on demand" },

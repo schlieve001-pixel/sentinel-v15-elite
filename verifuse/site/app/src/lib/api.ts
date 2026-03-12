@@ -246,11 +246,17 @@ export interface PreSaleLead {
   opening_bid: number;
   surplus_amount: number | null;
   overbid_amount: number | null;
+  winning_bid: number | null;
+  total_debt: number | null;
   lender_name: string | null;
   ned_source: string | null;
   data_grade: string;
   ingestion_source: string | null;
+  pool_source: string | null;
   updated_at: string | null;
+  data_completeness: number;      // 0-100 quality score
+  data_tier: string;              // "ENRICHED" | "PARTIAL" | "MONITORING"
+  expected_action_date: string | null;  // sale_date + 6 months
 }
 
 export interface CountyBreakdown {
@@ -258,6 +264,8 @@ export interface CountyBreakdown {
   cnt: number;
   with_owner: number;
   with_surplus: number;
+  with_sale_date: number;
+  fully_enriched: number;
   pipeline_surplus: number;
 }
 
@@ -273,12 +281,14 @@ export interface PreSaleResponse {
 export function getPreSaleLeads(params?: {
   county?: string;
   has_data?: boolean;
+  data_tier?: string;
   limit?: number;
   offset?: number;
 }, signal?: AbortSignal): Promise<PreSaleResponse> {
   const qs = new URLSearchParams();
   if (params?.county) qs.set("county", params.county);
   if (params?.has_data) qs.set("has_data", "true");
+  if (params?.data_tier) qs.set("data_tier", params.data_tier);
   if (params?.limit) qs.set("limit", String(params.limit));
   if (params?.offset) qs.set("offset", String(params.offset));
   const q = qs.toString();
@@ -341,6 +351,7 @@ export interface Stats {
   bronze_grade: number;
   reject_grade: number;
   total_claimable_surplus: number;
+  verified_surplus?: number;  // GOLD + SILVER surplus only
   verified_pipeline: number;
   verified_pipeline_surplus?: number;
   total_raw_volume: number;

@@ -50,7 +50,7 @@ interface KpiProps {
   value: string | number;
   sub?: React.ReactNode;
   accent?: boolean;
-  grade?: "gold" | "silver" | "bronze";
+  grade?: "gold" | "silver" | "bronze" | "gray";
   href?: string;
   icon?: React.ElementType;
   tooltip?: string;
@@ -60,12 +60,14 @@ function KpiCard({ label, value, sub, accent, grade, href, icon: Icon, tooltip }
   const borderColor = grade === "gold" ? "#f59e0b"
     : grade === "silver" ? "#94a3b8"
     : grade === "bronze" ? "#b45309"
+    : grade === "gray" ? "#374151"
     : accent ? "#22c55e"
     : "#374151";
 
   const valueColor = grade === "gold" ? "#f59e0b"
     : grade === "silver" ? "#94a3b8"
     : grade === "bronze" ? "#b45309"
+    : grade === "gray" ? "#6b7280"
     : accent ? "#22c55e"
     : "#e5e7eb";
 
@@ -293,6 +295,17 @@ function LeadCard({ lead, onNavigate }: { lead: Lead; onNavigate: (id: string) =
           </span>
         ) : null}
       </div>
+
+      {lead.data_grade === "BRONZE" && typeof (lead as any).data_completeness === "number" && (
+        <div style={{ marginTop: 4, height: 3, borderRadius: 2, background: "#1f2937", width: "100%" }}>
+          <div style={{
+            height: "100%", borderRadius: 2,
+            width: `${(lead as any).data_completeness}%`,
+            background: (lead as any).data_completeness >= 70 ? "#22c55e" :
+                        (lead as any).data_completeness >= 40 ? "#f59e0b" : "#4b5563"
+          }} />
+        </div>
+      )}
 
       {lead.address_hint && (
         <div className="address-hint">{lead.address_hint}</div>
@@ -775,19 +788,24 @@ export default function Dashboard() {
                 tooltip="SILVER: Probable overbid detected. Restriction window active (C.R.S. § 38-38-111) or secondary doc validation pending. Monitor for GOLD promotion."
               />
               <KpiCard
-                label="BRONZE Leads"
+                label="Monitoring Pipeline"
                 value={bronzeCount}
-                grade="bronze"
+                grade="gray"
                 href="?grade=BRONZE"
+                sub="(unverified extraction candidates)"
                 tooltip="BRONZE: Pre-validation stage. Overbid likely but sale documents or math not yet confirmed. Gate 4 extraction running."
               />
               <KpiCard
                 label="Total Pipeline Value"
-                value={formatCurrencyShort(stats.verified_pipeline_surplus ?? stats.total_claimable_surplus)}
-                sub={`${stats.verified_pipeline ?? stats.total_assets} verified leads`}
+                value={stats.verified_surplus != null
+                  ? `$${(stats.verified_surplus / 1_000_000).toFixed(1)}M VERIFIED`
+                  : formatCurrencyShort(stats.verified_pipeline_surplus ?? stats.total_claimable_surplus)}
+                sub={stats.verified_surplus != null
+                  ? <span style={{ color: "#6b7280" }}>(+{((stats.total_claimable_surplus - stats.verified_surplus) / 1_000_000).toFixed(1)}M pipeline est.)</span>
+                  : `${stats.verified_pipeline ?? stats.total_assets} verified leads`}
                 accent={true}
                 icon={DollarSign}
-                tooltip="Combined overbid surplus across all GOLD + SILVER + BRONZE leads with confirmed values > $100. Represents the total claimable estate across your pipeline."
+                tooltip="Verified surplus (GOLD + SILVER only) shown in green. Pipeline estimate includes BRONZE unconfirmed leads. Verified figure represents the confirmed claimable estate."
               />
               <KpiCard
                 label="Attorney-Ready"
