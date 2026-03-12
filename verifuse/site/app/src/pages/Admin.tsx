@@ -426,7 +426,7 @@ function AttorneyQueue() {
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
                   <span style={{ fontWeight: 700, fontSize: "0.92em" }}>{u.email}</span>
                   {u.email_verified ? <Badge color={GREEN}>EMAIL VERIFIED</Badge> : <Badge color={AMBER}>EMAIL UNVERIFIED</Badge>}
-                  <Badge color={BLUE}>{(u.tier || "scout").toUpperCase()}</Badge>
+                  <Badge color={BLUE}>{{ recon: "FREE", associate: "INVESTIGATOR", partner: "PARTNER", sovereign: "ENTERPRISE" }[u.tier] ?? (u.tier || "FREE").toUpperCase()}</Badge>
                 </div>
                 <div style={{ fontSize: "0.82em", color: TEXT_DIM }}>
                   {u.full_name || "—"} · {u.firm_name || "No firm"}
@@ -803,7 +803,7 @@ function UserRow({ u, onAction }: { u: AdminUser; onAction: () => void }) {
           <span style={{
             fontSize: "0.72em", fontWeight: 700, padding: "2px 8px", borderRadius: 4,
             background: `${BLUE}22`, color: BLUE, border: `1px solid ${BLUE}44`,
-          }}>{(u.tier || "free").toUpperCase()}</span>
+          }}>{{ recon: "FREE", associate: "INVESTIGATOR", partner: "PARTNER", sovereign: "ENTERPRISE" }[u.tier] ?? (u.tier || "FREE").toUpperCase()}</span>
         </td>
         <td style={{ padding: "10px 12px", textAlign: "right", fontWeight: 700, color: (u.credits_remaining || 0) > 0 ? GREEN : TEXT_MUTED }}>
           {u.credits_remaining ?? "—"}
@@ -1247,7 +1247,7 @@ function SystemTab() {
                 const count = tierData?.count ?? 0;
                 return (
                   <div key={tier} style={{ flex: 1, minWidth: 140, background: BG, border: `1px solid ${count > 0 ? BLUE + "44" : BORDER2}`, borderRadius: 8, padding: "12px 16px" }}>
-                    <div style={{ color: TEXT_MUTED, fontSize: "0.7em", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{tier}</div>
+                    <div style={{ color: TEXT_MUTED, fontSize: "0.7em", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{{ associate: "INVESTIGATOR", partner: "PARTNER", sovereign: "ENTERPRISE" }[tier] ?? tier.toUpperCase()}</div>
                     <div style={{ fontWeight: 700, fontSize: "1.2em", color: count > 0 ? TEXT : TEXT_MUTED }}>{count} users</div>
                     <div style={{ color: count > 0 ? GREEN : TEXT_MUTED, fontSize: "0.82em" }}>${((tierData?.mrr_cents ?? 0) / 100).toLocaleString()}/mo</div>
                     <span style={{ fontSize: "0.7em", color: TEXT_MUTED }}>• Powered by Stripe</span>

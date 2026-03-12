@@ -684,7 +684,7 @@ export default function Dashboard() {
         <div className="dash-user">
           {user ? (
             <>
-              <span className="tier-badge">{user.tier.toUpperCase()}</span>
+              <span className="tier-badge">{{ recon: "FREE", associate: "INVESTIGATOR", partner: "PARTNER", sovereign: "ENTERPRISE" }[user.tier] ?? user.tier.toUpperCase()}</span>
               <span className="credits-badge">{user.credits_remaining} credits</span>
               {user.is_admin && (
                 <button className={`btn-outline-sm ${simMode === "user" ? "sim-active" : ""}`}
@@ -888,7 +888,7 @@ export default function Dashboard() {
           {(() => {
             const pct = user.credits_pct_remaining ?? (user.monthly_grant ? Math.round(user.credits_remaining / user.monthly_grant * 100) : 100);
             const barColor = pct > 50 ? "#22c55e" : pct > 20 ? "#f59e0b" : "#ef4444";
-            const nextTier = user.tier === "associate" ? "Partner" : user.tier === "partner" ? "Sovereign" : null;
+            const nextTier = user.tier === "associate" ? "Partner" : user.tier === "partner" ? "Enterprise" : null;
             return (
               <div style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 8, padding: "12px 16px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.78em", marginBottom: 6 }}>

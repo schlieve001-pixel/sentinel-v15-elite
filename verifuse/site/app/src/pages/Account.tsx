@@ -21,8 +21,10 @@ function fmtAmount(cents: number, currency: string): string {
 }
 
 const TIER_LABELS: Record<string, string> = {
-  free: "FREE", investigator: "INVESTIGATOR", partner: "PARTNER",
-  enterprise: "ENTERPRISE", sovereign: "SOVEREIGN", associate: "ASSOCIATE",
+  recon:      "FREE",
+  associate:  "INVESTIGATOR",
+  partner:    "PARTNER",
+  sovereign:  "ENTERPRISE",
 };
 
 const SECTION: React.CSSProperties = {

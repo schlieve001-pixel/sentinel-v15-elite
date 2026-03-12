@@ -59,7 +59,7 @@ export default function Register() {
           </Link>
           <span className="security-badge">NEW ACCOUNT</span>
           <h2>Create Your Account</h2>
-          <p className="auth-sub">Start with 5 free credits on the Recon tier.</p>
+          <p className="auth-sub">Sign up today and receive 5 bonus credits to get started.</p>
         </div>
 
         {error && (
