@@ -2956,8 +2956,31 @@ async def api_register(request: Request):
         bar_number=bar_number,
         tier="recon",
     )
-    # Founders cap check
-    _try_founders_redemption(user["user_id"])
+    # Founders cap check — grant 5 bonus credits if founding slot claimed
+    is_founder = _try_founders_redemption(user["user_id"])
+    if is_founder:
+        import uuid as _uuid_m
+        import time as _time_m
+        _bonus = 5
+        _expires = int(_time_m.time()) + 365 * 86400  # 1 year
+        _c = _get_conn()
+        try:
+            _c.execute(
+                "INSERT OR IGNORE INTO unlock_ledger_entries "
+                "(id, user_id, source, qty_total, qty_remaining, purchased_ts, expires_ts) "
+                "VALUES (?, ?, 'founders_bonus', ?, ?, ?, ?)",
+                [str(_uuid_m.uuid4()), user["user_id"], _bonus, _bonus, int(_time_m.time()), _expires],
+            )
+            _c.execute(
+                "UPDATE users SET credits_remaining = COALESCE(credits_remaining, 0) + ? WHERE user_id = ?",
+                [_bonus, user["user_id"]],
+            )
+            _c.commit()
+            log.info("Founders bonus credited: user=%s credits=%d", user["user_id"], _bonus)
+        except Exception as _e:
+            log.warning("Founders bonus grant failed: %s", _e)
+        finally:
+            _c.close()
     # If bar_number was supplied at registration, auto-queue attorney verification
     if bar_number:
         conn2 = _get_conn()
