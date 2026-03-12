@@ -93,6 +93,7 @@ _IS_DEV = os.environ.get("VERIFUSE_ENV", "production").lower() == "development"
 from verifuse_v2.server.pricing import (
     CREDIT_COSTS,
     FOUNDERS_MAX_SLOTS,
+    INVESTIGATION_PACK,
     STARTER_PACK,
     build_price_map,
     get_monthly_credits,
@@ -3740,8 +3741,7 @@ async def billing_status(request: Request):
             ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="User not found.")
-        from verifuse_v2.server.pricing import MONTHLY_CREDITS
-        monthly_grant = MONTHLY_CREDITS.get(row["tier"], 0)
+        monthly_grant = get_monthly_credits(row["tier"])
         return {
             "tier": row["tier"],
             "credits_remaining": row["credits_remaining"],
@@ -3973,22 +3973,33 @@ async def stripe_webhook(request: Request):
         ).fetchone()
         if existing:
             return {"status": "already_processed"}
+    finally:
+        conn.close()
+
+    # Run handler BEFORE marking as processed — if handler crashes, Stripe will retry
+    try:
+        if event_type == "checkout.session.completed":
+            _handle_checkout_session(data_obj)
+        elif event_type == "invoice.payment_succeeded":
+            _handle_invoice_payment(data_obj)
+        elif event_type == "customer.subscription.deleted":
+            _handle_subscription_cancelled(data_obj)
+        else:
+            log.debug("Unhandled Stripe event: %s", event_type)
+    except Exception as exc:
+        log.error("Stripe handler failed for %s %s: %s", event_type, event_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Webhook handler error — will retry")
+
+    # Mark as processed only after successful handling
+    conn = _get_conn()
+    try:
         conn.execute(
-            "INSERT INTO stripe_events (event_id, type, received_at) VALUES (?, ?, datetime('now'))",
+            "INSERT OR IGNORE INTO stripe_events (event_id, type, received_at) VALUES (?, ?, datetime('now'))",
             [event_id, event_type],
         )
         conn.commit()
     finally:
         conn.close()
-
-    if event_type == "checkout.session.completed":
-        _handle_checkout_session(data_obj)
-    elif event_type == "invoice.payment_succeeded":
-        _handle_invoice_payment(data_obj)
-    elif event_type == "customer.subscription.deleted":
-        _handle_subscription_cancelled(data_obj)
-    else:
-        log.debug("Unhandled Stripe event: %s", event_type)
 
     return {"status": "ok"}
 
@@ -4062,22 +4073,33 @@ def _handle_checkout_session(session: dict) -> None:
         # Credits are granted atomically by the invoice.payment_succeeded event.
         user_id = metadata.get("user_id", "")
         tier = metadata.get("tier", "scout")
+        billing_period = metadata.get("billing_period", "monthly") or "monthly"
         customer_id = session.get("customer", "")
         subscription_id = session.get("subscription", "")
 
         if not user_id:
-            log.warning("Subscription checkout: no user_id")
+            log.warning("Subscription checkout: no user_id in metadata — session_id=%s", session.get("id", ""))
+            return
+
+        if not customer_id:
+            log.warning("Subscription checkout: no customer_id — session_id=%s user_id=%s", session.get("id", ""), user_id)
+            return
+
+        if tier not in ("associate", "partner", "sovereign"):
+            log.warning("Subscription checkout: invalid tier=%r for user_id=%s", tier, user_id)
             return
 
         conn = _get_conn()
         try:
-            conn.execute(
+            rows_updated = conn.execute(
                 "UPDATE users SET stripe_customer_id = ?, stripe_subscription_id = ?, "
-                "subscription_status = 'active', tier = ? WHERE user_id = ?",
-                [customer_id, subscription_id, tier, user_id],
-            )
+                "subscription_status = 'active', tier = ?, billing_period = ? WHERE user_id = ?",
+                [customer_id, subscription_id, tier, billing_period, user_id],
+            ).rowcount
+            if rows_updated == 0:
+                log.error("Subscription checkout: UPDATE matched 0 rows for user_id=%s", user_id)
             _audit_log(conn, user_id, "subscription_activated", {
-                "tier": tier, "customer_id": customer_id,
+                "tier": tier, "billing_period": billing_period, "customer_id": customer_id,
             })
             conn.commit()
             log.info("Subscription activated: user=%s tier=%s (credits via invoice event)", user_id, tier)
@@ -7855,8 +7877,8 @@ async def evidence_preview(lead_id: str, request: Request):
     try:
         docs = conn.execute(
             """SELECT id, doc_family, filename, recording_number, doc_type,
-                      file_size_bytes, created_at
-               FROM evidence_documents WHERE asset_id=? ORDER BY created_at DESC""",
+                      bytes AS file_size_bytes, retrieved_ts AS created_at
+               FROM evidence_documents WHERE asset_id=? ORDER BY retrieved_ts DESC""",
             [lead_id],
         ).fetchall()
         return {"docs": [dict(d) for d in docs], "count": len(docs)}
