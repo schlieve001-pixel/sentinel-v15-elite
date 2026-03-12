@@ -132,6 +132,38 @@ def _clean_text(text: str) -> str:
     return " ".join(text.split()).strip()
 
 
+# ── County adapter registry ────────────────────────────────────────────────────
+
+def _get_adapter(county: str):
+    """Return the county-specific adapter module, or None if not supported."""
+    try:
+        if county == "jefferson":
+            from verifuse_v2.scrapers.assessor_adapters import jefferson as m
+        elif county == "arapahoe":
+            from verifuse_v2.scrapers.assessor_adapters import arapahoe as m
+        elif county == "adams":
+            from verifuse_v2.scrapers.assessor_adapters import adams as m
+        elif county == "denver":
+            from verifuse_v2.scrapers.assessor_adapters import denver as m
+        elif county == "el_paso":
+            from verifuse_v2.scrapers.assessor_adapters import el_paso as m
+        elif county == "boulder":
+            from verifuse_v2.scrapers.assessor_adapters import boulder as m
+        elif county == "douglas":
+            from verifuse_v2.scrapers.assessor_adapters import douglas as m
+        elif county == "weld":
+            from verifuse_v2.scrapers.assessor_adapters import weld as m
+        else:
+            return None
+        # Skip adapters that are marked as permanently blocked
+        if getattr(m, "BLOCKED", False):
+            log.debug("[assessor] %s: adapter marked BLOCKED, skipping", county)
+            return None
+        return m
+    except ImportError:
+        return None
+
+
 # ── Playwright lookup ──────────────────────────────────────────────────────────
 
 async def _lookup_owner_playwright(
@@ -139,18 +171,19 @@ async def _lookup_owner_playwright(
     property_address: str,
     timeout_ms: int = 20000,
 ) -> Optional[dict]:
-    """Search county assessor portal for owner name + mailing address.
+    """Dispatch to county-specific adapter for owner + mailing address lookup.
 
     Returns dict with owner_name and mailing_address keys, or None if not found.
-    Uses Playwright Chromium headless to handle JS-heavy portals.
+    Each county adapter handles its own portal navigation logic.
     """
-    config = ASSESSOR_CONFIGS.get(county.lower())
-    if not config:
-        log.debug("[assessor] No config for county: %s", county)
+    county_key = county.lower()
+    adapter = _get_adapter(county_key)
+    if not adapter:
+        log.debug("[assessor] No adapter for county: %s", county)
         return None
 
     try:
-        from playwright.async_api import async_playwright, TimeoutError as PWTimeout  # type: ignore
+        from playwright.async_api import async_playwright  # type: ignore
     except ImportError:
         log.warning("[assessor] Playwright not installed — cannot do assessor lookup")
         return None
@@ -165,61 +198,19 @@ async def _lookup_owner_playwright(
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         ctx = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
         )
         page = await ctx.new_page()
 
         try:
-            await page.goto(config["search_url"], timeout=timeout_ms, wait_until="domcontentloaded")
-            await page.wait_for_timeout(1500)
+            result = await adapter.lookup(page, address_clean, timeout_ms)
+            if result:
+                log.info(
+                    "[assessor] %s: found owner=%r mailing=%r",
+                    county, result.get("owner_name", "")[:40], result.get("mailing_address", "")[:60],
+                )
+            return result
 
-            # Find and fill address input
-            addr_input = await page.query_selector(config["address_input_selector"])
-            if not addr_input:
-                log.debug("[assessor] %s: address input not found", county)
-                return None
-
-            await addr_input.fill(address_clean)
-            await page.wait_for_timeout(500)
-
-            # Click search button
-            btn = await page.query_selector(config["search_btn_selector"])
-            if btn:
-                await btn.click()
-            else:
-                await page.keyboard.press("Enter")
-
-            await page.wait_for_timeout(3000)
-
-            # Extract first result row
-            rows = await page.query_selector_all(config["result_row_selector"])
-            if not rows:
-                log.debug("[assessor] %s: no result rows found for %s", county, address_clean)
-                return None
-
-            row = rows[0]
-
-            owner_el = await row.query_selector(config["owner_selector"])
-            mailing_el = await row.query_selector(config["mailing_selector"])
-
-            owner_name = _clean_text(await owner_el.inner_text()) if owner_el else ""
-            mailing_addr = _clean_text(await mailing_el.inner_text()) if mailing_el else ""
-
-            if not owner_name and not mailing_addr:
-                return None
-
-            log.info(
-                "[assessor] %s: found owner=%r mailing=%r",
-                county, owner_name[:40], mailing_addr[:60],
-            )
-            return {
-                "owner_name":       owner_name,
-                "mailing_address":  mailing_addr,
-            }
-
-        except PWTimeout:
-            log.warning("[assessor] %s: timeout for %s", county, address_clean)
-            return None
         except Exception as exc:
             log.warning("[assessor] %s: error for %s: %s", county, address_clean, exc)
             return None
