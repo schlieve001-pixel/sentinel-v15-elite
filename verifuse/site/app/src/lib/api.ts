@@ -388,6 +388,7 @@ export interface UnlockResponse {
   confidence_score: number | null;
   source_doc_count?: number;
   credits_remaining?: number;
+  credits_spent?: number;
 }
 
 export function unlockLead(assetId: string): Promise<UnlockResponse> {

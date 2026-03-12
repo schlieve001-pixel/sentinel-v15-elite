@@ -3765,9 +3765,11 @@ async def billing_status(request: Request):
         if not row:
             raise HTTPException(status_code=404, detail="User not found.")
         monthly_grant = get_monthly_credits(row["tier"])
+        # Use FIFO ledger balance (source of truth) not legacy users.credits_remaining
+        ledger_bal = _ledger_balance(conn, user["user_id"])
         return {
             "tier": row["tier"],
-            "credits_remaining": row["credits_remaining"],
+            "credits_remaining": ledger_bal,
             "monthly_grant": monthly_grant,
             "stripe_customer_id": row["stripe_customer_id"],
             "subscription_status": row["subscription_status"],
@@ -7006,13 +7008,48 @@ async def pdf_intake(
 
 @app.post("/api/lead/{asset_id}/court-filing")
 async def generate_court_filing(asset_id: str, request: Request):
-    """Generate ZIP containing Motion, Notice of Claim, and Affidavit for this lead.
+    """Generate court filing ZIP — Motion, Notice, Affidavit, Certificate, Exhibits.
 
-    Returns: ZIP file download (Content-Disposition: attachment).
+    Credit cost: 3 credits (CREDIT_COSTS['filing_pack']) — deducted atomically.
+    Admin users are exempt from credit deduction.
+    Returns 402 if insufficient credits.
     """
     from verifuse_v2.server.auth import get_current_user as _gcu
     user = _gcu(request)
+    user_id = user.get("user_id", "")
     import zipfile, io, textwrap
+
+    # ── 3-credit deduction (skip for admin) ─────────────────────────────
+    if not _effective_admin(user):
+        _cost = CREDIT_COSTS["filing_pack"]  # 3
+        _cf_conn = _get_conn()
+        try:
+            _cf_conn.execute("BEGIN IMMEDIATE")
+            _cf_debits = _fifo_spend(_cf_conn, user_id, _cost)
+            if not _cf_debits:
+                _cf_conn.execute("ROLLBACK")
+                _bal_conn = _get_conn()
+                try:
+                    _bal = _ledger_balance(_bal_conn, user_id)
+                finally:
+                    _bal_conn.close()
+                raise HTTPException(
+                    status_code=402,
+                    detail=f"Court Filing Packet requires {_cost} credits. You have {_bal} credit{'s' if _bal != 1 else ''}. Purchase a credit pack on the Pricing page.",
+                )
+            _audit_log(_cf_conn, user_id, "court_filing_debit", {"asset_id": asset_id, "credits_spent": _cost})
+            _cf_conn.execute("COMMIT")
+        except HTTPException:
+            raise
+        except Exception as _cfe:
+            log.error("court_filing credit deduct failed user=%s asset=%s: %s", user_id, asset_id, _cfe)
+            try:
+                _cf_conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise HTTPException(500, detail="Credit deduction failed. Please try again.")
+        finally:
+            _cf_conn.close()
 
     TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "court_filings"
 
@@ -7822,28 +7859,65 @@ async def county_outcomes(county: str = Query(None), request: Request = None):
 
 @app.get("/api/lead/{lead_id}/owner-contact")
 async def get_owner_contact(lead_id: str, request: Request):
-    """Get aggregated owner contact intel. Partner/Sovereign free; associate costs 1 credit."""
+    """Owner contact intel (assessor + mailing address).
+
+    Pricing:
+      - Enterprise (sovereign): 10 free per calendar month — tracked via audit_log
+      - Investigator/Partner: requires 1 skip_trace token (purchased for $29 via Stripe)
+      - Admin: always free
+    Skip trace tokens live in unlock_ledger_entries with source='skip_trace'.
+    """
     user = _require_user(request)
     tier = user.get("tier", "associate")
     user_id = user["user_id"]
-    _deduct = False
-    if tier == "associate" and not _effective_admin(user):
-        # Check credits
-        conn2 = _get_conn()
-        try:
-            creds = conn2.execute("SELECT credits_remaining FROM users WHERE user_id=?", [user_id]).fetchone()
-            if not creds or creds["credits_remaining"] < 1:
-                raise HTTPException(402, detail="Insufficient credits. Purchase a Skip Trace pack ($29) on the Pricing page.")
-            _deduct = True
-        finally:
-            conn2.close()
+    is_admin = _effective_admin(user)
+    now_ts = _epoch_now()
+    _skip_credit_id: str | None = None
+
+    if not is_admin:
+        if tier == "sovereign":
+            # Enterprise: 10 free skip traces per calendar month
+            _cnt_conn = _get_conn()
+            try:
+                st_count = _cnt_conn.execute(
+                    "SELECT COUNT(*) FROM audit_log WHERE user_id=? AND action='skip_trace_run' "
+                    "AND created_at >= date('now','start of month')",
+                    [user_id],
+                ).fetchone()[0]
+            finally:
+                _cnt_conn.close()
+            if st_count >= 10:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Skip trace monthly limit reached (10/month on Enterprise). Resets at the start of next month.",
+                )
+        else:
+            # Investigator / Partner: need a skip_trace token in the ledger
+            _tok_conn = _get_conn()
+            try:
+                credit_row = _tok_conn.execute(
+                    "SELECT id FROM unlock_ledger_entries "
+                    "WHERE user_id=? AND source='skip_trace' AND qty_remaining>0 "
+                    "AND (expires_ts IS NULL OR expires_ts > ?) "
+                    "ORDER BY purchased_ts ASC LIMIT 1",
+                    [user_id, now_ts],
+                ).fetchone()
+            finally:
+                _tok_conn.close()
+            if not credit_row:
+                raise HTTPException(
+                    status_code=402,
+                    detail="Skip trace requires a $29 purchase. Click 'SKIP TRACE — $29' to buy one skip trace credit.",
+                )
+            _skip_credit_id = credit_row["id"]
+
+    # Fetch contact data
     conn = _get_conn()
     try:
         row = conn.execute("SELECT * FROM leads WHERE id = ?", [lead_id]).fetchone()
         if not row:
             raise HTTPException(404, detail="Lead not found.")
         row = dict(row)
-        # Try owner_contact_json column first
         contact_json = row.get("owner_contact_json")
         if contact_json:
             try:
@@ -7853,40 +7927,41 @@ async def get_owner_contact(lead_id: str, request: Request):
         else:
             result = None
         if result is None:
-            # Fallback: build from available fields
             result = {
                 "mailing_address": row.get("property_address"),
                 "address_source": "property_record",
                 "address_confidence": "MEDIUM",
                 "forwarding_address": None,
                 "last_verified": row.get("updated_at", "")[:10] if row.get("updated_at") else None,
-                "note": "Enhanced owner contact available — purchase Skip Trace ($29) for multi-source cross-reference including forwarding address and phone lookup.",
+                "note": None,
             }
     finally:
         conn.close()
-    # Deduct credit for associate tier after successfully fetching data
-    if _deduct:
-        _cconn = _get_conn()
+
+    # Deduct / log usage AFTER successful data fetch
+    if not is_admin:
+        _log_conn = _get_conn()
         try:
-            _cconn.execute("BEGIN IMMEDIATE")
-            _cconn.execute(
-                "UPDATE users SET credits_remaining = credits_remaining - 1 WHERE user_id = ? AND credits_remaining > 0",
-                [user_id]
-            )
-            import uuid as _uid
-            _cconn.execute(
-                "INSERT INTO audit_log(id, user_id, action, meta_json, ip, created_at) VALUES(?,?,?,?,?,datetime('now'))",
-                [str(_uid.uuid4()), user_id, "skip_trace_credit_deduct", json.dumps({"lead_id": lead_id}), "system"]
-            )
-            _cconn.execute("COMMIT")
-        except Exception as _ce:
-            log.error("skip_trace credit deduct failed: %s", _ce)
+            _log_conn.execute("BEGIN IMMEDIATE")
+            if tier == "sovereign":
+                _audit_log(_log_conn, user_id, "skip_trace_run", {"lead_id": lead_id, "tier": "sovereign"})
+            else:
+                # Consume the skip_trace token
+                _log_conn.execute(
+                    "UPDATE unlock_ledger_entries SET qty_remaining = qty_remaining - 1 WHERE id = ? AND qty_remaining > 0",
+                    [_skip_credit_id],
+                )
+                _audit_log(_log_conn, user_id, "skip_trace_run", {"lead_id": lead_id, "tier": tier, "entry_id": _skip_credit_id})
+            _log_conn.execute("COMMIT")
+        except Exception as _le:
+            log.error("skip_trace log/deduct failed for user=%s: %s", user_id, _le)
             try:
-                _cconn.execute("ROLLBACK")
+                _log_conn.execute("ROLLBACK")
             except Exception:
                 pass
         finally:
-            _cconn.close()
+            _log_conn.close()
+
     return result
 
 

@@ -121,10 +121,10 @@ const FEATURE_MATRIX = [
   { feature: "Unclaimed Property",        associate: "—",     partner: "✓",     sovereign: "✓" },
   { feature: "Evidence documents",        associate: "✓",     partner: "✓",     sovereign: "✓" },
   { feature: "Deadline alert emails",     associate: "✓",     partner: "✓",     sovereign: "✓" },
-  { feature: "Court Filing Packet",       associate: "+$149", partner: "✓",     sovereign: "✓" },
+  { feature: "Court Filing Packet",       associate: "3 CR",  partner: "3 CR",  sovereign: "3 CR" },
   { feature: "Bulk CSV export",           associate: "—",     partner: "✓",     sovereign: "✓" },
   { feature: "Priority data updates",     associate: "—",     partner: "✓",     sovereign: "✓" },
-  { feature: "Skip Trace (per record)",   associate: "+$29",  partner: "+$29",  sovereign: "10/mo" },
+  { feature: "Skip Trace (per record)",   associate: "$29",   partner: "$29",   sovereign: "10/mo" },
   { feature: "Full REST API access",      associate: "—",     partner: "—",     sovereign: "✓" },
   { feature: "White-label dossiers",      associate: "—",     partner: "—",     sovereign: "✓" },
   { feature: "Heir notification letters", associate: "—",     partner: "—",     sovereign: "✓" },
@@ -140,14 +140,6 @@ const CREDIT_COSTS = [
     badgeColor: "#22c55e",
     description: "Full case details: owner name, mailing address, property address, case number, surplus math, and all evidence documents",
     value: "Everything you need to contact the owner and assess the case",
-  },
-  {
-    action: "Skip Trace",
-    credits: 1,
-    badge: "ADD-ON",
-    badgeColor: "#22c55e",
-    description: "Current mailing address + phone number from multi-source cross-reference. Required when owner has moved.",
-    value: "Replaces $150–$300 skip trace services",
   },
   {
     action: "Tax Lien Report",
@@ -495,9 +487,10 @@ export default function Pricing() {
         <div style={{ marginBottom: 60 }}>
           <div style={{ textAlign: "center", marginBottom: 28 }}>
             <div style={{ fontSize: "0.68em", letterSpacing: "0.15em", color: "#22c55e", marginBottom: 8 }}>THE CREDIT ECONOMY</div>
-            <h2 style={{ margin: "0 0 10px", fontSize: "1.3em", fontWeight: 700 }}>One credit, one case unlocked.</h2>
-            <p style={{ color: "#94a3b8", fontSize: "0.85em", maxWidth: 460, margin: "0 auto" }}>
-              Credits are the universal currency inside VeriFuse. No per-document fees. No hidden charges.
+            <h2 style={{ margin: "0 0 10px", fontSize: "1.3em", fontWeight: 700 }}>One credit, one action.</h2>
+            <p style={{ color: "#94a3b8", fontSize: "0.85em", maxWidth: 500, margin: "0 auto" }}>
+              Credits are the currency for lead unlocks and filing packets.
+              Skip Trace is a separate $29 add-on (Enterprise gets 10/month included).
               Credits roll over within your tier's window. Cancel anytime.
             </p>
           </div>

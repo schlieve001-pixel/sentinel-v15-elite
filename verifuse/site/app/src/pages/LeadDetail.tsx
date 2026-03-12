@@ -4,17 +4,29 @@ import { getLeadDetail, unlockLead, unlockRestrictedLead, downloadSecure, downlo
 import { useAuth } from "../lib/auth";
 import { toast } from "../components/Toast";
 
-function SkipTracePanel({ assetId, userTier }: { assetId: string; userTier: string }) {
+function SkipTracePanel({ assetId, userTier, autoRun }: { assetId: string; userTier: string; autoRun?: boolean }) {
   const [contact, setContact] = useState<Record<string, string | null> | null>(null);
   const [loading, setLoading] = useState(false);
   const [ran, setRan] = useState(false);
   const [buyLoading, setBuyLoading] = useState(false);
+  const [autoRunMsg, setAutoRunMsg] = useState("");
 
   const _apiBase = () => API_BASE;
   const _token = () => localStorage.getItem("vf_token") || "";
 
   // Enterprise users get 10 skip traces/month included
   const isEnterprise = userTier === "sovereign";
+
+  // Auto-run after returning from Stripe skip trace purchase (allow time for webhook)
+  useEffect(() => {
+    if (!autoRun || ran) return;
+    setAutoRunMsg("Processing payment — running skip trace...");
+    const t = setTimeout(async () => {
+      setAutoRunMsg("");
+      await runSkipTrace();
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [autoRun]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function runSkipTrace() {
     setLoading(true);
@@ -26,8 +38,14 @@ function SkipTracePanel({ assetId, userTier }: { assetId: string; userTier: stri
         const data = await res.json();
         setContact(data);
         setRan(true);
+      } else if (res.status === 402) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.detail || "Skip trace requires a $29 purchase.", "error");
+      } else if (res.status === 429) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.detail || "Monthly skip trace limit reached.", "error");
       } else {
-        toast("Contact data not yet available for this lead", "error");
+        toast("Contact data not yet available for this lead.", "error");
       }
     } catch { toast("Failed to fetch contact intel", "error"); }
     finally { setLoading(false); }
@@ -77,6 +95,10 @@ function SkipTracePanel({ assetId, userTier }: { assetId: string; userTier: stri
     );
   }
 
+  if (autoRunMsg) {
+    return <div style={{ fontSize: "0.75em", color: "#6b7280", fontStyle: "italic" }}>{autoRunMsg}</div>;
+  }
+
   if (isEnterprise) {
     return (
       <div>
@@ -85,10 +107,10 @@ function SkipTracePanel({ assetId, userTier }: { assetId: string; userTier: stri
           disabled={loading}
           style={{ background: loading ? "#1f2937" : "#14532d", border: "1px solid #22c55e", borderRadius: 4, color: "#4ade80", cursor: loading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
         >
-          {loading ? "RUNNING SKIP TRACE..." : "RUN SKIP TRACE (INCLUDED)"}
+          {loading ? "RUNNING..." : "RUN SKIP TRACE (INCLUDED)"}
         </button>
         <div style={{ marginTop: 4, fontSize: "0.7em", color: "#4b5563" }}>
-          Enterprise plan · 10 skip traces/month included · Multi-source owner address lookup
+          Enterprise · 10 skip traces/month included · Resets monthly
         </div>
       </div>
     );
@@ -101,10 +123,10 @@ function SkipTracePanel({ assetId, userTier }: { assetId: string; userTier: stri
         disabled={buyLoading}
         style={{ background: buyLoading ? "#1f2937" : "#1c1f2e", border: "1px solid #3b82f6", borderRadius: 4, color: "#93c5fd", cursor: buyLoading ? "default" : "pointer", fontSize: "0.78em", fontWeight: 700, fontFamily: "inherit", padding: "7px 16px" }}
       >
-        {buyLoading ? "REDIRECTING..." : "SKIP TRACE — $29"}
+        {buyLoading ? "REDIRECTING TO CHECKOUT..." : "SKIP TRACE — $29"}
       </button>
       <div style={{ marginTop: 6, fontSize: "0.68em", color: "#4b5563" }}>
-        One-time purchase · Result appears on this page after payment ·{" "}
+        $29 one-time · Result appears here after payment ·{" "}
         <a href="/pricing" style={{ color: "#a78bfa", textDecoration: "none" }}>Enterprise includes 10/month →</a>
       </div>
     </div>
@@ -154,6 +176,9 @@ export default function LeadDetail() {
 
   // C6: Evidence preview (visible regardless of lock status)
   const [evidencePreview, setEvidencePreview] = useState<any[]>([]);
+
+  // Court filing loading
+  const [filingLoading, setFilingLoading] = useState(false);
 
   // Case timeline (2C)
   const [showTimeline, setShowTimeline] = useState(false);
@@ -282,11 +307,12 @@ export default function LeadDetail() {
     try {
       const res = await unlockLead(assetId);
       setUnlocked(res);
+      const spent = res.credits_spent ?? 1;
       const remaining = res.credits_remaining;
       toast(
         remaining != null
-          ? `Lead unlocked — intel available (${remaining} credits remaining)`
-          : "Lead unlocked — intel is now available (1 credit used)",
+          ? `Lead unlocked · ${spent} credit${spent !== 1 ? "s" : ""} used · ${remaining} remaining`
+          : "Lead unlocked — intel is now available",
         "success"
       );
     } catch (err) {
@@ -678,11 +704,21 @@ export default function LeadDetail() {
                       );
                     })()}
                     <button
-                      style={{ background: "#1c0a0022", border: "1px solid #f59e0b66", color: "#f59e0b", borderRadius: 6, padding: "9px 14px", fontSize: "0.78em", fontWeight: 700, letterSpacing: "0.06em", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
-                      title="Court Filing Packet — Motion for Surplus Release + Notice to Lienholders + Affidavit + Proof of Claim (3 credits)"
-                      onClick={() => downloadSecure(`/api/lead/${lead.asset_id}/court-filing`, `court_filing_${lead.asset_id}.zip`)}
+                      style={{ background: filingLoading ? "#1f2937" : "#1c0a0022", border: "1px solid #f59e0b66", color: filingLoading ? "#6b7280" : "#f59e0b", borderRadius: 6, padding: "9px 14px", fontSize: "0.78em", fontWeight: 700, letterSpacing: "0.06em", cursor: filingLoading ? "not-allowed" : "pointer", fontFamily: "inherit", textAlign: "left", opacity: filingLoading ? 0.6 : 1 }}
+                      title="Court Filing Packet — 3 credits · Motion + Notice + Affidavit + Certificate + Exhibits"
+                      disabled={filingLoading}
+                      onClick={async () => {
+                        setFilingLoading(true);
+                        try {
+                          await downloadSecure(`/api/lead/${lead.asset_id}/court-filing`, `court_filing_${lead.asset_id}.zip`);
+                        } catch (err) {
+                          toast(err instanceof ApiError ? err.message : "Court filing failed", "error");
+                        } finally {
+                          setFilingLoading(false);
+                        }
+                      }}
                     >
-                      COURT FILING PACKET (3 CR) ↓
+                      {filingLoading ? "GENERATING..." : "COURT FILING PACKET (3 CR) ↓"}
                     </button>
                     {(user?.bar_number || user?.is_admin) && (
                       <button
@@ -898,7 +934,7 @@ export default function LeadDetail() {
               {/* Owner Contact Intel — Skip Trace */}
               <div style={{ borderTop: "1px solid #1f2937", paddingTop: 14, marginTop: 4 }}>
                 <div style={{ fontSize: "0.62em", letterSpacing: "0.12em", color: "#6ee7b7", marginBottom: 10 }}>OWNER CONTACT INTEL — SKIP TRACE</div>
-                {assetId && <SkipTracePanel assetId={assetId} userTier={user?.tier ?? ""} />}</div>
+                {assetId && <SkipTracePanel assetId={assetId} userTier={user?.tier ?? ""} autoRun={new URLSearchParams(location.search).get("ran") === "1"} />}</div>
             </div>
           )}
 
