@@ -7161,7 +7161,10 @@ def _run_ops_job(job_id: str, vf_args: list[str]) -> None:
             cwd=proj_root,
             env={**os.environ,
                  "VERIFUSE_DB_PATH": VERIFUSE_DB_PATH,
-                 "PATH": "/usr/bin:/bin:/usr/local/bin:" + os.environ.get("PATH", "")},
+                 # Ensure venv python comes first, then system utils
+                 "PATH": str(Path(proj_root) / ".venv" / "bin") + ":/usr/bin:/bin:/usr/local/bin:" + os.environ.get("PATH", ""),
+                 # Ensure project root is in Python path for module imports
+                 "PYTHONPATH": proj_root + ":" + os.environ.get("PYTHONPATH", "")},
         )
 
         def _stream():
