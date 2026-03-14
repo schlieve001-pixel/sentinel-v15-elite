@@ -71,3 +71,21 @@ renaissance_lab/
 2-16-26 audirt of surplus
 =1.1.0
 start-api.sh
+
+# Service account credentials / any credential files at root
+claude
+*_sa.json
+*-sa.json
+*credentials*.json
+
+# Internal memory / session notes
+memory/
+
+# Stale deploy / setup scripts (superseded by bin/vf + systemd)
+bridge.py
+deploy_full_system.sh
+deploy_sprint_11.sh
+ignition.sh
+setup_engine4.sh
+backend.log
+frontend.log
