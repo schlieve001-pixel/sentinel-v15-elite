@@ -92,8 +92,10 @@ _IS_DEV = os.environ.get("VERIFUSE_ENV", "production").lower() == "development"
 # ── Pricing & entitlements (canonical source) ─────────────────────────
 from verifuse_v2.server.pricing import (
     CREDIT_COSTS,
+    FIRST_MONTH_BONUS,
     FOUNDERS_MAX_SLOTS,
     INVESTIGATION_PACK,
+    SIGNUP_BONUS_CREDITS,
     STARTER_PACK,
     build_price_map,
     get_monthly_credits,
@@ -2956,11 +2958,29 @@ async def api_register(request: Request):
         bar_number=bar_number,
         tier="recon",
     )
-    # Founders cap check — grant 5 bonus credits if founding slot claimed
+    # Universal signup bonus — 3 free credits for every new account (no card required)
+    import uuid as _uuid_m
+    import time as _time_m
+    _signup_expires = int(_time_m.time()) + 90 * 86400  # 90-day expiry
+    _sc = _get_conn()
+    try:
+        _sc.execute(
+            "INSERT OR IGNORE INTO unlock_ledger_entries "
+            "(id, user_id, source, qty_total, qty_remaining, purchased_ts, expires_ts) "
+            "VALUES (?, ?, 'signup_bonus', ?, ?, ?, ?)",
+            [str(_uuid_m.uuid4()), user["user_id"], SIGNUP_BONUS_CREDITS, SIGNUP_BONUS_CREDITS,
+             int(_time_m.time()), _signup_expires],
+        )
+        _sc.commit()
+        log.info("Signup bonus credited: user=%s credits=%d", user["user_id"], SIGNUP_BONUS_CREDITS)
+    except Exception as _e:
+        log.warning("Signup bonus grant failed: %s", _e)
+    finally:
+        _sc.close()
+
+    # Founders cap check — grant 5 additional bonus credits if founding slot claimed
     is_founder = _try_founders_redemption(user["user_id"])
     if is_founder:
-        import uuid as _uuid_m
-        import time as _time_m
         _bonus = 5
         _expires = int(_time_m.time()) + 365 * 86400  # 1 year
         _c = _get_conn()
@@ -2970,10 +2990,6 @@ async def api_register(request: Request):
                 "(id, user_id, source, qty_total, qty_remaining, purchased_ts, expires_ts) "
                 "VALUES (?, ?, 'founders_bonus', ?, ?, ?, ?)",
                 [str(_uuid_m.uuid4()), user["user_id"], _bonus, _bonus, int(_time_m.time()), _expires],
-            )
-            _c.execute(
-                "UPDATE users SET credits_remaining = COALESCE(credits_remaining, 0) + ? WHERE user_id = ?",
-                [_bonus, user["user_id"]],
             )
             _c.commit()
             log.info("Founders bonus credited: user=%s credits=%d", user["user_id"], _bonus)
@@ -4267,7 +4283,9 @@ def _handle_invoice_payment(invoice: dict) -> None:
                     rollover += s["qty_remaining"]
                     rollover_entries.append(s["id"])
 
-            total_credits = monthly + rollover
+            # First-month welcome bonus (subscription_create only)
+            welcome_bonus = FIRST_MONTH_BONUS.get(new_tier, 0) if billing_reason == "subscription_create" else 0
+            total_credits = monthly + rollover + welcome_bonus
 
             # INSERT subscription ledger entry (idempotent via stripe_event_id)
             try:
@@ -4302,10 +4320,10 @@ def _handle_invoice_payment(invoice: dict) -> None:
             )
             _audit_log(conn, user_id, "subscription_credits_granted", {
                 "tier": new_tier, "credits": monthly, "rollover": rollover,
-                "total": total_credits, "reason": billing_reason,
+                "welcome_bonus": welcome_bonus, "total": total_credits, "reason": billing_reason,
             })
-            log.info("Credits granted: user=%s tier=%s monthly=%d rollover=%d total=%d reason=%s",
-                     user_id, new_tier, monthly, rollover, total_credits, billing_reason)
+            log.info("Credits granted: user=%s tier=%s monthly=%d rollover=%d welcome_bonus=%d total=%d reason=%s",
+                     user_id, new_tier, monthly, rollover, welcome_bonus, total_credits, billing_reason)
         else:
             log.debug("Invoice: unhandled billing_reason=%s for user %s", billing_reason, user_id)
 

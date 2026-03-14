@@ -11,9 +11,11 @@ const TIERS = [
     name: "Investigator",
     price: 199,
     credits: 30,
+    firstMonthCredits: 40,
+    firstMonthBonus: 10,
     rollover: "30-day rollover (max 45 banked)",
     features: [
-      "30 unlocks/month",
+      "30 unlocks/month (40 your first month)",
       "Foreclosure surplus (§ 38-38-111)",
       "Tax Deed surplus (§ 39-12-111)",
       "GOLD/SILVER/BRONZE grades",
@@ -30,9 +32,11 @@ const TIERS = [
     name: "Partner",
     price: 399,
     credits: 75,
+    firstMonthCredits: 100,
+    firstMonthBonus: 25,
     rollover: "60-day rollover (max 113 banked)",
     features: [
-      "75 unlocks/month",
+      "75 unlocks/month (100 your first month)",
       "All 4 surplus streams",
       "Foreclosure · Tax Deed · Tax Lien · Unclaimed Property",
       "Court Filing Packet (3 credits/case)",
@@ -48,9 +52,11 @@ const TIERS = [
     name: "Enterprise",
     price: 899,
     credits: 200,
+    firstMonthCredits: 250,
+    firstMonthBonus: 50,
     rollover: "90-day rollover (max 300 banked)",
     features: [
-      "200 unlocks/month",
+      "200 unlocks/month (250 your first month)",
       "All 4 surplus streams + estate cases",
       "Full REST API access",
       "White-label dossier exports",
@@ -70,7 +76,7 @@ const ONE_TIME = [
     price: 49,
     credits: 10,
     expiry: "90 days",
-    description: "10 lead unlocks — no subscription required. Ideal for a single investigation or trial run.",
+    description: "10 lead unlocks — no subscription required. Ideal for a focused investigation before committing to a plan.",
     endpoint: "/api/billing/starter",
   },
   {
@@ -274,10 +280,11 @@ function FoundingAttorneySection() {
       {/* Perks list */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 24px", marginBottom: 20 }}>
         {[
-          '"Founding Attorney" badge locked to your account',
-          "5 bonus credits on signup",
+          '"Founding Attorney" badge locked to your account — forever',
+          "First month loaded: 40/100/250 credits (10/25/50 bonus on top of standard)",
+          "+ 5 founding bonus credits at registration (no card needed)",
           "Price locked for lifetime of membership — never increases",
-          "Priority access to new county coverage",
+          "Priority access to new county coverage as we expand statewide",
         ].map(p => (
           <div key={p} style={{ fontSize: "0.78em", display: "flex", gap: 6 }}>
             <span style={{ color: "#f59e0b" }}>✓</span>
@@ -405,7 +412,7 @@ export default function Pricing() {
               <Link to="/register" style={{
                 color: "#0a0f1a", background: "#22c55e", textDecoration: "none",
                 fontSize: "0.85em", padding: "7px 16px", borderRadius: 4, fontWeight: 700,
-              }}>START TRIAL</Link>
+              }}>3 LEADS FREE →</Link>
             </>
           )}
         </div>
@@ -503,8 +510,14 @@ export default function Pricing() {
                   </>
                 )}
               </div>
-              <div style={{ fontSize: "0.8em", color: "#22c55e", marginBottom: 20 }}>
+              <div style={{ fontSize: "0.8em", color: "#22c55e", marginBottom: 6 }}>
                 {tier.credits} credits/month · {tier.rollover}
+              </div>
+              <div style={{
+                display: "inline-block", background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.25)",
+                borderRadius: 4, padding: "3px 9px", fontSize: "0.72em", color: "#86efac", marginBottom: 18, fontWeight: 600,
+              }}>
+                🎁 First month: {(tier as any).firstMonthCredits} credits (+{(tier as any).firstMonthBonus} welcome bonus)
               </div>
               <ul style={{ margin: "0 0 24px", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
                 {tier.features.map((f) => (

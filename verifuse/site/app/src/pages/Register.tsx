@@ -59,7 +59,7 @@ export default function Register() {
           </Link>
           <span className="security-badge">NEW ACCOUNT</span>
           <h2>Create Your Account</h2>
-          <p className="auth-sub">Sign up today and receive 5 bonus credits to get started.</p>
+          <p className="auth-sub">3 free credits on signup — unlock 3 real leads, see the actual data. No card required.</p>
         </div>
 
         {error && (

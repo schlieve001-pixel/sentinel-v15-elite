@@ -264,7 +264,7 @@ export default function Landing() {
             borderRadius: 6, textDecoration: "none", fontSize: "0.78em", fontWeight: 700,
             letterSpacing: "0.06em",
           }}>
-            START FREE TRIAL →
+            3 LEADS FREE — NO CARD →
           </Link>
         </div>
       </div>
@@ -740,7 +740,8 @@ export default function Landing() {
             </div>
             <h2 style={{ margin: "0 0 14px", fontSize: "1.7em" }}>Lock in current pricing. Forever.</h2>
             <p style={{ color: "#94a3b8", fontSize: "0.9em", maxWidth: 540, margin: "0 auto 28px", lineHeight: 1.7 }}>
-              First 10 attorneys lock in $199/$399/$899 pricing permanently + receive <strong style={{ color: "#f59e0b" }}>5 bonus credits</strong> on signup.
+              First 10 attorneys lock in $199/$399/$899 pricing permanently. Your first month comes loaded:
+              <strong style={{ color: "#f59e0b" }}> 40 / 100 / 250 credits</strong> (vs. 30/75/200 standard) — plus <strong style={{ color: "#f59e0b" }}>5 founding bonus credits</strong> on top.
               After founding cohort fills, standard pricing of $299/$599/$1,199/mo applies — founding members save
               <strong style={{ color: "#f59e0b" }}> $1,200–$3,600/year forever</strong>.
             </p>

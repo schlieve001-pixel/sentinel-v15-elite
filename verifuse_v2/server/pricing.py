@@ -105,7 +105,28 @@ ADD_ON_CASH_PRICES: dict[str, int] = {
 }
 
 FOUNDERS_MAX_SLOTS: int = 100
-FOUNDERS_FREE_TRIAL_SLOTS: int = 10   # First 10 get 3-month Partner free trial
+FOUNDERS_BONUS_SLOTS: int = 10   # First 10 get locked founding pricing + 5 extra credits
+
+# ── Signup & welcome bonuses ──────────────────────────────────────────
+#
+# Every new registration gets SIGNUP_BONUS_CREDITS free (no card required).
+# On first subscription payment, users get FIRST_MONTH_BONUS[tier] extra credits
+# stacked on top of their normal monthly allocation.
+#
+# First-month totals:
+#   Investigator: 30 + 10 = 40 credits
+#   Partner:      75 + 25 = 100 credits
+#   Enterprise:  200 + 50 = 250 credits
+#
+# Founding attorneys (first 10): +5 additional on top of the above.
+
+SIGNUP_BONUS_CREDITS: int = 3   # Free credits on registration — no card required
+
+FIRST_MONTH_BONUS: dict[str, int] = {
+    "associate": 10,   # First month: 30 + 10 = 40 credits
+    "partner":   25,   # First month: 75 + 25 = 100 credits
+    "sovereign": 50,   # First month: 200 + 50 = 250 credits
+}
 
 ROLES: list[str] = ["public", "pending", "approved_attorney", "admin"]
 
